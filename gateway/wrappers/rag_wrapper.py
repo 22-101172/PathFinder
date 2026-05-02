@@ -1,75 +1,75 @@
-"""
-wrappers/rag_wrapper.py  [T06 — Person B]
-──────────────────────────────────────────
-Responsibility:
-  Accept a natural-language sub-query, call the RAG pipeline,
-  and return { answer: str, citations: list }.
-
-Rules (from blueprint Section 5.7):
-  ✓ Accept sub_query string + optional student_context
-  ✓ Call existing RAG pipeline
-  ✓ Return { answer: str, citations: list[Citation] }
-  ✗ Must NOT perform reasoning or routing
-  ✗ Treat RAG pipeline as a black box — only care about the output contract
-
-Done when:
-  - Handbook query returns answer + at least one citation
-  - Off-topic query returns fallback message (not an exception)
-"""
-
+import logging
+import sys
 import os
-import httpx
-from typing import Optional
+from typing import Dict, Any, Optional
 
-from models.schemas import RAGResult, Citation, StudentContext
+# Ensure the rag directory is in sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+rag_path = os.path.abspath(os.path.join(current_dir, "..", "..", "rag"))
+if rag_path not in sys.path:
+      sys.path.append(rag_path)
 
+from retriever import get_retriever
+
+logger = logging.getLogger(__name__)
 
 class RAGWrapper:
-    """
-    Thin adapter between the Orchestrator and the existing RAG pipeline.
+      def __init__(self):
+                try:
+                              self.retriever = get_retriever()
+                              logger.info("RAGWrapper initialized.")
+except Exception as e:
+            logger.error(f"RAGWrapper failed to initialize: {e}")
+            self.retriever = None
 
-    The RAG pipeline is treated as a black box HTTP service.
-    If you prefer direct Python import, change _call_pipeline() accordingly.
-    """
+    def execute(self, sub_query: str, student_context: Optional[Any] = None) -> Dict[str, Any]:
+              if not sub_query or sub_query.strip() == "":
+                            return {"answer": "Not found in handbook.", "citations": []}
 
-    def __init__(self):
-        self._rag_url = os.environ.get("RAG_ENGINE_URL", "http://rag-engine:8002")
+              if not self.retriever:
+                            return {"answer": "RAG Engine unavailable.", "citations": []}
 
-    def query(
-        self,
-        sub_query: str,
-        student_context: Optional[StudentContext] = None,
-    ) -> RAGResult:
-        """
-        Send sub_query to RAG pipeline. Return answer + citations.
-        Never raises — returns a fallback RAGResult on any error.
-        """
-        # TODO: implement
-        # Steps:
-        #   1. Build request payload: { "query": sub_query }
-        #      Optionally include student track for context-aware retrieval
-        #   2. Call _call_pipeline(payload)
-        #   3. Parse response into RAGResult
-        #   4. On any error → return RAGResult(answer="I could not find relevant information in the handbook.", citations=[])
-        raise NotImplementedError
+              try:
+                            docs = self.retriever.retrieve(sub_query, k_vec=20, k_bm25=15, k_final=6)
 
-    def _call_pipeline(self, payload: dict) -> dict:
-        """
-        HTTP POST to the RAG engine service.
-        Returns raw response dict.
+            citations = [
+                              {
+                                                    "source": "Handbook",
+                                                    "page": d.metadata.get("page"),
+                                                    "text": d.page_content
+                              }
+                              for d in docs
+            ]
 
-        If using direct Python import instead of HTTP, replace this method body.
-        """
-        # TODO: implement
-        # response = httpx.post(f"{self._rag_url}/query", json=payload, timeout=30)
-        # response.raise_for_status()
-        # return response.json()
-        raise NotImplementedError
+            if not docs:
+                              return {"answer": "Not found.", "citations": []}
 
-    def _parse_citations(self, raw_citations: list) -> list[Citation]:
-        """
-        Normalize whatever citation format the RAG pipeline returns
-        into a list[Citation] matching the data contract.
-        """
-        # TODO: implement
-        raise NotImplementedError
+            context_text = "\n\n---\n\n".join(d.page_content for d in docs)
+
+            colab_url = os.getenv("COLAB_LLM_URL")
+            if not colab_url:
+                              return {"answer": "LLM endpoint not set.", "citations": citations}
+
+            strict_question = f"HANDBOOK EXCERPT:\n{context_text}\n\nSTUDENT QUESTION: {sub_query}\n\nSTRICT RULES: Answer concisely."
+
+            payload = {
+                              "system": "Academic advisor.",
+                              "question": strict_question
+            }
+
+            import requests
+            endpoint = f"{colab_url.rstrip('/')}/generate" if "modal.run" not in colab_url else colab_url
+
+            response = requests.post(
+                              endpoint,
+                              json=payload,
+                              headers={"Bypass-Tunnel-Reminder": "true"},
+                              timeout=120
+            )
+            response.raise_for_status()
+            answer = response.json().get("answer", "No answer.")
+
+            return {"answer": answer, "citations": citations}
+
+except Exception as e:
+            return {"answer": f"Error: {str(e)}", "citations": []}

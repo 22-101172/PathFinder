@@ -1,473 +1,713 @@
-# PathFinder — Integration Phase: Implementation Notes
+# PathFinder
 
-> **Purpose:** This document records every implementation decision made during the Integration Phase. Share it with any AI model that needs to understand what has been built, how it works, and what remains.
+PathFinder is an academic and career advising backend for EUI/CIS-style student support. The idea is to answer student questions by combining:
 
----
+- a Knowledge Graph backed by Neo4j for structured academic and career reasoning
+- a Retrieval-Augmented Generation pipeline over the CIS handbook for policy questions
+- a FastAPI gateway that is meant to unify both behind one `POST /query` API
 
-## 1. System Overview
+This README is intentionally written as an AI handoff document. It describes the codebase as it exists now, including what is implemented, what is still scaffolded, and where the current code has drifted from the older architecture notes.
 
-PathFinder is an AI-powered academic and career advising system for EUI students. The Integration Phase wires two pre-built engines — a Neo4j Knowledge Graph (KG) and a RAG handbook-retrieval pipeline — behind a single FastAPI gateway.
+## Current Status
 
-A student sends a plain-English question. The gateway:
-1. Loads their academic context
-2. Classifies the query
-3. Routes it to the right engine(s)
-4. Returns a natural-language answer
+The repository is partially implemented.
 
-**One endpoint: `POST /query`** handles all 6 workflow types.
+What works today:
 
----
+- `gateway/student_context_provider.py` is implemented
+- `gateway/session_manager.py` is implemented
+- `gateway/adapters/kg_adapter.py` is implemented
+- the Neo4j client and KG query layer are wired for direct in-process use
+- `gateway/main.py` and the FastAPI app exist
+- `GET /health` works
+- acceptance tests for T02/T03 exist in `gateway/tests/test_t02_t03.py`
 
-## 2. Repository Layout
+What is still not implemented:
 
-```
+- `gateway/query_understanding.py`
+- `gateway/orchestrator.py`
+- `gateway/response_composer.py`
+
+What is important to understand:
+
+- the gateway route `POST /query` exists, but the full end-to-end query pipeline does not currently work because the three components above still raise `NotImplementedError`
+- the repository still contains older documentation assumptions about HTTP-based `kg-engine` and `rag-engine`, but the current `gateway` code no longer fully matches those assumptions
+- the current `RAGAdapter` imports the local `engines/rag/` code directly instead of calling a separate RAG HTTP service
+
+## Repository Layout
+
+```text
 pathfinder/
-├── docker-compose.yml           # gateway:8000, kg-engine:8001, rag-engine:8002, neo4j:7687
-├── .env.example                 # NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, RAG_ENGINE_URL
-├── IMPLEMENTATION_NOTES.md      # ← this file
-├── README.md                    # project overview and quick-start
-├── gateway/
-│   ├── main.py                  # ✅ T04 — FastAPI app, wired 4-phase /query pipeline
-│   ├── student_context_provider.py  # ✅ T02 — loads student_profile.json → StudentContext
-│   ├── session_manager.py           # ✅ T03 — in-memory sessions, apply overrides, build effective_context
-│   ├── query_understanding.py       # 🔧 T07 — scaffolded, rule-based + LLM classifier (pending)
-│   ├── orchestrator.py              # 🔧 T08 — scaffolded, W1–W6 workflow selector (pending)
-│   ├── response_composer.py         # ❌ T09 — not started, LLM presenter (pending)
-│   ├── conftest.py                  # adds gateway/ to sys.path for pytest
-│   ├── requirements.txt             # fastapi, pydantic, httpx, neo4j, python-dotenv, uvicorn
-│   ├── models/
-│   │   └── schemas.py               # ✅ all Pydantic v2 contracts
-│   ├── data/
-│   │   ├── student_profile.json     # ✅ single student record (Seif Elislam, S_000123)
-│   │   ├── kg_engine_reference.py   # API reference for KGEngine (documentation only)
-│   │   ├── INSTITUTIONAL_KG_COMPONENT_DOCUMENTATION.md
-│   │   └── RAG_DOCUMENTATION.md
-│   ├── wrappers/
-│   │   ├── __init__.py              # exports KGWrapper, RAGWrapper
-│   │   ├── kg_wrapper.py            # ✅ T05 — dispatches all 15 KG operations
-│   │   ├── neo4j_client.py          # ✅ T05 — Neo4j driver wrapper (copied from KG-Engine)
-│   │   ├── kg_queries.py            # ✅ T05 — all 15 Cypher query functions (copied from KG-Engine)
-│   │   └── rag_wrapper.py           # ❌ T06 — not started, HTTP POST to rag-engine:8002
-│   └── tests/
-│       ├── __init__.py
-│       └── test_t02_t03.py          # ✅ 12 acceptance tests (12/12 passing)
-├── kg_engine/
-│   └── Dockerfile                   # Neo4j-backed KG service (source lives in KG-Engine/)
-├── rag_engine/
-│   └── Dockerfile                   # RAG pipeline HTTP service
-└── ui/
-    └── Dockerfile                   # Chat frontend (pending)
+|- .env.example
+|- docker-compose.yml
+|- README.md
+|- gateway/
+|  |- main.py
+|  |- query_understanding.py
+|  |- orchestrator.py
+|  |- response_composer.py
+|  |- session_manager.py
+|  |- student_context_provider.py
+|  |- requirements.txt
+|  |- conftest.py
+|  |- models/
+|  |  |- schemas.py
+|  |- tests/
+|  |  |- test_t02_t03.py
+|  |- adapters/
+|     |- kg_adapter.py
+|     |- rag_adapter.py
+|- engines/
+|  |- kg/
+|  |  |- kg_engine.py
+|  |  |- neo4j_client.py
+|  |  |- queries.py
+|  |  |- cypher/
+|  |  |- data/
+|  |- rag/
+|     |- ingest.py
+|     |- retriever.py
+|- data/
+|  |- student_profile.json
+|  |- handbook/
+|- ui/
+|  |- Dockerfile
 ```
 
-> **KG-Engine source location:** `MVP Phase/PathFinder KG-Engine/src/` — contains `kg_engine.py`, `neo4j_client.py`, `queries.py`. The gateway copies `neo4j_client.py` and `queries.py` directly into `gateway/wrappers/` so it can call them in-process without HTTP overhead.
+## High-Level Architecture
 
----
+The intended architecture is:
 
-## 3. Data Contracts (`models/schemas.py`) — Pydantic v2
+1. UI sends a student query to `POST /query`
+2. gateway loads student context and session state
+3. query understanding classifies the request
+4. orchestrator calls KG, RAG, or both
+5. response composer turns structured results into final natural language
 
-All components share these schemas. **Do not add business logic here.**
+The actual code state today is:
+
+1. `gateway/main.py` creates all gateway components at import time
+2. `StudentContextProvider` works
+3. `SessionManager` works
+4. `QueryUnderstandingLayer.classify()` is still unimplemented
+5. `Orchestrator.run()` is still unimplemented
+6. `ResponseComposer.compose()` is still unimplemented
+7. `KGAdapter` is callable
+8. `RAGAdapter` exists, but it follows a different design from the old docs
+
+## Gateway API
+
+### Health endpoint
+
+`GET /health`
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "service": "pathfinder-gateway"
+}
+```
+
+### Main endpoint
+
+`POST /query`
+
+Request schema:
+
+```json
+{
+  "session_id": "optional existing session id",
+  "user_text": "What skills am I missing for Data Scientist?",
+  "active_student_id": "S_000123"
+}
+```
+
+Response schema:
+
+```json
+{
+  "session_id": "sess_xxxxxxxx",
+  "answer_text": "final natural-language answer",
+  "citations": [
+    {
+      "source": "Handbook",
+      "page": 12
+    }
+  ],
+  "status": "ok"
+}
+```
+
+Important current behavior:
+
+- if the student ID is missing, `main.py` returns HTTP 404
+- if query understanding is reached, the current implementation returns HTTP 503 because `QueryUnderstandingLayer` is unfinished
+- even if query understanding were implemented, orchestration and response composition would still currently return HTTP 503 for the same reason
+
+## Runtime Flow in `gateway/main.py`
+
+`gateway/main.py` is the real entry point for the backend.
+
+It instantiates these singletons at module import time:
+
+- `student_provider = StudentContextProvider()`
+- `kg_wrapper = KGAdapter()`
+- `rag_wrapper = RAGAdapter()`
+- `session_manager = SessionManager(student_provider)`
+- `qu_layer = QueryUnderstandingLayer()`
+- `orchestrator = Orchestrator(kg_wrapper, rag_wrapper)`
+- `composer = ResponseComposer()`
+
+The request pipeline in `handle_query()` is:
+
+1. create or restore a session
+2. load the base student context
+3. build an effective context using session overrides
+4. classify the raw user text
+5. apply any overrides detected by the QU layer
+6. orchestrate engine calls
+7. compose the final user-facing answer
+8. persist the last referenced entities and increment turn count
+
+The FastAPI lifespan hook closes the Neo4j client via `kg_wrapper.close()` on shutdown.
+
+## Data Contracts
+
+The canonical Pydantic models live in `gateway/models/schemas.py`.
+
+Key models:
+
+- `QueryRequest`
+- `QueryResponse`
+- `Citation`
+- `EntitySet`
+- `SessionOverrides`
+- `StructuredQuery`
+- `CourseRecord`
+- `StudentContext`
+- `LastReferenced`
+- `SessionState` (external contract model, not the internal dataclass)
+- `RAGResult`
+- `ResultPackage`
+
+Important design rules already encoded in the schema layer:
+
+- list fields use `Field(default_factory=list)`
+- `CourseRecord` is frozen with `ConfigDict(frozen=True)`
+- `StudentContext` is the central student object passed through the pipeline
+- `planned_courses` is reserved for hypothetical session-time overrides
+
+There is also a global handbook constant:
 
 ```python
-_GRADUATION_CREDIT_HOURS = 133  # CIS Handbook constant
-
-class QueryRequest:       # UI → Gateway POST body
-    session_id: Optional[str]    # None = new session
-    user_text: str
-    active_student_id: str       # e.g. "S_000123"
-
-class QueryResponse:      # Gateway → UI
-    session_id: str
-    answer_text: str
-    citations: list[Citation]
-    status: str            # "ok" | "error" | "clarification_needed"
-
-class CourseRecord:        # ConfigDict(frozen=True) — transcript records are immutable
-    course_code, course_name, credit_hours, grade, grade_points, semester_taken
-    status: Literal["passed", "failed", "in_progress"]
-
-class StudentContext:      # Full student object flowing through the system
-    # Stored: student_id, name, track_id, level, current_semester, cgpa,
-    #         academic_standing, total_credit_hours_earned
-    # Computed: credit_hours_remaining, max_credit_hours_allowed, course_history,
-    #           completed_courses, failed_courses, in_progress_courses
-    # Override: planned_courses  ← always [] from provider; Session Manager fills per turn
-
-class EntitySet:           # Entities extracted by QU Layer
-    course_code, role_id, track_id, skill_id: Optional[str]
-
-class SessionOverrides:    # Detected by QU Layer — applied by Session Manager only
-    added_courses: list[str]
-    target_role: Optional[str]
-
-class StructuredQuery:     # Output of QU Layer → consumed by Orchestrator
-    intent: str            # e.g. "get_prerequisites", "skill_gap_analysis"
-    engine_pattern: str    # "kg" | "rag" | "mixed"
-    query_type: str        # "student_aware" | "non_student_aware"
-    entities: EntitySet
-    needs_clarification: bool
-    clarification_prompt: Optional[str]
-    session_overrides: SessionOverrides
-
-class ResultPackage:       # Orchestrator → ResponseComposer
-    original_query: str
-    engine_pattern: str
-    kg_result: Optional[dict]
-    rag_result: Optional[RAGResult]
-    student_context: Optional[StudentContext]
-    status: str            # "ok" | "error" | "clarification_needed"
-    error_detail: Optional[str]
-
-class RAGResult:
-    answer: Optional[str]
-    citations: list[Citation]
+_GRADUATION_CREDIT_HOURS = 133
 ```
 
-**Critical Pydantic v2 rules applied throughout:**
-- All list fields use `Field(default_factory=list)` — never `= []` (shared mutable default bug)
-- Frozen models use `ConfigDict(frozen=True)`
-- Copies use `model_copy(update={...})` — never in-place mutation
+That constant is used to compute `StudentContext.credit_hours_remaining`.
 
----
+## Student Context Provider
 
-## 4. `StudentContextProvider` (T02) — ✅ Complete
+File: `gateway/student_context_provider.py`
 
-**File:** `gateway/student_context_provider.py`
+Status: implemented
 
-Loads `student_profile.json` and returns a `StudentContext` object with derived fields computed.
+Responsibilities:
 
-### Key design decisions
+- load the student record from JSON
+- validate and normalize it into `StudentContext`
+- derive `completed_courses`, `failed_courses`, and `in_progress_courses`
+- compute remaining credit hours
+- compute max semester credit limit from CGPA
+- cache loaded students in memory
 
-| Decision | Implementation |
-|---|---|
-| All file I/O in one method | `_load_record()` — single swap point for database migration |
-| Keyword-only args | `_build_context(*, raw, ...)` — 8 params, prevents silent positional bug |
-| Partial history = None | `_parse_course_history()` returns `None` if any entry fails — partial data corrupts KG gap calculations |
-| Caching | `self._cache: dict[str, StudentContext]` — second call returns same Python object (`is`) |
-| Data path | `STUDENT_DATA_PATH` env var or `<script_dir>/data/student_profile.json` |
+Behavior details:
 
-### Derived fields computed at load time
+- data source is `data/student_profile.json` by default
+- this can be overridden with `STUDENT_DATA_PATH`
+- `get_student(student_id)` returns `None` instead of raising on failure
+- course history parsing is all-or-nothing: one bad row causes the whole student load to fail
+- loaded student contexts are cached by `student_id`
 
-```python
-# Course buckets (from course_history[].status)
-completed_courses  = [c.course_code for c in history if c.status == "passed"]
-failed_courses     = [c.course_code for c in history if c.status == "failed"]
-in_progress_courses = [c.course_code for c in history if c.status == "in_progress"]
+Derived values:
 
-# Credit hours
-credit_hours_remaining = 133 - total_credit_hours_earned
+- `credit_hours_remaining = 133 - total_credit_hours_earned`
+- max semester hours:
+  - `> 3.0` -> `21`
+  - `>= 2.0` -> `18`
+  - `>= 1.0` -> `15`
+  - otherwise `12`
 
-# Max hours per semester (CIS Handbook §5)
-if cgpa > 3.0:  return 21
-if cgpa >= 2.0: return 18
-if cgpa >= 1.0: return 15
-return 12
+## Session Manager
+
+File: `gateway/session_manager.py`
+
+Status: implemented
+
+Responsibilities:
+
+- create and manage in-memory sessions
+- store per-session overrides
+- track last referenced entities for future follow-ups
+- build `effective_context = base_context + session overrides`
+
+Important behavior:
+
+- session IDs look like `sess_<8 hex chars>`
+- if an unknown session ID is passed back after restart, a new session is created
+- `added_courses` accumulate across turns and are deduplicated
+- `target_role` is replaced when a new one is supplied
+- `base_context` is never mutated
+- `build_effective_context()` returns a copied `StudentContext` only when overrides exist
+
+Internal state is stored in a dataclass named `SessionState` inside `session_manager.py`. This is different from the Pydantic `SessionState` in `models/schemas.py`.
+
+The file is already written with a future Redis migration in mind. The intended swap points are `_get_session()` and `_set_session()`.
+
+## Query Understanding Layer
+
+File: `gateway/query_understanding.py`
+
+Status: scaffold only, not implemented
+
+Intended job:
+
+- classify user text into a `StructuredQuery`
+- detect intent
+- decide `engine_pattern` as `kg`, `rag`, or `mixed`
+- detect whether the question is student-aware
+- extract entities like course codes, role IDs, track IDs, and skill IDs
+- detect hypothetical overrides such as added courses or target roles
+
+Current code state:
+
+- `INTENT_PATTERNS` is defined
+- `OVERRIDE_PATTERNS` is defined
+- constructor loads `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`
+- every important method still raises `NotImplementedError`
+
+Planned intents currently present in the file:
+
+- `get_prerequisites`
+- `get_course_profile`
+- `skill_gap_analysis`
+- `role_recommendation`
+- `track_guidance`
+- `handbook_policy_query`
+- `ambiguous`
+
+Important doc/code mismatch:
+
+- the docstring examples mention role IDs like `ROLE_DATA_SCIENTIST`
+- the KG wrapper comments and earlier notes indicate the actual graph format is `RL_Data_Scientist`
+- any future implementation should verify the real IDs expected by the live graph before hardcoding normalization logic
+
+## Orchestrator
+
+File: `gateway/orchestrator.py`
+
+Status: scaffold only, not implemented
+
+Intended job:
+
+- choose the correct workflow
+- call KG only, RAG only, mixed, student-aware, or clarification paths
+- return a `ResultPackage`
+
+Current code state:
+
+- class and method skeletons exist
+- `_error_package()` is implemented
+- all workflow methods still raise `NotImplementedError`
+
+Expected workflow families from the file:
+
+- KG-only
+- RAG-only
+- mixed
+- student-aware
+- clarification
+
+## Response Composer
+
+File: `gateway/response_composer.py`
+
+Status: scaffold only, not implemented
+
+Intended job:
+
+- take a `ResultPackage`
+- produce the final `QueryResponse`
+- present data clearly without adding new facts
+- merge citations from RAG results
+
+Current code state:
+
+- constructor loads `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`
+- method skeletons exist
+- all main methods still raise `NotImplementedError`
+
+## Knowledge Graph Integration
+
+Files:
+
+- `gateway/adapters/kg_adapter.py`
+- `engines/kg/neo4j_client.py`
+- `engines/kg/queries.py`
+
+Status: implemented at wrapper level
+
+Current design:
+
+- the gateway talks to Neo4j directly through Python
+- `KGAdapter` does not call an HTTP `kg-engine` service
+- `queries.py` contains the query functions that are dispatched by `KGAdapter`
+- `Neo4jClient` wraps the official Neo4j Python driver
+
+This is a major architectural fact: the gateway code currently uses direct in-process KG access, not an HTTP KG service.
+
+### KGAdapter behavior
+
+`KGAdapter.call(operation, params)`:
+
+- looks up the operation in a dispatch map
+- calls the mapped wrapper method
+- returns structured error dicts instead of raising
+
+Startup behavior:
+
+- `KGAdapter.__init__()` attempts to connect to Neo4j immediately
+- a startup connection failure is logged as a warning, not treated as fatal
+
+### Supported KG operations
+
+The wrapper exposes 15 operations:
+
+- `get_course_profile`
+- `get_prerequisites`
+- `get_skills_taught`
+- `search_courses_by_skill`
+- `get_role_profile`
+- `get_roles_by_track`
+- `compute_skill_gap`
+- `compute_alignment_score`
+- `recommend_courses_to_close_gap`
+- `estimate_alignment_improvement`
+- `find_best_matching_roles`
+- `get_track_overview`
+- `compare_tracks`
+- `recommend_track_for_role`
+- `recommend_track_for_skill`
+
+### Neo4j environment variables
+
+Used by `engines/kg/neo4j_client.py`:
+
+- `NEO4J_URI` default: `bolt://localhost:7687`
+- `NEO4J_USER` default: `neo4j`
+- `NEO4J_PASSWORD` default: empty string, but effectively required for real use
+
+## RAG Integration
+
+Files:
+
+- `gateway/adapters/rag_adapter.py`
+- `engines/rag/ingest.py`
+- `engines/rag/retriever.py`
+
+Status: partially implemented, but not aligned with the old architecture docs
+
+### Actual current design
+
+The current `RAGAdapter`:
+
+- imports `get_retriever()` from `engines/rag/retriever.py`
+- retrieves relevant handbook chunks locally
+- optionally sends the assembled context to an external LLM endpoint via `COLAB_LLM_URL`
+
+This means the current code does not use `RAG_ENGINE_URL`, despite older notes and `docker-compose.yml` suggesting an HTTP `rag-engine` service.
+
+### `RAGAdapter.execute()`
+
+Inputs:
+
+- `sub_query: str`
+- optional `student_context`
+
+Behavior:
+
+- returns a fallback answer if the query is empty
+- returns a fallback answer if the retriever failed to initialize
+- calls `retriever.retrieve(sub_query, k_vec=20, k_bm25=15, k_final=6)`
+- builds citations from retrieved documents
+- if `COLAB_LLM_URL` is missing, returns citations with `"LLM endpoint not set."`
+- otherwise posts to the external endpoint and returns the generated answer
+
+Return shape today is a plain dict like:
+
+```json
+{
+  "answer": "text answer",
+  "citations": [
+    {
+      "source": "Handbook",
+      "page": 12,
+      "text": "retrieved excerpt"
+    }
+  ]
+}
 ```
 
-### Student record (S_000123 — Seif Elislam)
-- Track: AI | CGPA: 2.85 | Earned credits: 76 | Remaining: 57
-- Max credits/semester: 18
-- Failed: C-CS218
-- In-progress (Spring 2025): C-AI321, C-CS316, HUM228
+Important note:
 
----
+- `RAGAdapter` exposes `execute()`
+- the planned orchestrator docstrings talk about wrapper calls in more abstract terms
+- any orchestrator implementation should follow the actual method name and return shape in the current code unless the wrapper is refactored first
 
-## 5. `SessionManager` (T03) — ✅ Complete
+### `engines/rag/ingest.py`
 
-**File:** `gateway/session_manager.py`
+Purpose:
 
-Maintains runtime conversational state across turns. Builds `effective_context = base_context + session_overrides`.
+- ingest the handbook markdown file into a Chroma vector store
+- create parent and child chunks
+- persist the vector DB and a pickled parent chunk map
 
-### Internal `SessionState` dataclass (NOT the Pydantic one from schemas.py)
+Current assumptions:
 
-```python
-@dataclass
-class SessionState:
-    session_id: str
-    active_student_id: str
-    created_at: datetime
-    last_updated: datetime
-    turn_count: int = 0
-    last_referenced: dict  # {"course_code": None, "role_id": None, "workflow": None}
-    overrides: dict        # {"added_courses": [], "target_role": None}
-```
+- source markdown file is `CIS_Handbook.md`
+- vector DB is stored under `engines/rag/chroma_db`
+- parent chunk map is stored in `engines/rag/chunks.pkl`
 
-It's a `dataclass`, not a Pydantic model — it's internal runtime state, not a serialized contract.
+Chunking constants:
 
-### Public API
+- parent chunk size: `800`
+- parent overlap: `250`
+- child chunk size: `200`
+- child overlap: `40`
 
-```python
-get_or_create_session(student_id, session_id=None) -> str
-    # New ID format: "sess_" + uuid.uuid4().hex[:8]
-    # Given but not found → warn + create new (handles stale IDs after restart)
+Embedding model:
 
-apply_overrides(session_id, overrides_dict) -> None
-    # added_courses → EXTEND and deduplicate (accumulate across turns)
-    # target_role   → REPLACE (new target obsoletes previous)
+- `BAAI/bge-small-en-v1.5`
 
-build_effective_context(base_context, session_id) -> StudentContext
-    # No overrides → return base_context unchanged
-    # Has overrides → base_context.model_copy(update={"planned_courses": list(added_courses)})
-    # list() creates a copy — prevents mutation bleed across turns
-    # base_context is NEVER mutated
+### `engines/rag/retriever.py`
 
-update_last_referenced(session_id, course_code=None, role_id=None, workflow=None) -> None
-    # Only overwrites keys that are explicitly non-None
+Intended retrieval pipeline:
 
-record_turn(session_id) -> None
-    # Increments turn_count, updates last_updated
-```
+- Chroma dense retrieval
+- BM25 lexical retrieval
+- reciprocal rank fusion
+- cross-encoder reranking
 
-### Migration notes (documented in module docstring)
-- **Redis:** Replace `_get_session()` and `_set_session()` only — all public API stays identical
-- Trigger: set `SESSION_STORE=redis` in environment
+Configured models:
 
----
+- embeddings: `BAAI/bge-small-en-v1.5`
+- reranker: `cross-encoder/ms-marco-MiniLM-L-6-v2`
 
-## 6. `main.py` — Gateway Endpoint (T04) — ✅ Complete
+Important caution:
 
-**File:** `gateway/main.py`
+- the file currently appears to have indentation and formatting issues
+- it may need cleanup before the local RAG path can run reliably
+- because of that, treat the RAG code as present but not yet production-stable
 
-### 4-phase pipeline
+## Current Demo Student Data
 
-```python
-@app.post("/query", response_model=QueryResponse)
-def handle_query(request: QueryRequest) -> QueryResponse:
+File: `data/student_profile.json`
 
-    # Phase 1 — Preparation
-    session_id     = session_manager.get_or_create_session(request.active_student_id, request.session_id)
-    base_context   = student_provider.get_student(request.active_student_id)  # 404 if None
-    effective_context = session_manager.build_effective_context(base_context, session_id)
+There is currently one hardcoded student profile:
 
-    # Phase 2 — Query Understanding
-    structured_query = qu_layer.classify(request.user_text, effective_context)
-    # Apply any overrides detected by QU layer
-    if overrides.added_courses or overrides.target_role:
-        session_manager.apply_overrides(session_id, {...})
-        effective_context = session_manager.build_effective_context(base_context, session_id)  # rebuild
+- `student_id`: `S_000123`
+- `name`: `Seif Elislam`
+- `track_id`: `AI`
+- `level`: `3`
+- `current_semester`: `Spring`
+- `cgpa`: `2.85`
+- `academic_standing`: `good`
+- `total_credit_hours_earned`: `76`
 
-    # Phase 3 — Orchestration
-    result_package = orchestrator.run(structured_query, effective_context, request.user_text)
+Derived from the current provider logic:
 
-    # Phase 4 — Response
-    response = composer.compose(result_package)
-    session_manager.update_last_referenced(session_id, course_code=..., role_id=..., workflow=...)
-    session_manager.record_turn(session_id)
-    response.session_id = session_id
-    return response
-```
+- `credit_hours_remaining`: `57`
+- `max_credit_hours_allowed`: `18`
 
-### Graceful degradation while components are being built
+Transcript highlights:
 
-Each phase wraps its call in `except NotImplementedError → HTTP 503` with a message identifying which task is pending (T07/T08/T09). The server stays alive and returns structured errors rather than crashing.
+- one failed course: `C-CS218`
+- in progress: `C-AI321`, `C-CS316`, `HUM228`
 
-### Lifespan handler
+This student record is the current foundation for all tests and all gateway demos.
 
-```python
-@asynccontextmanager
-async def lifespan(app):
-    yield
-    kg_wrapper.close()   # releases Neo4j driver on shutdown
-```
+## Tests
 
----
+File: `gateway/tests/test_t02_t03.py`
 
-## 7. `KGWrapper` (T05) — ✅ Complete
+Current automated coverage is limited to:
 
-**Files:** `gateway/wrappers/kg_wrapper.py`, `gateway/wrappers/neo4j_client.py`, `gateway/wrappers/kg_queries.py`
+- T02: `StudentContextProvider`
+- T03: `SessionManager`
 
-### How KGEngine code is integrated
+The test module verifies:
 
-The KGEngine source lives at `MVP Phase/PathFinder KG-Engine/src/`. Rather than running it as a separate HTTP service, the gateway imports it directly in-process:
+- student loading
+- derived course buckets
+- credit-hours-remaining formula
+- max-credit-hours rule for CGPA 2.85
+- invalid ID handling
+- provider caching
+- session ID generation
+- session reuse
+- override application
+- base context immutability
+- override accumulation across turns
+- selective update of `last_referenced`
 
-- `neo4j_client.py` — copied from `KG-Engine/src/neo4j_client.py`, dotenv load removed (Docker/shell sets env vars)
-- `kg_queries.py` — copied verbatim from `KG-Engine/src/queries.py` (all 15 Cypher query functions)
-
-This avoids HTTP serialization overhead for what are pure Python→Neo4j calls.
-
-### Connection lifecycle
-
-```python
-class KGWrapper:
-    def __init__(self):
-        self._client = Neo4jClient()
-        self._client.connect()    # held open for process lifetime
-
-    def close(self):
-        self._client.close()      # called by FastAPI lifespan on shutdown
-```
-
-Connection failure at startup is logged as a warning (non-fatal) — the first real query that fails will return an error dict.
-
-### Dispatch
-
-```python
-def call(self, operation: str, params: dict) -> dict:
-    fn = _dispatch_map.get(operation)
-    if fn is None:
-        return {"status": "error", "message": f"Unknown KG operation: {operation!r}"}
-    try:
-        return fn(**params)
-    except Exception as exc:
-        return {"status": "error", "message": str(exc)}
-```
-
-### All 15 operations
-
-| Group | Operation | Key params |
-|---|---|---|
-| A2 | `get_course_profile` | `course_code` |
-| A2 | `get_prerequisites` | `course_code`, `depth` ("direct"\|"full") |
-| A2 | `get_skills_taught` | `course_code` |
-| A2 | `search_courses_by_skill` | `skills: list[str]` |
-| B1 | `get_role_profile` | `role_id` (e.g. `"RL_Data_Scientist"`) |
-| B1 | `get_roles_by_track` | `track_id` (e.g. `"AI"`) |
-| B2 | `compute_skill_gap` | `role_id`, `completed_courses` |
-| B2 | `compute_alignment_score` | `role_id`, `completed_courses` |
-| B2 | `recommend_courses_to_close_gap` | `role_id`, `completed_courses` |
-| B2 | `estimate_alignment_improvement` | `role_id`, `completed_courses`, `planned_courses` |
-| B2 | `find_best_matching_roles` | `completed_courses` |
-| B3 | `get_track_overview` | `track_id` |
-| B3 | `compare_tracks` | `track_id_1`, `track_id_2` |
-| B3 | `recommend_track_for_role` | `role_id` |
-| B3 | `recommend_track_for_skill` | `skill_id` |
-
-**Role ID format:** `RL_Data_Scientist` (not `ROLE_DATA_SCIENTIST`). This is the actual format in the Neo4j graph. The blueprint prose examples use the wrong format.
-
----
-
-## 8. Pending Components
-
-### T06 — `wrappers/rag_wrapper.py` ❌
-
-HTTP POST to `RAG_ENGINE_URL/query` (default `http://rag-engine:8002`). Must:
-- Accept a sub-query string + optional student context
-- POST `{"query": sub_query, ...}` to the RAG service
-- Parse response into `RAGResult { answer, citations }`
-- Never raise — return `RAGResult(answer=None, citations=[])` on failure
-
-### T07 — `query_understanding.py` 🔧
-
-Two-layer classifier. Skeleton has `INTENT_PATTERNS` and `OVERRIDE_PATTERNS` already defined.
-
-**Layer 1 (rule-based):** keyword scan → extract entities → detect overrides → return `StructuredQuery`
-
-**Layer 2 (LLM fallback):** HTTP call to `LLM_BASE_URL` with `LLM_API_KEY` and `LLM_MODEL`. Prompt asks LLM to return structured JSON matching `StructuredQuery` schema.
-
-**Intent → engine_pattern mapping:**
-```
-get_prerequisites, get_course_profile, skill_gap_analysis,
-role_recommendation, track_guidance                          → "kg"
-handbook_policy_query                                        → "rag"
-course_and_policy_query                                      → "mixed"
-ambiguous                                                    → needs_clarification=True
-```
-
-**Entity normalization:** text like `"data scientist"` must resolve to `"RL_Data_Scientist"`, `"AI track"` → `"AI"`.
-
-### T08 — `orchestrator.py` 🔧
-
-Routes `StructuredQuery` to the right workflow. Skeleton has `_error_package()` already implemented.
-
-**Workflow dispatch:**
-```
-needs_clarification=True     → _clarification_workflow()      (W6)
-query_type="student_aware"   → _student_aware_workflow()      (W4)
-engine_pattern="kg"          → _kg_only_workflow()             (W1)
-engine_pattern="rag"         → _rag_only_workflow()            (W2)
-engine_pattern="mixed"       → _mixed_workflow()               (W3)
-```
-
-**Intent → KG operation mapping** (key mappings):
-```
-"get_prerequisites"   → "get_prerequisites"
-"get_course_profile"  → "get_course_profile"
-"skill_gap_analysis"  → "compute_skill_gap"   (student-aware)
-"role_recommendation" → "find_best_matching_roles"
-"track_guidance"      → "get_track_overview" or "compare_tracks"
-```
-
-### T09 — `response_composer.py` ❌
-
-Presentation layer only. Converts `ResultPackage` → `QueryResponse` via LLM.
-
-**LLM instruction:** "Present the data below in clear, friendly language. Do NOT add information not in the data."
-
-```python
-compose(result) -> QueryResponse
-    # "ok"                   → _compose_answer()      → LLM call
-    # "clarification_needed" → _compose_clarification() → direct question to user
-    # "error"                → _compose_error()       → friendly error message
-```
-
-`session_id` is NOT set here — `main.py` sets it after `compose()` returns.
-
-### T10 — UI ⏳
-
-React chat interface. `POST /query` → display `answer_text` + `citations`.
-
----
-
-## 9. Critical Architecture Rules
-
-1. **Override detection belongs to QU Layer only.** Session Manager only *applies* overrides. Never detect overrides in `session_manager.py`.
-
-2. **One endpoint.** `POST /query` handles all 6 workflow types. Do not add new routes.
-
-3. **Wrappers never raise.** Both `KGWrapper.call()` and `RAGWrapper.query()` must catch all exceptions and return structured error dicts. Orchestrator always expects a return value.
-
-4. **base_context is read-only.** Session overrides are runtime-only. The cached `StudentContext` from the provider is never mutated. `build_effective_context()` always uses `model_copy()`.
-
-5. **LLM stays external.** QU Layer (fallback) and ResponseComposer call a hosted LLM API. No GPU-heavy inference runs in the gateway process.
-
-6. **Schemas are frozen.** Do not change `models/schemas.py` without team agreement. All components depend on the same contracts.
-
----
-
-## 10. Environment Variables
-
-| Variable | Used By | Default |
-|---|---|---|
-| `NEO4J_URI` | Neo4jClient | `bolt://localhost:7687` |
-| `NEO4J_USER` | Neo4jClient | `neo4j` |
-| `NEO4J_PASSWORD` | Neo4jClient | *(required — set in `.env`, no default)* |
-| `LLM_API_KEY` | QU Layer, ResponseComposer | — |
-| `LLM_BASE_URL` | QU Layer, ResponseComposer | — |
-| `LLM_MODEL` | QU Layer, ResponseComposer | — |
-| `RAG_ENGINE_URL` | RAGWrapper | `http://rag-engine:8002` |
-| `STUDENT_DATA_PATH` | StudentContextProvider | `<gateway_dir>/data/student_profile.json` |
-
----
-
-## 11. How to Run
+Run:
 
 ```bash
-# Local dev (requires running Neo4j on localhost:7687)
-cd pathfinder/gateway
+cd gateway
+python -m pytest tests/test_t02_t03.py -v
+```
+
+There are no tests yet for:
+
+- `main.py`
+- query understanding
+- orchestration
+- response composition
+- KG wrapper behavior against a live database
+- RAG ingestion or retrieval
+
+## Environment Variables
+
+Values currently documented in `.env.example`:
+
+- `NEO4J_URI`
+- `NEO4J_USER`
+- `NEO4J_PASSWORD`
+- `KG_ENGINE_URL`
+- `RAG_ENGINE_URL`
+- `LLM_API_KEY`
+- `LLM_BASE_URL`
+- `LLM_MODEL`
+- `SESSION_STORE`
+
+Additional variable used by the current codebase:
+
+- `STUDENT_DATA_PATH`
+- `COLAB_LLM_URL`
+
+Important mismatch:
+
+- `KG_ENGINE_URL` and `RAG_ENGINE_URL` are part of the old service-oriented plan
+- current gateway code does not use `KG_ENGINE_URL`
+- current `RAGAdapter` does not use `RAG_ENGINE_URL`
+- current RAG path uses `COLAB_LLM_URL` instead for answer generation
+
+## Docker and Deployment Reality
+
+### `gateway/Dockerfile`
+
+This is functional for the gateway itself:
+
+- uses `python:3.11-slim`
+- installs `gateway/requirements.txt`
+- exposes port `8000`
+- launches `uvicorn main:app --host 0.0.0.0 --port 8000 --reload`
+
+### `ui/Dockerfile`
+
+This is a placeholder too. There is no actual UI source in the repo yet.
+
+### `docker-compose.yml`
+
+The compose file describes services for:
+
+- `neo4j`
+- `kg-engine`
+- `rag-engine`
+- `gateway`
+- `ui`
+
+However, in the current repository:
+
+- `neo4j` is real
+- `gateway` is real
+- `kg-engine` is not implemented as a real containerized service
+- `rag-engine` is not implemented as a real containerized service
+- `ui` is not implemented as a real app
+
+So `docker-compose.yml` should be treated as aspirational or partially stale, not as a guaranteed working deployment definition.
+
+## Key Design Invariants
+
+These are the important rules already encoded by the current code:
+
+- `StudentContextProvider` loads durable student truth
+- `SessionManager` owns temporary conversational overrides
+- `SessionManager` must not interpret raw user text
+- hypothetical courses belong in `planned_courses`, not in `completed_courses`
+- `base_context` must never be mutated
+- `KGAdapter` is a thin adapter and should return error dicts rather than throw
+- the QU layer is the only place that should interpret user text for routing and override detection
+- the response composer is intended to present results, not invent them
+
+## Architectural Drift and Important Mismatches
+
+Another model working on this repo should know these mismatches before editing anything:
+
+1. The README and comments historically describe an HTTP-based split between gateway, KG engine, and RAG engine.
+2. The actual gateway code currently imports KG and RAG pieces more directly.
+3. `KGAdapter` already talks to Neo4j locally and does not use `KG_ENGINE_URL`.
+4. `RAGAdapter` imports local retrieval code and uses `COLAB_LLM_URL`; it does not call `RAG_ENGINE_URL`.
+5. `docker-compose.yml` still reflects the older service split.
+6. `engines/rag/retriever.py` now lives under the shared `engines/` tree and should stay aligned with the gateway adapter contract.
+7. The main `/query` route is structurally present but not functionally complete because T07, T08, and T09 are unfinished.
+
+If you extend the codebase, decide first whether the project should move toward:
+
+- direct in-process integration, or
+- separate HTTP microservices
+
+Right now the codebase mixes both ideas.
+
+## Practical Run Notes
+
+### Gateway only
+
+If you only want to inspect the gateway API shape:
+
+```bash
+cd gateway
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
-
-# Docker (full stack)
-cd pathfinder
-cp .env.example .env    # fill in LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-docker compose up --build
 ```
 
-**Tests:**
+Notes:
+
+- `/health` should work
+- `/query` will not complete successfully end-to-end until T07-T09 are implemented
+- Neo4j connectivity depends on valid Neo4j credentials
+- local RAG availability depends on the retriever artifacts and Python dependencies not listed in `gateway/requirements.txt`
+
+### Tests
+
 ```bash
-cd pathfinder/gateway
+cd gateway
 python -m pytest tests/test_t02_t03.py -v
-# Expected: 12 passed
 ```
 
-**Health check:**
-```bash
-curl http://localhost:8000/health
-# {"status": "ok", "service": "pathfinder-gateway"}
-```
+## Suggested Next Steps
 
-**Sample query (once T07–T09 are done):**
-```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"user_text": "What skills am I missing for Data Scientist?", "active_student_id": "S_000123"}'
-```
+If the next AI model is expected to continue implementation, the most sensible order is:
+
+1. decide the final architecture for KG and RAG integration
+2. stabilize `engines/rag/retriever.py` and confirm the intended RAG runtime path
+3. implement `QueryUnderstandingLayer`
+4. implement `Orchestrator`
+5. implement `ResponseComposer`
+6. add integration tests for `POST /query`
+7. either fix or simplify `docker-compose.yml` so it matches reality
+
+## Short Summary for Future AI Models
+
+This repo is a partially implemented academic advisor backend. The solid pieces today are student context loading, session handling, and KG wrapper plumbing. The user-facing `/query` pipeline is scaffolded but blocked by unimplemented query understanding, orchestration, and response composition. The biggest conceptual issue is architectural drift: the documentation and compose file still assume HTTP microservices, while the current Python code directly imports KG and RAG logic in-process. Any future work should first resolve that mismatch, then build the unfinished gateway layers on top of a single consistent integration strategy.

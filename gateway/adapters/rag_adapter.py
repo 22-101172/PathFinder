@@ -1,31 +1,32 @@
+from __future__ import annotations
+
 import logging
-import sys
 import os
-from typing import Dict, Any, Optional
+from typing import Any, Optional
+
 import requests
-
-# Ensure the rag directory is in sys.path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-rag_path = os.path.abspath(os.path.join(current_dir, "..", "..", "rag"))
-if rag_path not in sys.path:
-    sys.path.append(rag_path)
-
-from retriever import get_retriever
 
 logger = logging.getLogger(__name__)
 
 
-class RAGWrapper:
+class RAGAdapter:
+    """Adapter from the gateway orchestrator to the local RAG engine code."""
 
     def __init__(self):
         try:
+            from engines.rag.retriever import get_retriever
+
             self.retriever = get_retriever()
-            logger.info("RAGWrapper initialized.")
-        except Exception as e:
-            logger.error(f"RAGWrapper failed to initialize: {e}")
+            logger.info("RAGAdapter initialized.")
+        except Exception as exc:
+            logger.error("RAGAdapter failed to initialize: %s", exc)
             self.retriever = None
 
-    def execute(self, sub_query: str, student_context: Optional[Any] = None) -> Dict[str, Any]:
+    def execute(
+        self,
+        sub_query: str,
+        student_context: Optional[Any] = None,
+    ) -> dict[str, Any]:
         if not sub_query or sub_query.strip() == "":
             return {"answer": "Not found in handbook.", "citations": []}
 
@@ -80,6 +81,8 @@ class RAGWrapper:
             answer = response.json().get("answer", "No answer.")
 
             return {"answer": answer, "citations": citations}
+        except Exception as exc:
+            return {"answer": f"Error: {str(exc)}", "citations": []}
 
-        except Exception as e:
-            return {"answer": f"Error: {str(e)}", "citations": []}
+
+RAGWrapper = RAGAdapter

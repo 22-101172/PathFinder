@@ -41,7 +41,7 @@ import os
 import re
 from typing import Optional
 
-from models.schemas import (
+from gateway.models.schemas import (
     StructuredQuery, EntitySet, SessionOverrides, StudentContext
 )
 

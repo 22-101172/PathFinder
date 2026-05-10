@@ -28,16 +28,16 @@ Done when:
   - Engine error → returns ResultPackage with status="error"
 """
 
-from models.schemas import (
+from gateway.models.schemas import (
     StructuredQuery, StudentContext, ResultPackage, RAGResult
 )
-from wrappers.kg_wrapper import KGWrapper
-from wrappers.rag_wrapper import RAGWrapper
+from gateway.adapters.kg_adapter import KGAdapter
+from gateway.adapters.rag_adapter import RAGAdapter
 
 
 class Orchestrator:
 
-    def __init__(self, kg_wrapper: KGWrapper, rag_wrapper: RAGWrapper):
+    def __init__(self, kg_wrapper: KGAdapter, rag_wrapper: RAGAdapter):
         self._kg = kg_wrapper
         self._rag = rag_wrapper
 

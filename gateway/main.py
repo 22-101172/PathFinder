@@ -19,14 +19,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from models.schemas import QueryRequest, QueryResponse
-from student_context_provider import StudentContextProvider
-from session_manager import SessionManager
-from query_understanding import QueryUnderstandingLayer
-from orchestrator import Orchestrator
-from response_composer import ResponseComposer
-from wrappers.kg_wrapper import KGWrapper
-from wrappers.rag_wrapper import RAGWrapper
+from gateway.models.schemas import QueryRequest, QueryResponse
+from gateway.student_context_provider import StudentContextProvider
+from gateway.session_manager import SessionManager
+from gateway.query_understanding import QueryUnderstandingLayer
+from gateway.orchestrator import Orchestrator
+from gateway.response_composer import ResponseComposer
+from gateway.adapters.kg_adapter import KGAdapter
+from gateway.adapters.rag_adapter import RAGAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 # All components are created once at module load time and shared across requests.
 
 student_provider = StudentContextProvider()
-kg_wrapper       = KGWrapper()
-rag_wrapper      = RAGWrapper()
+kg_wrapper       = KGAdapter()
+rag_wrapper      = RAGAdapter()
 session_manager  = SessionManager(student_provider)
 qu_layer         = QueryUnderstandingLayer()
 orchestrator     = Orchestrator(kg_wrapper, rag_wrapper)

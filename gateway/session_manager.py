@@ -36,8 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-from models.schemas import StudentContext
-from student_context_provider import StudentContextProvider
+from gateway.models.schemas import StudentContext
+from gateway.student_context_provider import StudentContextProvider
 
 logger = logging.getLogger(__name__)
 

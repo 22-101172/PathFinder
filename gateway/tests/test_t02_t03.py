@@ -13,9 +13,9 @@ All 12 tests must pass before T02 / T03 are considered done.
 
 import pytest
 
-from models.schemas import StudentContext
-from session_manager import SessionManager
-from student_context_provider import StudentContextProvider
+from gateway.models.schemas import StudentContext
+from gateway.session_manager import SessionManager
+from gateway.student_context_provider import StudentContextProvider
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

@@ -1,12 +1,11 @@
 """
 conftest.py — pytest path configuration for the gateway package.
 
-Adds gateway/ to sys.path before any test import runs, so test files can
-do `from student_context_provider import ...` without package prefixes.
-This mirrors how the gateway process itself resolves imports at runtime.
+Adds the repository root to sys.path before any test import runs, so tests can
+import `gateway.*` and `engines.*` using the repo-root package layout.
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

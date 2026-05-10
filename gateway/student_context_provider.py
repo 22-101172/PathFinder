@@ -23,21 +23,23 @@ Done when:
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
-from models.schemas import CourseRecord, StudentContext, _GRADUATION_CREDIT_HOURS
+from gateway.models.schemas import (
+    CourseRecord,
+    StudentContext,
+    _GRADUATION_CREDIT_HOURS,
+)
 
 logger = logging.getLogger(__name__)
 
 # File path resolved from the script's own directory so it is correct regardless
 # of where the process is launched from. Docker overrides via STUDENT_DATA_PATH.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 _DATA_PATH: str = os.environ.get(
     "STUDENT_DATA_PATH",
-    os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "data",
-        "student_profile.json",
-    ),
+    str(_REPO_ROOT / "data" / "student_profile.json"),
 )
 
 

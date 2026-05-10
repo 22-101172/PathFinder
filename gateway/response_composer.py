@@ -30,7 +30,7 @@ import os
 import json
 from typing import Optional
 
-from models.schemas import ResultPackage, QueryResponse, Citation
+from gateway.models.schemas import ResultPackage, QueryResponse, Citation
 
 
 class ResponseComposer:

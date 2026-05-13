@@ -188,4 +188,3 @@ class KGAdapter:
             return {"status": "error", "message": str(exc)}
 
 
-KGWrapper = KGAdapter

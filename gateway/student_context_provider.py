@@ -29,7 +29,6 @@ from typing import Optional
 from gateway.models.schemas import (
     CourseRecord,
     StudentContext,
-    _GRADUATION_CREDIT_HOURS,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,9 +70,8 @@ class StudentContextProvider:
           3. Verify student_id matches
           4. Parse course_history into CourseRecord objects
           5. Compute derived views (completed / failed / in_progress)
-          6. Compute credit_hours_remaining and max_credit_hours_allowed
-          7. Build and cache StudentContext
-          8. Return result
+          6. Build and cache StudentContext
+          7. Return result
 
         Never raises — returns None at any failed step.
         """
@@ -100,18 +98,12 @@ class StudentContextProvider:
 
         completed, failed, in_progress = self._compute_derived_views(course_history)
 
-        earned: int = raw.get("total_credit_hours_earned", 0)
-        credit_hours_remaining = _GRADUATION_CREDIT_HOURS - earned
-        max_credit_hours = self._compute_max_credit_hours(raw.get("cgpa", 0.0))
-
         context = self._build_context(
             raw=raw,
             course_history=course_history,
             completed=completed,
             failed=failed,
             in_progress=in_progress,
-            credit_hours_remaining=credit_hours_remaining,
-            max_credit_hours=max_credit_hours,
             student_id=student_id,
         )
         if context is None:
@@ -208,21 +200,6 @@ class StudentContextProvider:
 
         return completed, failed, in_progress
 
-    def _compute_max_credit_hours(self, cgpa: float) -> int:
-        """
-        Return the maximum credit hours allowed per semester based on CGPA.
-
-        Source: CIS Handbook §5 (credit-hour registration limits).
-        Each line is an independent, readable handbook rule — not an elif chain.
-        """
-        if cgpa > 3.0:
-            return 21
-        if cgpa >= 2.0:
-            return 18
-        if cgpa >= 1.0:
-            return 15
-        return 12
-
     def _build_context(
         self,
         *,
@@ -231,8 +208,6 @@ class StudentContextProvider:
         completed: list[str],
         failed: list[str],
         in_progress: list[str],
-        credit_hours_remaining: int,
-        max_credit_hours: int,
         student_id: str,
     ) -> Optional[StudentContext]:
         """
@@ -243,6 +218,10 @@ class StudentContextProvider:
 
         planned_courses is always [] here. Session Manager populates it
         in build_effective_context() for the duration of a single turn.
+
+        Academic calculations are intentionally out of scope for the current
+        gateway integration. This provider only loads and normalizes student
+        record data plus the derived course-status buckets used by KG flows.
         """
         try:
             return StudentContext(
@@ -254,8 +233,6 @@ class StudentContextProvider:
                 cgpa=raw["cgpa"],
                 academic_standing=raw["academic_standing"],
                 total_credit_hours_earned=raw["total_credit_hours_earned"],
-                credit_hours_remaining=credit_hours_remaining,
-                max_credit_hours_allowed=max_credit_hours,
                 course_history=course_history,
                 completed_courses=completed,
                 failed_courses=failed,

@@ -2,13 +2,13 @@
 tests/test_t02_t03.py
 ─────────────────────
 Acceptance tests for:
-  T02 — StudentContextProvider  (T1–T6)
-  T03 — SessionManager          (T7–T12)
+  T02 — StudentContextProvider  (T1–T4)
+  T03 — SessionManager          (T5–T10)
 
 Run from the gateway/ directory:
   python -m pytest tests/test_t02_t03.py -v
 
-All 12 tests must pass before T02 / T03 are considered done.
+All tests in this module must pass before T02 / T03 are considered done.
 """
 
 import pytest
@@ -30,7 +30,7 @@ def provider():
 def student(provider: StudentContextProvider) -> StudentContext:
     """
     Load S_000123 once for the entire test module.
-    Module scope means the cache hit test (T6) sees the already-cached object.
+    Module scope means the cache hit test (T4) sees the already-cached object.
     """
     ctx = provider.get_student("S_000123")
     assert ctx is not None, (
@@ -41,7 +41,7 @@ def student(provider: StudentContextProvider) -> StudentContext:
 
 @pytest.fixture
 def manager(provider: StudentContextProvider) -> SessionManager:
-    """Fresh SessionManager per test — no session state leaks between T7–T12."""
+    """Fresh SessionManager per test — no session state leaks between T5–T10."""
     return SessionManager(provider)
 
 
@@ -87,20 +87,7 @@ class TestStudentContextProvider:
         # Spot-check a completed course
         assert "C-CS111" in student.completed_courses
 
-    def test_T3_credit_hours_remaining_formula(self, student: StudentContext) -> None:
-        """credit_hours_remaining == 133 − total_credit_hours_earned."""
-        expected = 133 - student.total_credit_hours_earned
-        assert student.credit_hours_remaining == expected, (
-            f"Expected {expected}, got {student.credit_hours_remaining}. "
-            f"total_credit_hours_earned={student.total_credit_hours_earned}"
-        )
-
-    def test_T4_max_credit_hours_for_cgpa_2_85(self, student: StudentContext) -> None:
-        """CGPA 2.85 falls in the ≥2.0 tier → max 18 credit hours per semester."""
-        assert student.cgpa == 2.85
-        assert student.max_credit_hours_allowed == 18
-
-    def test_T5_invalid_id_returns_none_without_raising(
+    def test_T3_invalid_id_returns_none_without_raising(
         self, provider: StudentContextProvider
     ) -> None:
         """get_student with an unknown ID must return None — not raise."""
@@ -111,7 +98,7 @@ class TestStudentContextProvider:
             pytest.fail(f"get_student raised an unexpected exception: {exc}")
         assert result is None
 
-    def test_T6_cache_returns_same_python_object(
+    def test_T4_cache_returns_same_python_object(
         self, provider: StudentContextProvider
     ) -> None:
         """
@@ -132,13 +119,13 @@ class TestStudentContextProvider:
 
 class TestSessionManager:
 
-    def test_T7_new_session_id_has_correct_prefix(self, manager: SessionManager) -> None:
+    def test_T5_new_session_id_has_correct_prefix(self, manager: SessionManager) -> None:
         """get_or_create_session without session_id returns a 'sess_'-prefixed string."""
         sid = manager.get_or_create_session("S_000123")
         assert isinstance(sid, str)
         assert sid.startswith("sess_"), f"Expected prefix 'sess_', got: {sid!r}"
 
-    def test_T8_existing_session_id_is_returned_unchanged(
+    def test_T6_existing_session_id_is_returned_unchanged(
         self, manager: SessionManager
     ) -> None:
         """Passing an existing session_id back returns the same id — session is reused."""
@@ -146,7 +133,23 @@ class TestSessionManager:
         sid2 = manager.get_or_create_session("S_000123", session_id=sid)
         assert sid2 == sid
 
-    def test_T9_override_added_courses_appear_in_planned(
+    def test_T6b_existing_session_for_different_student_is_not_reused(
+        self, manager: SessionManager
+    ) -> None:
+        """A session_id tied to another student must not be reused across students."""
+        sid = manager.get_or_create_session("S_000123")
+        sid2 = manager.get_or_create_session("S_000999", session_id=sid)
+
+        assert sid2 != sid
+
+        original = manager.get_session(sid)
+        replacement = manager.get_session(sid2)
+        assert original is not None
+        assert replacement is not None
+        assert original.active_student_id == "S_000123"
+        assert replacement.active_student_id == "S_000999"
+
+    def test_T7_override_added_courses_appear_in_planned(
         self, manager: SessionManager, student: StudentContext
     ) -> None:
         """After apply_overrides, build_effective_context includes the hypothetical course."""
@@ -155,7 +158,7 @@ class TestSessionManager:
         effective = manager.build_effective_context(student, sid)
         assert "C-AI401" in effective.planned_courses
 
-    def test_T10_base_context_is_not_mutated(
+    def test_T8_base_context_is_not_mutated(
         self, manager: SessionManager, student: StudentContext
     ) -> None:
         """
@@ -170,7 +173,7 @@ class TestSessionManager:
             "build_effective_context must use model_copy(), never in-place modification."
         )
 
-    def test_T11_overrides_accumulate_across_two_turns(
+    def test_T9_overrides_accumulate_across_two_turns(
         self, manager: SessionManager, student: StudentContext
     ) -> None:
         """
@@ -184,7 +187,7 @@ class TestSessionManager:
         assert "C-AI401" in effective.planned_courses, "First override was lost"
         assert "C-AI501" in effective.planned_courses, "Second override was not applied"
 
-    def test_T12_update_last_referenced_only_touches_given_keys(
+    def test_T10_update_last_referenced_only_touches_given_keys(
         self, manager: SessionManager
     ) -> None:
         """

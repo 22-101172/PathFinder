@@ -120,7 +120,10 @@ class SessionManager:
         """
         Return an existing session_id or create and store a new session.
 
-        If session_id is given and found: update last_updated, return same id.
+        If session_id is given and found for the same student: update
+          last_updated, return same id.
+        If session_id is given and found for a different student: log a warning,
+          create a new session, return the new id.
         If session_id is given but not found: log a warning (stale ID from a
           server restart), create a new session, return the new id.
         If no session_id is given: create a new session.
@@ -128,6 +131,17 @@ class SessionManager:
         if session_id is not None:
             session = self._get_session(session_id)
             if session is not None:
+                if session.active_student_id != student_id:
+                    logger.warning(
+                        "Session %s belongs to student %s, not %s; creating a new session.",
+                        session_id,
+                        session.active_student_id,
+                        student_id,
+                    )
+                    new_session = self._new_session(student_id)
+                    self._set_session(new_session)
+                    return new_session.session_id
+
                 session.last_updated = datetime.now(timezone.utc)
                 self._set_session(session)
                 return session_id
@@ -191,8 +205,8 @@ class SessionManager:
         Update last_referenced for multi-turn context resolution.
 
         Only overwrites keys that are explicitly supplied (not None).
-        Called by the Orchestrator after each turn so follow-up queries
-        ("what about its prerequisites?") can resolve the referent.
+        Called by the Gateway/main request flow after each turn so follow-up
+        queries ("what about its prerequisites?") can resolve the referent.
         If the session is not found: log a warning and return silently.
         """
         session = self._get_session(session_id)

@@ -14,11 +14,6 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# CIS Handbook: total credit hours required for graduation.
-# Referenced by StudentContext.credit_hours_remaining and StudentContextProvider.
-_GRADUATION_CREDIT_HOURS = 133
-
-
 # ── 6.1  API Request & Response ──────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
@@ -115,11 +110,7 @@ class StudentContext(BaseModel):
     current_semester: str                # "Fall" | "Spring"
     cgpa: float                          # 0.0–4.0
     academic_standing: str               # "good" | "probation"
-    total_credit_hours_earned: int       # toward _GRADUATION_CREDIT_HOURS
-
-    # ── Computed: calculated by StudentContextProvider at load time ──────────
-    credit_hours_remaining: int          # = _GRADUATION_CREDIT_HOURS − total_credit_hours_earned
-    max_credit_hours_allowed: int        # 12 | 15 | 18 | 21 — per CIS Handbook §5 CGPA tiers
+    total_credit_hours_earned: int       # raw earned hours from the student record
 
     course_history: list[CourseRecord] = Field(default_factory=list)  # full transcript
 

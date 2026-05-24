@@ -1,0 +1,444 @@
+{
+  "tracks": {
+    "AI": {
+      "total_credits_required": 133,
+      "minimum_semesters": 6,
+      "required_courses": [
+        "C-MA110",
+        "C-CS111",
+        "C-MA111",
+        "C-PH111",
+        "HUM111",
+        "C-CS112",
+        "C-MA112",
+        "C-PH112",
+        "C-PH113",
+        "HUM224",
+        "C-MA213",
+        "C-ST211",
+        "C-CS213",
+        "C-CS214",
+        "HUM126",
+        "C-CS215",
+        "C-CS218",
+        "C-CS219",
+        "C-DE211",
+        "HUM221",
+        "HUM125",
+        "C-AI311",
+        "C-DE312",
+        "C-SW312",
+        "C-AI321",
+        "C-CS316",
+        "HUM228",
+        "C-AI411"
+      ],
+      "elective_options": [
+        "C-AI412",
+        "C-AI413",
+        "C-AI415",
+        "C-AI422",
+        "C-AI424",
+        "C-CS351",
+        "C-CS352",
+        "C-CS435",
+        "C-CS495",
+        "C-CS496",
+        "C-DE324",
+        "C-GP411A",
+        "C-GP411B",
+        "C-MA321",
+        "C-SW311",
+        "C-TR304",
+        "HUM110",
+        "HUM129",
+        "HUM412"
+      ]
+    },
+    "SW": {
+      "total_credits_required": 133,
+      "minimum_semesters": 6,
+      "required_courses": [
+        "C-MA110",
+        "C-CS111",
+        "C-MA111",
+        "C-PH111",
+        "HUM111",
+        "C-CS112",
+        "C-MA112",
+        "C-PH112",
+        "C-PH113",
+        "HUM224",
+        "C-MA213",
+        "C-ST211",
+        "C-CS213",
+        "C-CS214",
+        "HUM126",
+        "C-CS215",
+        "C-CS218",
+        "C-CS219",
+        "C-DE211",
+        "HUM221",
+        "HUM125",
+        "C-DE312",
+        "C-SW312",
+        "C-CS316",
+        "C-SW411",
+        "C-SW412",
+        "HUM228",
+        "C-SW413"
+      ],
+      "elective_options": [
+        "C-AI311",
+        "C-AI321",
+        "C-CS351",
+        "C-CS352",
+        "C-CS417",
+        "C-CS495",
+        "C-CS496",
+        "C-DE324",
+        "C-GP411A",
+        "C-GP411B",
+        "C-MA321",
+        "C-SW311",
+        "C-SW421",
+        "C-SW422",
+        "C-SW425",
+        "C-TR304",
+        "HUM110",
+        "HUM129",
+        "HUM412"
+      ]
+    },
+    "Cyber": {
+      "total_credits_required": 133,
+      "minimum_semesters": 6,
+      "required_courses": [
+        "C-MA110",
+        "C-CS111",
+        "C-MA111",
+        "C-PH111",
+        "HUM111",
+        "C-CS112",
+        "C-MA112",
+        "C-PH112",
+        "C-PH113",
+        "HUM224",
+        "C-MA213",
+        "C-ST211",
+        "C-CS213",
+        "C-CS214",
+        "HUM126",
+        "C-CS215",
+        "C-CS218",
+        "C-CS219",
+        "C-DE211",
+        "HUM221",
+        "HUM125",
+        "C-DE312",
+        "C-CS316",
+        "C-CYB301",
+        "C-CYB302",
+        "C-CYB401",
+        "HUM228",
+        "C-CYB402"
+      ],
+      "elective_options": [
+        "C-AI311",
+        "C-CS351",
+        "C-CS352",
+        "C-CS435",
+        "C-CS495",
+        "C-CS496",
+        "C-CYB403",
+        "C-CYB405",
+        "C-CYB413",
+        "C-DE324",
+        "C-GP411A",
+        "C-GP411B",
+        "C-MA321",
+        "C-SW311",
+        "C-TR304",
+        "HUM110",
+        "HUM129",
+        "HUM412"
+      ]
+    },
+    "Data Science": {
+      "total_credits_required": 133,
+      "minimum_semesters": 6,
+      "required_courses": [
+        "C-MA110",
+        "C-CS111",
+        "C-MA111",
+        "C-PH111",
+        "HUM111",
+        "C-CS112",
+        "C-MA112",
+        "C-PH112",
+        "C-PH113",
+        "HUM224",
+        "C-MA213",
+        "C-ST211",
+        "C-CS213",
+        "C-CS214",
+        "HUM126",
+        "C-CS215",
+        "C-CS218",
+        "C-CS219",
+        "C-DE211",
+        "HUM221",
+        "HUM125",
+        "C-AI311",
+        "C-DE312",
+        "C-SW312",
+        "C-AI321",
+        "C-DE324",
+        "HUM228",
+        "C-DE413"
+      ],
+      "elective_options": [
+        "C-CS316",
+        "C-CS351",
+        "C-CS352",
+        "C-CS495",
+        "C-CS496",
+        "C-DE421",
+        "C-DE422",
+        "C-DE423",
+        "C-DE424",
+        "C-DE427",
+        "C-GP411A",
+        "C-GP411B",
+        "C-MA321",
+        "C-SW311",
+        "C-TR304",
+        "HUM110",
+        "HUM129",
+        "HUM412"
+      ]
+    }
+  },
+  "global_rules": {
+    "minimum_cgpa": 2.0,
+    "minimum_semesters": 6,
+    "credit_limits": {
+      "above_3_0": 21,
+      "between_2_0_and_3_0": 18,
+      "below_2_0": 15,
+      "below_1_0": 12
+    },
+    "final_semester_max_credits_exception": 21,
+    "retake_policy": {
+      "max_retakes_per_course": 2,
+      "retake_replaces_grade": true
+    }
+  },
+  "graduation_audit_rules": {
+    "total_credit_hours_required": 133,
+    "minimum_semesters": 6,
+    "maximum_regular_semesters": 16,
+    "academic_levels": 4,
+    "minimum_cgpa": 2.0,
+    "max_transfer_credits_percentage": 50,
+    "additional_requirements": [
+      "Pass ALL 0-credit courses",
+      "Pass Graduation Project",
+      "Finish Field Training during allowed intervals",
+      "Pass military training course (Male students only)"
+    ],
+    "honors_criteria": {
+      "minimum_cgpa": 3.0,
+      "semesters_allowed": [
+        6,
+        7,
+        8
+      ],
+      "no_failed_courses": true,
+      "no_disciplinary_penalties": true
+    }
+  },
+  "semester_generation_rules": {
+    "regular_semester": {
+      "minimum_credit_hours": 9,
+      "load_limits": [
+        {
+          "condition": "CGPA >= 3.0",
+          "max_credit_hours": 21,
+          "requires_dean_approval": true
+        },
+        {
+          "condition": "2.0 <= CGPA < 3.0",
+          "max_credit_hours": 18
+        },
+        {
+          "condition": "1.0 <= CGPA < 2.0",
+          "max_credit_hours": 15
+        },
+        {
+          "condition": "CGPA < 1.0",
+          "max_credit_hours": 12
+        },
+        {
+          "condition": "Final graduating semester",
+          "max_credit_hours": 21,
+          "overrides_probation": true
+        }
+      ],
+      "extra_course_allowed": {
+        "condition": "Previously obtained Incomplete (I) grade in the course",
+        "requires_council_approval": true
+      }
+    },
+    "summer_semester": {
+      "load_limits": [
+        {
+          "condition": "CGPA >= 3.0",
+          "max_courses": 3,
+          "requires_advisor_approval": true
+        },
+        {
+          "condition": "CGPA < 3.0",
+          "max_courses": 2,
+          "requires_advisor_approval": true
+        }
+      ]
+    }
+  },
+  "grading_scale": [
+    {
+      "letter": "A+",
+      "points": 4.0,
+      "min_percentage": 96
+    },
+    {
+      "letter": "A",
+      "points": 3.7,
+      "min_percentage": 92,
+      "max_percentage": 95.9
+    },
+    {
+      "letter": "A-",
+      "points": 3.4,
+      "min_percentage": 88,
+      "max_percentage": 91.9
+    },
+    {
+      "letter": "B+",
+      "points": 3.2,
+      "min_percentage": 84,
+      "max_percentage": 87.9
+    },
+    {
+      "letter": "B",
+      "points": 3.0,
+      "min_percentage": 80,
+      "max_percentage": 83.9
+    },
+    {
+      "letter": "B-",
+      "points": 2.8,
+      "min_percentage": 76,
+      "max_percentage": 79.9
+    },
+    {
+      "letter": "C+",
+      "points": 2.6,
+      "min_percentage": 72,
+      "max_percentage": 75.9
+    },
+    {
+      "letter": "C",
+      "points": 2.4,
+      "min_percentage": 68,
+      "max_percentage": 71.9
+    },
+    {
+      "letter": "C-",
+      "points": 2.2,
+      "min_percentage": 64,
+      "max_percentage": 67.9
+    },
+    {
+      "letter": "D+",
+      "points": 2.0,
+      "min_percentage": 60,
+      "max_percentage": 63.9
+    },
+    {
+      "letter": "D",
+      "points": 1.5,
+      "min_percentage": 55,
+      "max_percentage": 59.9
+    },
+    {
+      "letter": "D-",
+      "points": 1.0,
+      "min_percentage": 50,
+      "max_percentage": 54.9
+    },
+    {
+      "letter": "F",
+      "points": 0.0,
+      "max_percentage": 49.9,
+      "description": "Fail"
+    },
+    {
+      "letter": "Abs",
+      "points": 0.0,
+      "description": "Absent from final exam without approved excuse"
+    },
+    {
+      "letter": "P",
+      "points": null,
+      "description": "Pass (for 0-credit courses)"
+    },
+    {
+      "letter": "W",
+      "points": null,
+      "description": "Withdraw"
+    },
+    {
+      "letter": "I",
+      "points": null,
+      "description": "Incomplete"
+    }
+  ],
+  "course_retake_rules": {
+    "failed_course": {
+      "condition": "Grade F",
+      "max_grade_first_retake": "B",
+      "requirements": [
+        "Redo coursework",
+        "Satisfy attendance",
+        "Sit for final exam"
+      ]
+    },
+    "passed_course_cgpa_below_2": {
+      "condition": "CGPA < 2.0",
+      "max_grade_first_retake": "Highest achieved",
+      "max_grade_subsequent_retakes": "B",
+      "retake_limit": "Unlimited"
+    },
+    "passed_course_cgpa_above_2": {
+      "condition": "CGPA >= 2.0",
+      "max_grade_first_retake": "Highest achieved",
+      "retake_limit": 3
+    }
+  },
+  "attendance_and_absence_rules": {
+    "minimum_attendance_percentage": 75,
+    "penalty_below_attendance": "Automatic F grade, prevented from final exam",
+    "missed_final_exam_no_excuse": "Abs/F grade, must retake",
+    "missed_course_exam_limit": 2
+  },
+  "probation_and_dismissal_rules": {
+    "academic_probation": "CGPA < 2.0",
+    "dismissal_conditions": [
+      "4 academic warnings in 4 consecutive regular semesters",
+      "6 academic warnings in 6 separate regular semesters",
+      "Failure to graduate in 16 regular semesters (excluding approved leaves)"
+    ],
+    "leave_of_absence_limits": "Max 4 consecutive or 6 separate semesters"
+  }
+}

@@ -306,6 +306,186 @@ def q_search_courses_by_skill(client, skills: list) -> dict:
     }
 
 
+# ── OP5: Get Course Focus ────────────────────────────────────────────────────
+def q_get_course_focus(client, course_code: str) -> dict:
+    """
+    Returns the primary focus/specialization area of a course.
+    Focus is derived from the track(s) the course belongs to and the
+    skill categories it teaches. Used for career guidance recommendations.
+    """
+    if not course_code or not str(course_code).strip():
+        return {"error": "invalid_course_code", "submitted_code": course_code}
+
+    code = str(course_code).strip()
+    if not _is_valid_course_code(code):
+        return {"error": "invalid_course_code", "submitted_code": code}
+
+    rows = client.execute_query(
+        """
+        MATCH (c:Course {course_code: $code})
+        OPTIONAL MATCH (c)-[:BELONGS_TO]->(t:Track)
+        RETURN
+            c.course_code AS course_code,
+            c.name        AS name,
+            collect(DISTINCT CASE
+                WHEN t IS NOT NULL THEN {track_id: t.track_id, name: t.name}
+            END) AS tracks
+        """,
+        {"code": code}
+    )
+
+    if not rows:
+        return {"error": "course_not_found", "submitted_code": code}
+
+    row = rows[0]
+    tracks = sorted([t for t in (row.get("tracks") or []) if t],
+                    key=lambda x: x.get("track_id") or "")
+
+    cat_rows = client.execute_query(
+        """
+        MATCH (c:Course {course_code: $code})-[:TEACHES]->(s:Skill)
+        WHERE s.category IS NOT NULL
+        RETURN s.category AS category, count(s) AS skill_count
+        ORDER BY skill_count DESC, s.category
+        """,
+        {"code": code}
+    )
+    skill_categories = [
+        {"category": r["category"], "skill_count": r["skill_count"]}
+        for r in cat_rows
+    ]
+
+    # Single-track course → track_id is the primary focus.
+    # Cross-track or general course → None (caller inspects tracks/skill_categories).
+    primary_focus = tracks[0]["track_id"] if len(tracks) == 1 else None
+
+    return {
+        "course_code": code,
+        "name": row["name"],
+        "tracks": tracks,
+        "skill_categories": skill_categories,
+        "primary_focus": primary_focus,
+    }
+
+
+# ── OP6: Get Focus Courses for Target ───────────────────────────────────────
+def q_get_focus_courses_for_target(
+    client,
+    target_id: str,
+    target_type: str,
+    completed_courses: list,
+) -> dict:
+    """
+    Given a target (track or role) and the student's completed courses, returns
+    the courses they have NOT yet taken, ranked by how many skills relevant to
+    that target each course teaches. Empty completed_courses is valid (freshman).
+    """
+    if not target_id or not str(target_id).strip():
+        return {"error": "no_target_provided"}
+
+    tid = str(target_id).strip()
+
+    if target_type not in ("track", "role"):
+        return {"error": "invalid_target_type", "accepted_values": ["track", "role"]}
+
+    #deduplicate completed_courses; empty list is valid
+    cleaned = []
+    seen = set()
+    for c in (completed_courses or []):
+        if c and str(c).strip():
+            code = str(c).strip()
+            if code not in seen:
+                seen.add(code)
+                cleaned.append(code)
+
+    #target existence check + skill fetch
+    if target_type == "track":
+        exists = client.execute_query(
+            "MATCH (t:Track {track_id: $tid}) RETURN t.name AS name", {"tid": tid}
+        )
+        if not exists:
+            return {"error": "track_not_found", "submitted_target_id": tid}
+        target_name = exists[0]["name"]
+
+        skill_rows = client.execute_query(
+            """
+            MATCH (t:Track {track_id: $tid})<-[:BELONGS_TO]-(c:Course)-[:TEACHES]->(s:Skill)
+            RETURN DISTINCT s.skill_id AS skill_id, s.name AS skill_name
+            ORDER BY s.skill_id
+            """,
+            {"tid": tid}
+        )
+    else:
+        exists = client.execute_query(
+            "MATCH (r:Role {role_id: $tid}) RETURN r.name AS name", {"tid": tid}
+        )
+        if not exists:
+            return {"error": "role_not_found", "submitted_target_id": tid}
+        target_name = exists[0]["name"]
+
+        skill_rows = client.execute_query(
+            """
+            MATCH (r:Role {role_id: $tid})-[:REQUIRES]->(s:Skill)
+            RETURN s.skill_id AS skill_id, s.name AS skill_name
+            ORDER BY s.skill_id
+            """,
+            {"tid": tid}
+        )
+
+    if not skill_rows:
+        return {
+            "target_id": tid,
+            "target_type": target_type,
+            "target_name": target_name,
+            "total_target_skills": 0,
+            "focus_courses": [],
+            "total_focus_courses": 0,
+            "warning": "No skills mapped to this target.",
+        }
+
+    target_skill_ids = [r["skill_id"] for r in skill_rows]
+
+    course_rows = client.execute_query(
+        """
+        MATCH (c:Course)-[:TEACHES]->(s:Skill)
+        WHERE s.skill_id IN $target_skill_ids
+          AND NOT c.course_code IN $completed
+        WITH c, collect(DISTINCT {skill_id: s.skill_id, skill_name: s.name}) AS relevant_skills
+        RETURN
+            c.course_code AS course_code,
+            c.name        AS name,
+            c.credits     AS credits,
+            c.level       AS level,
+            relevant_skills
+        ORDER BY size(relevant_skills) DESC, c.level ASC
+        """,
+        {"target_skill_ids": target_skill_ids, "completed": cleaned}
+    )
+
+    focus_courses = [
+        {
+            "course_code": r["course_code"],
+            "name": r["name"],
+            "credits": r["credits"],
+            "level": r["level"],
+            "relevant_skill_count": len(r["relevant_skills"]),
+            "relevant_skills": sorted(
+                r["relevant_skills"], key=lambda x: x.get("skill_id") or ""
+            ),
+        }
+        for r in course_rows
+    ]
+
+    return {
+        "target_id": tid,
+        "target_type": target_type,
+        "target_name": target_name,
+        "total_target_skills": len(target_skill_ids),
+        "focus_courses": focus_courses,
+        "total_focus_courses": len(focus_courses),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # B1 — Career Role Exploration (Curriculum-aware)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1227,6 +1407,66 @@ def q_recommend_track_for_skill(client, skill_id: str) -> dict:
     return {
         "skill_id": sid, "skill_name": skill_name,
         "ranked_tracks": ranked, "total_tracks_evaluated": len(all_tracks),
+    }
+
+
+# ── OP B3-5: Get Courses by Track ────────────────────────────────────────────
+def q_get_courses_by_track(client, track_id: str) -> dict:
+    """
+    Returns all courses belonging to a track with full planning metadata:
+    code, name, credits, level, prerequisites (course codes), semester_offering,
+    and track. Ordered by level then course_code.
+    Used by the ALE for semester planning and graduation roadmap generation.
+    """
+    if not track_id or not str(track_id).strip():
+        return {"error": "no_track_provided"}
+
+    tid = str(track_id).strip()
+
+    exists = client.execute_query(
+        "MATCH (t:Track {track_id: $tid}) RETURN t.name AS name", {"tid": tid}
+    )
+    if not exists:
+        return {"error": "track_not_found", "submitted_track_id": tid}
+    track_name = exists[0]["name"]
+
+    rows = client.execute_query(
+        """
+        MATCH (c:Course)-[:BELONGS_TO]->(t:Track {track_id: $tid})
+        OPTIONAL MATCH (c)-[:PREREQ]->(p:Course)
+        WITH c, t, collect(DISTINCT CASE WHEN p IS NOT NULL THEN p.course_code END) AS prerequisites
+        RETURN
+            c.course_code       AS course_code,
+            c.name              AS name,
+            c.credits           AS credits,
+            c.level             AS level,
+            c.semester_offering AS semester_offering,
+            prerequisites
+        ORDER BY c.level, c.course_code
+        """,
+        {"tid": tid}
+    )
+
+    courses = []
+    for r in rows:
+        raw_sem = r.get("semester_offering") or ""
+        sem_list = [s.strip() for s in raw_sem.split(",") if s.strip()]
+        prereqs = sorted([p for p in (r.get("prerequisites") or []) if p])
+        courses.append({
+            "course_code": r["course_code"],
+            "name": r["name"],
+            "credits": r["credits"],
+            "level": r["level"],
+            "prerequisites": prereqs,
+            "semester_offering": sem_list,
+            "track": {"track_id": tid, "name": track_name},
+        })
+
+    return {
+        "track_id": tid,
+        "track_name": track_name,
+        "courses": courses,
+        "total_courses": len(courses),
     }
 
 

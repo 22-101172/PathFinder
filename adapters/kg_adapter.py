@@ -50,6 +50,9 @@ class KGAdapter:
             "compare_tracks":                  self.compare_tracks,
             "recommend_track_for_role":        self.recommend_track_for_role,
             "recommend_track_for_skill":       self.recommend_track_for_skill,
+            "get_courses_by_track":            self.get_courses_by_track,
+            "get_course_focus":                self.get_course_focus,
+            "get_focus_courses_for_target":    self.get_focus_courses_for_target,
             "resolve_entity":                  self.resolve_entity,
         }
         fn = dispatch.get(operation)
@@ -108,6 +111,22 @@ class KGAdapter:
 
     def recommend_track_for_skill(self, skill_id: str) -> dict:
         return Q.q_recommend_track_for_skill(self._client, skill_id)
+
+    def get_courses_by_track(self, track_id: str) -> dict:
+        return Q.q_get_courses_by_track(self._client, track_id)
+
+    def get_course_focus(self, course_code: str) -> dict:
+        return Q.q_get_course_focus(self._client, course_code)
+
+    def get_focus_courses_for_target(
+        self,
+        target_id: str,
+        target_type: str,
+        completed_courses: list,
+    ) -> dict:
+        return Q.q_get_focus_courses_for_target(
+            self._client, target_id, target_type, completed_courses
+        )
 
     def resolve_entity(self, entity_type: str, entity_text: str) -> dict:
         return Q.q_resolve_entity(self._client, entity_type, entity_text)

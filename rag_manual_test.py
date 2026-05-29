@@ -1,14 +1,14 @@
 from adapters.rag_adapter import RAGAdapter
 
-queries = [
-    "What is the attendance policy?",
-    "What happens if I miss the final exam without an approved excuse?",
-    "What is the rule for retaking a failed course?",
-    "How many credit hours can I register if my CGPA is 2.5?",
-    "What are the graduation requirements?",
-    "What is the academic warning policy?",
-    "What is the withdrawal rule?",
-    "Can the handbook predict my GPA?",
+queries = ['What is the graduation requirements?'
+    # "What is the attendance policy?",
+#     "What happens if I miss the final exam without an approved excuse?",
+#     "What is the rule for retaking a failed course?",
+#     "How many credit hours can I register if my CGPA is 2.5?",
+#     "What are the graduation requirements?",
+#     "What is the academic warning policy?",
+#     "What is the withdrawal rule?",
+#     "Can the handbook predict my GPA?",
 ]
 
 adapter = RAGAdapter()

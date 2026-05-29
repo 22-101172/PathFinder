@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Literal
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class QueryRequest(BaseModel):
@@ -83,6 +83,10 @@ class StudentContext(BaseModel):
     failed_courses: list[str] = []
     in_progress_courses: list[str] = []
     planned_courses: list[str] = []
+    completed_regular_semesters: int = 0
+    zero_credit_courses_passed: bool = False
+    retake_count: dict[str, int] = Field(default_factory=dict)
+    total_improve_retakes_used: int = 0
 
 
 class LastReferenced(BaseModel):

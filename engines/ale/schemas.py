@@ -195,6 +195,21 @@ class GradingScaleRules(BaseModel):
     )
 
 
+class StudentLevelRules(BaseModel):
+    """
+    Governs student academic level thresholds based on passed credit hours.
+    Used by: generate_semester_plan, generate_graduation_roadmap
+    Source: CIS Handbook — Student Level thresholds.
+    """
+    freshman_max_hours: int = Field(description="0 to this value = Freshman")
+    sophomore_min_hours: int
+    sophomore_max_hours: int
+    junior_min_hours: int
+    junior_max_hours: int
+    senior_min_hours: int
+    senior_max_hours: int = Field(description="= total_credits_required")
+
+
 # =============================================================================
 # SECTION 2 — SHARED SUB-MODELS
 # Reused across multiple functions.
@@ -494,6 +509,7 @@ class GenerateSemesterPlanInput(BaseModel):
         default=False,
         description="If True, always applies CGPA-bracket maximum"
     )
+    student_level_rules: StudentLevelRules
 
 
 class GenerateGraduationRoadmapInput(BaseModel):
@@ -553,6 +569,7 @@ class GenerateGraduationRoadmapInput(BaseModel):
         default=None,
         description="Pre-resolved to grade points by orchestrator. Defaults to 2.6 (C+) if None."
     )
+    student_level_rules: StudentLevelRules
 
 
 # =============================================================================

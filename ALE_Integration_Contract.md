@@ -290,6 +290,25 @@ The orchestrator must call the RAG engine to obtain structured rule bundles and 
 
 ---
 
+### `student_level_rules`
+
+```python
+{
+    "freshman_max_hours":  26,
+    "sophomore_min_hours": 27,
+    "sophomore_max_hours": 59,
+    "junior_min_hours":    60,
+    "junior_max_hours":    93,
+    "senior_min_hours":    94,
+    "senior_max_hours":    133
+}
+```
+
+Source: CIS Handbook — Student Level classification by passed credit hours.
+Required by: `generate_semester_plan`, `generate_graduation_roadmap`.
+
+---
+
 ## Section 5 — KG Engine Contract
 
 The orchestrator must call the KG engine before calling ALE for operations that require course data. The KG is the authoritative source of course structure; the ALE never calls KG directly.
@@ -395,7 +414,7 @@ For each operation, the orchestrator must assemble the following before calling 
 | Step | Action |
 |---|---|
 | KG call | `get_courses_by_track(student_context.track_id)` → pass result list as `kg_data["available_courses"]` |
-| rule_bundles keys | `credit_limit_rules`, `graduation_rules`, `retake_rules`, `summer_rules` (required only when `target_semester_type == "Summer"`) |
+| rule_bundles keys | `credit_limit_rules`, `graduation_rules`, `retake_rules`, `student_level_rules`, `summer_rules` (required only when `target_semester_type == "Summer"`) |
 | params | `target_semester_type` (required). `target_credit_load`, `max_credits_mode`, `specialization_credit_threshold`, `target_track` (all optional). |
 
 ---
@@ -405,7 +424,7 @@ For each operation, the orchestrator must assemble the following before calling 
 | Step | Action |
 |---|---|
 | KG call | `get_courses_by_track(student_context.track_id)` → pass result list as `kg_data["available_courses"]`. Exclude Field Training or other non-standard entries as needed. |
-| rule_bundles keys | `grading_scale`, `retake_rules`, `graduation_rules`, `warning_rules`, `honors_rules`, `credit_limit_rules`, `summer_rules` (required only when `accelerated_mode=True` or `target_semester_type == "Summer"`) |
+| rule_bundles keys | `grading_scale`, `retake_rules`, `graduation_rules`, `warning_rules`, `honors_rules`, `credit_limit_rules`, `student_level_rules`, `summer_rules` (required only when `accelerated_mode=True` or `target_semester_type == "Summer"`) |
 | params | `target_semester_type` (required), `starting_year` (required, calendar year of first pass). `assumed_grade_per_pass`, `accelerated_mode`, `max_credits_mode`, `target_credit_load`, `specialization_credit_threshold`, `target_track` (all optional). |
 
 ---

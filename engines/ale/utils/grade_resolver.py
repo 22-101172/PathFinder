@@ -8,7 +8,7 @@ Returns None for P-grade (caller treats course as gpa_neutral).
 Raises GradeResolutionError for invalid inputs — caller maps this to cannot_compute.
 """
 
-from engines.ale.schemas import GradingScaleRules
+from engines.ale.schemas import GradingScaleRules, StudentLevelRules
 
 
 class GradeResolutionError(Exception):
@@ -76,4 +76,19 @@ def _resolve_percentage(
             # Delegate to letter resolution so P-grade is handled consistently
             return _resolve_letter(range_entry.letter, grading_scale, course_code)
     raise GradeResolutionError(course_code, pct)
+
+
+def derive_level(passed_hours: int, rules: StudentLevelRules) -> str:
+    """Derive student level from passed hours using injected handbook rules.
+    Source: CIS Handbook — Student Level thresholds.
+    Never hardcode the hour boundaries here. Always use rules fields.
+    """
+    if passed_hours <= rules.freshman_max_hours:
+        return "Freshman"
+    elif passed_hours <= rules.sophomore_max_hours:
+        return "Sophomore"
+    elif passed_hours <= rules.junior_max_hours:
+        return "Junior"
+    else:
+        return "Senior"
 

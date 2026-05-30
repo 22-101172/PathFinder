@@ -21,6 +21,7 @@ from engines.ale.schemas import (
     GradingScaleRules, RetakeRules, GraduationRequirementRules,
     AcademicWarningRules, HonorsRules, CreditLimitRules,
     SummerSemesterRules, CourseHistoryEntry, AvailableCourse,
+    StudentLevelRules,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,40 +71,31 @@ def _map_course_history(course_history) -> list[CourseHistoryEntry]:
     return entries
 
 
-def _normalize_semester_offering(raw) -> str:
-    if isinstance(raw, list):
-        has_fall = any(s.lower() == "fall" for s in raw)
-        has_spring = any(s.lower() == "spring" for s in raw)
-        has_summer = any(s.lower() == "summer" for s in raw)
-        if has_fall and has_spring:
-            return "Both"
-        if has_summer and not has_fall and not has_spring:
-            return "Summer"
-        if has_fall:
-            return "Fall"
-        if has_spring:
-            return "Spring"
-        return "Both"
-    return raw
-
 
 def _map_available_courses(kg_data: dict) -> list[AvailableCourse]:
     courses = []
     for c in kg_data.get("available_courses", []):
         track_raw = c.get("track")
-        track_str = track_raw["track_id"] if isinstance(track_raw, dict) else track_raw
+        if isinstance(track_raw, dict):
+            track_list = [track_raw["track_id"]]
+        elif isinstance(track_raw, list):
+            track_list = track_raw
+        elif track_raw is not None:
+            track_list = [track_raw]
+        else:
+            track_list = []
 
         sem_raw = c.get("semester_offering")
-        sem_str = _normalize_semester_offering(sem_raw) if sem_raw is not None else c.get("semester_offering")
+        sem_list = sem_raw if isinstance(sem_raw, list) else ([sem_raw] if sem_raw else [])
 
         courses.append(AvailableCourse(
-            code=c.get("code") or c.get("course_code"),
+            course_code=c.get("course_code"),
             name=c.get("name"),
             credits=c.get("credits"),
             level=c.get("level"),
             prerequisites=c.get("prerequisites", []),
-            semester_offering=sem_str,
-            track=track_str,
+            semester_offering=sem_list,
+            track=track_list,
         ))
     return courses
 
@@ -227,6 +219,7 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
     credit_limit_rules = _parse_rules(rule_bundles, "credit_limit_rules", CreditLimitRules)
     graduation_rules = _parse_rules(rule_bundles, "graduation_rules", GraduationRequirementRules)
     retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
+    student_level_rules = _parse_rules(rule_bundles, "student_level_rules", StudentLevelRules)
 
     summer_rules = None
     if "summer_rules" in rule_bundles:
@@ -256,6 +249,7 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
         target_track=params.get("target_track", None),
         target_credit_load=params.get("target_credit_load", None),
         max_credits_mode=params.get("max_credits_mode", False),
+        student_level_rules=student_level_rules,
     )
     return generate_semester_plan(inp).model_dump()
 
@@ -264,6 +258,7 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
     credit_limit_rules = _parse_rules(rule_bundles, "credit_limit_rules", CreditLimitRules)
     graduation_rules = _parse_rules(rule_bundles, "graduation_rules", GraduationRequirementRules)
     retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
+    student_level_rules = _parse_rules(rule_bundles, "student_level_rules", StudentLevelRules)
 
     summer_rules = None
     if "summer_rules" in rule_bundles:
@@ -301,6 +296,7 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
         accelerated_mode=params.get("accelerated_mode", False),
         max_credits_mode=params.get("max_credits_mode", False),
         target_credit_load=params.get("target_credit_load", None),
+        student_level_rules=student_level_rules,
     )
     return generate_graduation_roadmap(inp).model_dump()
 

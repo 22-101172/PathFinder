@@ -135,6 +135,15 @@ def rule_bundles():
             "cgpa_above_3_max_courses": 3,
             "cgpa_threshold_for_extra_course": 3.0,
         },
+        "student_level_rules": {
+            "freshman_max_hours": 26,
+            "sophomore_min_hours": 27,
+            "sophomore_max_hours": 59,
+            "junior_min_hours": 60,
+            "junior_max_hours": 93,
+            "senior_min_hours": 94,
+            "senior_max_hours": 133,
+        },
     }
 
 

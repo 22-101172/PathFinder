@@ -22,6 +22,7 @@ from engines.ale.schemas import (
     RoadmapSemester,
     SummerSemesterRules,
 )
+from engines.ale.utils.grade_resolver import derive_level
 
 # CGPA bracket boundaries — inherent to CreditLimitRules field structure
 _CGPA_HIGH = 3.0
@@ -262,7 +263,7 @@ def generate_graduation_roadmap(
                     active_credit_cap = credit_limit_rules.cgpa_below_1_limit
 
         # Eligible pool for this pass
-        student_level_int = _derive_level_int(sim_passed_hrs)
+        student_level_int = _LEVEL_MAP[derive_level(sim_passed_hrs, input.student_level_rules)]
         pool: list[_PoolEntry] = []
 
         for ac in input.available_courses:
@@ -490,20 +491,6 @@ def _assign_priority_level(
     if level_match:
         return "level_match"
     return "standard"
-
-
-def _derive_level_int(passed_hrs: int) -> int:
-    """Derive academic level integer from passed credit hours.
-
-    Thresholds must match the SC: Freshman <36, Sophomore 36–71, Junior 72–107, Senior ≥108.
-    """
-    if passed_hrs >= 108:
-        return _LEVEL_MAP["Senior"]
-    if passed_hrs >= 72:
-        return _LEVEL_MAP["Junior"]
-    if passed_hrs >= 36:
-        return _LEVEL_MAP["Sophomore"]
-    return _LEVEL_MAP["Freshman"]
 
 
 def _advance_semester(season: str, year: int, accelerated: bool) -> tuple[str, int]:

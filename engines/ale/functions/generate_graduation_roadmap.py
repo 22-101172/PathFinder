@@ -254,7 +254,6 @@ def generate_graduation_roadmap(
             elif input.target_credit_load is not None:
                 active_credit_cap = min(input.target_credit_load, cgpa_bracket_max)
             else:
-                # Default: 18 for CGPA >= 2.0, 15 for >= 1.0, 12 for < 1.0
                 if sim_cgpa >= _CGPA_MID:
                     active_credit_cap = credit_limit_rules.cgpa_between_2_and_3_limit
                 elif sim_cgpa >= _CGPA_LOW:

@@ -10,5 +10,6 @@ env/
 .mypy_cache/
 .ruff_cache/
 *.sqlite3
+*.db
 engines/rag/chroma_db/
 engines/rag/chunks.pkl

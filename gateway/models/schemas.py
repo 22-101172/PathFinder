@@ -32,6 +32,17 @@ class EntitySet(BaseModel):
 class SessionOverrides(BaseModel):
     added_courses: list[str] = []
     target_role: Optional[str] = None
+    course_override_type: Literal[
+        "planned",
+        "assumed_done",
+        "gpa_scenario",
+        "none"
+    ] = "none"
+    override_action: Literal[
+        "accumulate",
+        "replace",
+        "clear"
+    ] = "accumulate"
 
 
 class StructuredQuery(BaseModel):
@@ -52,7 +63,8 @@ class CourseRecord(BaseModel):
     credit_hours: int
     grade: Optional[str] = None
     semester_taken: str
-    status: Literal["passed", "repeated", "failed", "in_progress", "withdrawn"]
+    status: Literal["passed", "repeated", "failed", "in_progress",
+                    "withdrawn", "incomplete"]
 
 
 class StudentContext(BaseModel):
@@ -63,10 +75,8 @@ class StudentContext(BaseModel):
     level: int
     first_semester: str
     study_status: str
-    current_semester: str
     military_status: Optional[str] = None
     cgpa: Optional[float] = None
-    academic_standing: str
     last_semester_gpa: Optional[float] = None
     total_credit_hours_earned: int
     cumulative_chs: Optional[int] = None
@@ -82,9 +92,8 @@ class StudentContext(BaseModel):
     completed_courses: list[str] = []
     failed_courses: list[str] = []
     in_progress_courses: list[str] = []
-    planned_courses: list[str] = []
     completed_regular_semesters: int = 0
-    zero_credit_courses_passed: bool = False
+    zero_credit_courses_passed: list[str] = Field(default_factory=list)
     retake_count: dict[str, int] = Field(default_factory=dict)
     total_improve_retakes_used: int = 0
 
@@ -93,6 +102,13 @@ class LastReferenced(BaseModel):
     course_code: Optional[str] = None
     role_id: Optional[str] = None
     track_id: Optional[str] = None
+
+
+class QUContext(BaseModel):
+    user_text: str
+    recent_turns: list[dict]
+    last_referenced: LastReferenced
+    current_overrides: SessionOverrides
 
 
 class SessionState(BaseModel):

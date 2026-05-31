@@ -40,7 +40,7 @@ The `gateway/` package coordinates the system:
 - `orchestrator.py`: routes the request to KG, RAG, ALE, or mixed execution
 - `response_composer.py`: turns raw engine output into a user-friendly answer
 - `student_context_provider.py`: loads student data from Excel and builds a normalized student context
-- `session_manager.py`: stores sessions and recent chat history in memory
+- `session_manager.py`: manages sessions and conversation history, persisted to SQLite via the `gateway/session_store` package; exposes context-windowed turn history to query understanding and supports per-session course and role overrides
 
 ### 3. Engine Layer
 
@@ -135,6 +135,7 @@ PathFinder_Integration/
 |  |- kg/                 # Neo4j queries and client
 |  |- rag/                # Handbook ingestion and retrieval
 |- gateway/               # Routing, context, session, response composition
+|  |- session_store/      # SessionStore ABC and SQLiteSessionStore implementation
 |- ui/                    # Streamlit frontend
 |- main.py                # FastAPI entrypoint
 |- requirements.txt       # Backend dependencies
@@ -163,6 +164,8 @@ The code reads configuration from `.env`. The important variables used by the pr
 - `NEO4J_PASSWORD`
 - `NEO4J_DATABASE`
 - `PATHFINDER_API_URL` for the Streamlit UI, if the backend is not on `http://localhost:8000`
+- `SESSION_DB_PATH` path to the SQLite file used for session persistence (default: `pathfinder_sessions.db`)
+- `QU_CONTEXT_TURNS` number of recent turns passed to the query understanding context window (default: `5`)
 
 ## Setup
 
@@ -218,7 +221,7 @@ You can use prompts like:
 
 These are worth knowing if you continue developing the project:
 
-- Sessions are stored in memory only. Restarting the backend clears chat history.
+- Sessions are persisted in a local SQLite file (`SESSION_DB_PATH`). Horizontal scaling or a shared remote store is not yet supported.
 - The current semester is hardcoded in the student context provider as `Spring 2026`.
 - Student login is based only on IDs found in the Excel sheet.
 - The backend assumes the student Excel file has the expected sheet names and columns.
@@ -235,7 +238,6 @@ These are worth knowing if you continue developing the project:
 
 ## Suggested Next Improvements
 
-- Persist sessions in a database instead of memory
 - Add proper authentication and authorization
 - Connect semester planning to real course offerings
 - Add richer GPA simulation input handling in the UI

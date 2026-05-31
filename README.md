@@ -6,20 +6,26 @@ The project is split into a FastAPI backend and a Streamlit frontend. A student 
 
 - Knowledge Graph for curriculum, tracks, skills, and career-role relationships
 - RAG for handbook and policy questions
-- Academic Logic Engine (ALE) for eligibility, graduation audit, semester planning, and GPA simulation
+- Academic Logic Engine (ALE) for eligibility checking, graduation audit, semester planning, graduation roadmap generation, GPA simulation, and target GPA solving
 - LLM-based query understanding and response composition to make the experience conversational
 
 ## What The Project Does
 
 PathFinder supports several advising workflows:
 
-- Course exploration: course profile, credits, description, level, and prerequisites
+- Course exploration: course profile, credits, description, level, prerequisites, and career-focus classification
 - Skill exploration: what a course teaches and which courses teach a given skill
-- Career guidance: role profiles, role-track fit, best matching roles, and skill gaps
+- Career guidance: role profiles, role-track fit, best matching roles, skill gaps, and focus-course recommendations for a target role or track
 - Track guidance: track overviews, comparisons, and recommendations
 - Policy Q&A: handbook-based answers with citations
 - Student-aware advising: uses the logged-in student's academic context from the Excel dataset
-- Session-based chat: keeps conversation history and resolves follow-up references like "that course" or "that track"
+- Eligibility checking: whether a student can take a specific course under a given attempt type
+- Graduation audit: checks all graduation requirements and honors eligibility in one call
+- Semester planning: generates multiple plan variants (recommended, lighter load, level-focused) for a target semester
+- Graduation roadmap: builds a full semester-by-semester plan from current standing to projected graduation with simulated GPA
+- GPA simulation: projects CGPA forward given hypothetical grades, with retake-cap enforcement
+- Target GPA solving: determines the grades needed across planned courses to reach a target CGPA, with multi-semester projection and personalized per-course targets
+- Session-based chat: keeps conversation history and resolves follow-up references like "that course" or "that track"; supports per-session course and role overrides
 
 ## Architecture
 
@@ -39,8 +45,8 @@ The `gateway/` package coordinates the system:
 - `query_understanding.py`: classifies the question into an intent and engine pattern
 - `orchestrator.py`: routes the request to KG, RAG, ALE, or mixed execution
 - `response_composer.py`: turns raw engine output into a user-friendly answer
-- `student_context_provider.py`: loads student data from Excel and builds a normalized student context
-- `session_manager.py`: manages sessions and conversation history, persisted to SQLite via the `gateway/session_store` package; exposes context-windowed turn history to query understanding and supports per-session course and role overrides
+- `student_context_provider.py`: loads student data from Excel and builds a normalized `StudentContext`; computes per-course retake counts, lifetime improve-retake totals, completed regular semesters (Fall/Spring only, all-withdrawn semesters excluded), and zero-credit P-grade course lists; applies best-outcome resolution when a student has multiple attempts at the same course; handles Con grades (graduation project spanning semesters), I grades (incomplete), and withdrawal exclusion
+- `session_manager.py`: manages sessions and conversation history, persisted to SQLite via the `gateway/session_store` package; exposes a context-windowed turn history to query understanding (controlled by `QU_CONTEXT_TURNS`); tracks the last-referenced entity (course, role, track) per session for follow-up resolution; maintains per-session course and role overrides with three merge strategies (`accumulate`, `replace`, `clear`); builds an effective student context by merging `assumed_done` override courses into the student's completed-course list; supports `delete_session`
 
 ### 3. Engine Layer
 
@@ -48,7 +54,7 @@ The `engines/` package contains the reasoning backends:
 
 - `engines/kg/`: Neo4j-backed knowledge graph queries for courses, tracks, skills, and roles; includes a multi-step entity resolver that maps natural-language names to graph IDs
 - `engines/rag/`: handbook retrieval pipeline using Chroma, BM25, and a cross-encoder reranker
-- `engines/ale/`: academic logic modules for eligibility, graduation audit, semester planning, and GPA simulation
+- `engines/ale/`: academic logic modules for eligibility checking, graduation audit, semester planning, graduation roadmap generation, GPA simulation, and target GPA solving
 
 ### 4. Adapter Layer
 
@@ -113,16 +119,38 @@ You only need to rebuild the index when the handbook source changes.
 
 ## Knowledge Graph Engine
 
-The KG engine exposes 16 operations across four query groups:
+The KG engine exposes 19 operations across four query groups:
 
-- **Course catalogue (A2)**: course profile, prerequisites (direct or full recursive tree; non-course constraints are stored as `PrerequisiteConstraint` nodes), skills taught by a course, and course search by skill name
+- **Course catalogue (A2)**: course profile, prerequisites (direct or full recursive tree; non-course constraints are stored as `PrerequisiteConstraint` nodes), skills taught by a course, course search by skill name, course focus classification (primary track/skill-category focus of a course), and focus-course recommendations for a target track or role (courses the student has not yet taken that teach the most relevant skills)
 - **Career role exploration (B1)**: role profiles with weighted required skills, and roles reachable through a track's courses and skills
 - **Skill gap and alignment (B2)**: skill gap analysis, weighted alignment scoring, gap-closing course recommendations, alignment improvement estimation for planned courses, and full role ranking by alignment
-- **Track guidance (B3)**: track overview (courses, skills, supported roles), side-by-side track comparison, and track recommendations for a given role or skill
+- **Track guidance (B3)**: track overview (courses, skills, supported roles), side-by-side track comparison, track recommendations for a given role or skill, and full course list for a track with prerequisites included (used by ALE for semester planning and graduation roadmap generation)
 
 Skills carry a numeric weight that drives all alignment calculations. Weights map to three tiers: `core` (≥ 0.8), `supporting` (≥ 0.6), and `optional` (< 0.6).
 
-The engine also includes a `resolve_entity` operation that maps a natural-language name to a graph ID for any entity type (course, role, track, skill). The resolver runs a six-step pipeline — exact ID match, exact normalized name match, alias lookup, explicit ambiguous-term lookup, partial name match — and loads its alias table from `engines/kg/data/entity_aliases.json`.
+The engine also includes a `resolve_entity` operation that maps a natural-language name to a graph ID for any entity type (course, role, track, skill). The resolver runs a six-step pipeline — input validation, exact ID match, exact normalized name match, alias lookup, explicit ambiguous-term lookup, partial name match — and loads its alias table from `engines/kg/data/entity_aliases.json`.
+
+## Academic Logic Engine
+
+The ALE exposes 6 operations, all driven by rule bundles injected at runtime from RAG (no rules are hardcoded in the engine):
+
+- **check_course_eligibility**: checks whether a student can register for a course under a given attempt type (`first_attempt`, `failed_retake`, `improve_retake`); validates prerequisites, credit thresholds, and retake caps; returns `eligible`, `not_eligible`, `already_completed`, `in_progress`, or `retake_cap_exceeded`
+- **run_graduation_audit**: evaluates all graduation requirements (credits, CGPA, semester count, military training, zero-credit courses) and computes honors eligibility based on full transcript history; returns per-check breakdowns and next-step guidance
+- **generate_semester_plan**: generates two or three plan variants (e.g. Recommended, Lighter Load, Level Focused) for a single target semester (Fall / Spring / Summer); respects CGPA-bracket credit caps, retake priority, and student level
+- **generate_graduation_roadmap**: builds a full semester-by-semester projection from current standing to projected graduation; simulates CGPA after each semester; detects non-course blockers (CGPA, military, zero-credit); supports accelerated (summer) and max-credits modes
+- **simulate_gpa_forward**: projects CGPA forward given hypothetical grades for planned courses; enforces retake caps and handles grade-point replacement vs addition; returns per-course breakdowns and applied grade overrides
+- **solve_target_gpa**: determines the required grade average across planned courses to reach a target CGPA; when impossible in a single semester, generates a multi-semester projection; produces a personalized per-course grade distribution based on prerequisite history
+
+Rule bundles consumed by ALE operations:
+
+- `grading_scale` — letter-to-grade-points mapping and percentage ranges
+- `retake_rules` — failed retake caps, improve-retake caps and limits
+- `credit_limit_rules` — CGPA-bracket credit maxima and minimums per semester
+- `graduation_rules` — total credits, minimum CGPA, semester count bounds, and auxiliary requirements
+- `warning_rules` — warning thresholds and dismissal conditions
+- `honors_rules` — honors eligibility criteria
+- `summer_rules` — summer course count limits
+- `student_level_rules` — credit-hour thresholds for Freshman / Sophomore / Junior / Senior classification
 
 ## Project Structure
 
@@ -222,12 +250,13 @@ You can use prompts like:
 These are worth knowing if you continue developing the project:
 
 - Sessions are persisted in a local SQLite file (`SESSION_DB_PATH`). Horizontal scaling or a shared remote store is not yet supported.
-- The current semester is hardcoded in the student context provider as `Spring 2026`.
+- The current semester label is derived dynamically from the system date in `gateway/utils.py` (`get_current_semester`). There is no administrative override if the academic calendar differs from the calendar mapping (Sep–Jan → Fall, Feb–Jun → Spring, Jul–Aug → Summer).
 - Student login is based only on IDs found in the Excel sheet.
 - The backend assumes the student Excel file has the expected sheet names and columns.
-- Semester planning is wired through ALE, but the current orchestrator passes an empty offerings list, so this feature needs more integration work to produce realistic plans.
-- GPA simulation is implemented in ALE, but the current chat flow does not yet collect a rich simulation scenario from the user.
+- Semester planning and graduation roadmap both receive the available course list from the KG (`get_courses_by_track`). The orchestrator must populate `kg_data["available_courses"]` correctly; if it passes an empty list, ALE will return `no_eligible_courses`.
+- GPA simulation and target GPA solving are implemented in ALE, but the chat flow does not yet gather a rich simulation scenario (e.g. planned courses with attempt types and old grades) automatically from the conversation.
 - The frontend is a lightweight internal UI and does not include authentication beyond student ID entry.
+- The `delete_session` operation exists in the session manager but is not exposed via any API endpoint.
 
 ## Development Notes
 
@@ -239,7 +268,8 @@ These are worth knowing if you continue developing the project:
 ## Suggested Next Improvements
 
 - Add proper authentication and authorization
-- Connect semester planning to real course offerings
-- Add richer GPA simulation input handling in the UI
+- Wire the orchestrator to pass `kg_data["available_courses"]` from `get_courses_by_track` for semester planning and roadmap requests
+- Add richer GPA simulation and target GPA input handling in the UI (collect planned courses, attempt types, old grades from the conversation)
+- Expose `DELETE /session/{session_id}` in the API layer
 - Add tests for routing, adapters, and ALE modules
 - Add deployment instructions for backend, frontend, Neo4j, and vector index artifacts

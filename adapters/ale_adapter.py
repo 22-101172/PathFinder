@@ -135,7 +135,7 @@ def _dispatch(
 # ---------------------------------------------------------------------------
 
 def _simulate_gpa_forward(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
-    grading_scale = _parse_rules(rule_bundles, "grading_scale", GradingScaleRules)
+    grading_scale = _parse_rules(rule_bundles, "grading_scale_rules", GradingScaleRules)
     retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
 
     inp = SimulateGPAForwardInput(
@@ -151,9 +151,9 @@ def _simulate_gpa_forward(sc: StudentContext, rule_bundles: dict, kg_data: dict,
 
 
 def _solve_target_gpa(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
-    grading_scale = _parse_rules(rule_bundles, "grading_scale", GradingScaleRules)
+    grading_scale = _parse_rules(rule_bundles, "grading_scale_rules", GradingScaleRules)
     retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
-    graduation_rules = _parse_rules(rule_bundles, "graduation_rules", GraduationRequirementRules)
+    graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
 
     inp = SolveTargetGPAInput(
         current_cgpa=sc.cgpa,
@@ -191,8 +191,8 @@ def _check_course_eligibility(sc: StudentContext, rule_bundles: dict, kg_data: d
 
 
 def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
-    graduation_rules = _parse_rules(rule_bundles, "graduation_rules", GraduationRequirementRules)
-    warning_rules = _parse_rules(rule_bundles, "warning_rules", AcademicWarningRules)
+    graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
+    warning_rules = _parse_rules(rule_bundles, "academic_warning_rules", AcademicWarningRules)
     honors_rules = _parse_rules(rule_bundles, "honors_rules", HonorsRules)
 
     inp = RunGraduationAuditInput(
@@ -217,13 +217,13 @@ def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict,
 
 def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
     credit_limit_rules = _parse_rules(rule_bundles, "credit_limit_rules", CreditLimitRules)
-    graduation_rules = _parse_rules(rule_bundles, "graduation_rules", GraduationRequirementRules)
+    graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
     retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
     student_level_rules = _parse_rules(rule_bundles, "student_level_rules", StudentLevelRules)
 
     summer_rules = None
-    if "summer_rules" in rule_bundles:
-        summer_rules = _parse_rules(rule_bundles, "summer_rules", SummerSemesterRules)
+    if "summer_semester_rules" in rule_bundles:
+        summer_rules = _parse_rules(rule_bundles, "summer_semester_rules", SummerSemesterRules)
 
     level_map = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
 
@@ -256,13 +256,13 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
 
 def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
     credit_limit_rules = _parse_rules(rule_bundles, "credit_limit_rules", CreditLimitRules)
-    graduation_rules = _parse_rules(rule_bundles, "graduation_rules", GraduationRequirementRules)
+    graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
     retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
     student_level_rules = _parse_rules(rule_bundles, "student_level_rules", StudentLevelRules)
 
     summer_rules = None
-    if "summer_rules" in rule_bundles:
-        summer_rules = _parse_rules(rule_bundles, "summer_rules", SummerSemesterRules)
+    if "summer_semester_rules" in rule_bundles:
+        summer_rules = _parse_rules(rule_bundles, "summer_semester_rules", SummerSemesterRules)
 
     level_map = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
 

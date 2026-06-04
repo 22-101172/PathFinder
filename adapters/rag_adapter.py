@@ -6,7 +6,7 @@ Adapter between the Orchestrator and the RAG engine.
 Implements:
   - execute()           → free-text handbook query
   - execute_structured() → schema-forced extraction
-  - get_rule_bundles()  → returns ALL 6 rule bundles required by ALE (Section 4 of ALE contract)
+  - get_rule_bundles()  → returns ALL 8 rule bundles required by ALE (Section 4 of ALE contract)
 
 ALE contract status: FULLY IMPLEMENTED
 """
@@ -16,12 +16,30 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from pydantic import BaseModel
+
+from engines.ale.schemas import (
+    RetakeRules, CreditLimitRules, SummerSemesterRules,
+    GraduationRequirementRules, AcademicWarningRules,
+    HonorsRules, GradingScaleRules, StudentLevelRules,
+    PercentageRange,
+)
+
 logger = logging.getLogger(__name__)
 
 
 class RAGAdapter:
 
     def __init__(self) -> None:
+        import sys
+        import os
+        
+        # Add both the current flat directory and the intended real structure path
+        current_dir = os.path.dirname(__file__)
+        sys.path.insert(0, current_dir)
+        sys.path.insert(0, os.path.join(current_dir, '..', 'engines', 'RAG'))
+        sys.path.insert(0, os.path.join(current_dir, '..', '..', 'engines', 'RAG'))
+        
         try:
             import rag_core
             self.extract_facts          = rag_core.extract_facts
@@ -101,157 +119,172 @@ class RAGAdapter:
 
     # ── get_rule_bundles ─────────────────────────────────────────────────────
 
-    def get_rule_bundles(self) -> dict[str, Any]:
+    def get_rule_bundles(self) -> dict[str, BaseModel]:
         """
-        Returns all 6 rule bundles required by the ALE (Section 4 of ALE contract).
-
-        These values are sourced directly from the CIS Student Handbook.
-        The Orchestrator should cache this per session (TTL: per session).
-
-        ⚠️  GRADING SCALE CONFLICT — READ BEFORE USING:
-        The ALE Integration Contract (Section 4) specifies a grading scale that
-        differs from the CIS Handbook. The RAG returns the HANDBOOK values.
-        The ALE team must confirm which source is authoritative before GPA
-        computations are trusted.
-
-        Specific conflicts (Handbook vs Contract):
-          - A:   HB=3.7 pts, >=92%   |  Contract=4.0 pts, 93-96%
-          - A-:  HB=3.4 pts, >=88%   |  Contract=3.7 pts, 90-92%
-          - B+:  HB=3.2 pts, >=84%   |  Contract=3.3 pts, 87-89%
-          - B-:  HB=2.8 pts, >=76%   |  Contract=2.7 pts, 80-82%
-          - C+:  HB=2.6 pts, >=72%   |  Contract=2.3 pts, 77-79%
-          - C:   HB=2.4 pts, >=68%   |  Contract=2.0 pts, 73-76%
-          - C-:  HB=2.2 pts, >=64%   |  Contract=1.7 pts, 70-72%
-          - D+:  HB=2.0 pts, >=60%   |  Contract=1.3 pts, 67-69%
-          - D:   HB=1.5 pts, >=55%   |  Contract=1.0 pts, 60-66%
-          - D-:  HB=1.0 pts, >=50%   |  IN HANDBOOK, MISSING FROM CONTRACT
-          - A+:  HB threshold >=96%  |  Contract threshold >=97%
+        Retrieves all 8 rule bundles required by ALE by querying the RAG engine
+        with expected schemas.
         """
+        if self.extract_structured_fn is None:
+            logger.warning("RAGAdapter.get_rule_bundles: RAG engine not available — returning empty bundles")
+            return {}
 
-        # ── grading_scale ────────────────────────────────────────────────────
-        # SOURCE: CIS Handbook Table 1 (Grading Scale)
-        # ⚠️  These values differ from ALE Integration Contract Section 4.
-        # Handbook is the authoritative source for the RAG.
-        grading_scale = {
+        def _warn_if_empty(name: str, data: dict) -> dict:
+            if not data:
+                logger.warning(
+                    "RAGAdapter.get_rule_bundles: bundle '%s' returned empty from RAG — "
+                    "Pydantic instantiation will likely fail", name
+                )
+            return data
+
+        bundles: dict[str, Any] = {}
+
+        # 1. grading_scale_rules
+        grading_scale_schema = {
             "letter_to_points": {
-                "A+": 4.0,
-                "A":  3.7,   # ⚠️  Contract says 4.0
-                "A-": 3.4,   # ⚠️  Contract says 3.7
-                "B+": 3.2,   # ⚠️  Contract says 3.3
-                "B":  3.0,
-                "B-": 2.8,   # ⚠️  Contract says 2.7
-                "C+": 2.6,   # ⚠️  Contract says 2.3
-                "C":  2.4,   # ⚠️  Contract says 2.0
-                "C-": 2.2,   # ⚠️  Contract says 1.7
-                "D+": 2.0,   # ⚠️  Contract says 1.3
-                "D":  1.5,   # ⚠️  Contract says 1.0
-                "D-": 1.0,   # ⚠️  Contract does not include D-
-                "F":  0.0,
-                "Abs": 0.0,  # Absent from final exam without excuse = F
-                "P":  None,  # Pass — not counted in GPA
+                "A+": "float", "A": "float", "A-": "float",
+                "B+": "float", "B": "float", "B-": "float",
+                "C+": "float", "C": "float", "C-": "float",
+                "D+": "float", "D": "float", "D-": "float",
+                "Abs": "float", "F": "float",
+                "P": "null"
             },
             "percentage_to_letter": [
-                (96, 100, "A+"),   # ⚠️  Contract says 97
-                (92, 95.9, "A"),   # ⚠️  Contract says 93-96
-                (88, 91.9, "A-"),  # ⚠️  Contract says 90-92
-                (84, 87.9, "B+"),  # ⚠️  Contract says 87-89
-                (80, 83.9, "B"),   # ⚠️  Contract says 83-86
-                (76, 79.9, "B-"),  # ⚠️  Contract says 80-82
-                (72, 75.9, "C+"),  # ⚠️  Contract says 77-79
-                (68, 71.9, "C"),   # ⚠️  Contract says 73-76
-                (64, 67.9, "C-"),  # ⚠️  Contract says 70-72
-                (60, 63.9, "D+"),  # ⚠️  Contract says 67-69
-                (55, 59.9, "D"),   # ⚠️  Contract says 60-66
-                (50, 54.9, "D-"),  # ⚠️  Not in contract
-                (0,  49.9, "F"),   # ⚠️  Contract says <60
+                {"min_pct": "int", "max_pct": "int", "letter": "string"}
             ]
         }
+        res_gs = self.execute_structured(
+            "What is the grading scale, letter grades to GPA points mapping, and percentage ranges?",
+            grading_scale_schema
+        )
+        bundles["grading_scale_rules"] = _warn_if_empty("grading_scale_rules", res_gs.get("data", {}))
 
-        # ── graduation_rules ─────────────────────────────────────────────────
-        # SOURCE: CIS Handbook Section 2 (Program Graduation Requirements)
-        graduation_rules = {
-            "total_credits_required":              133,
-            "minimum_cgpa":                        2.0,
-            "minimum_regular_semesters":           6,
-            "maximum_regular_semesters":           16,
-            "must_pass_zero_credit_courses":       True,
-            "military_training_required_for_males": True,
+        # 2. graduation_requirement_rules
+        graduation_schema = {
+            "total_credits_required": "int",
+            "minimum_cgpa": "float",
+            "minimum_regular_semesters": "int",
+            "maximum_regular_semesters": "int",
+            "must_pass_zero_credit_courses": "boolean",
+            "military_training_required_for_males": "boolean"
         }
+        res_gr = self.execute_structured(
+            "What are the graduation requirements including total credits, minimum CGPA, min and max semesters?",
+            graduation_schema
+        )
+        bundles["graduation_requirement_rules"] = _warn_if_empty("graduation_requirement_rules", res_gr.get("data", {}))
 
-        # ── warning_rules ─────────────────────────────────────────────────────
-        # SOURCE: CIS Handbook Academic Warning sections
-        warning_rules = {
-            "cgpa_warning_threshold":                   2.0,
-            "max_consecutive_warnings":                 4,
-            "max_total_warnings":                       6,
-            "warning_exempt_first_semester":            True,
-            "dismissal_extension_credits_percentage":   0.80,
-            "dismissal_extension_extra_semesters":      2,
-            "dismissal_extension_extra_summer_semesters": 1,
+        # 3. academic_warning_rules
+        warning_schema = {
+            "cgpa_warning_threshold": "float",
+            "max_consecutive_warnings": "int",
+            "max_total_warnings": "int",
+            "warning_exempt_first_semester": "boolean",
+            "dismissal_extension_credits_percentage": "float",
+            "dismissal_extension_extra_semesters": "int",
+            "dismissal_extension_extra_summer_semesters": "int"
         }
+        res_wr = self.execute_structured(
+            "What are the academic warning and dismissal rules?",
+            warning_schema
+        )
+        bundles["academic_warning_rules"] = _warn_if_empty("academic_warning_rules", res_wr.get("data", {}))
 
-        # ── honors_rules ──────────────────────────────────────────────────────
-        # SOURCE: CIS Handbook Honors section
-        honors_rules = {
-            "minimum_cgpa_throughout":   3.0,
-            "minimum_semesters":         6,
-            "maximum_semesters":         8,
-            "no_f_grade_allowed":        True,
-            "no_disciplinary_penalties": True,
+        # 4. honors_rules
+        honors_schema = {
+            "minimum_cgpa_throughout": "float",
+            "minimum_semesters": "int",
+            "maximum_semesters": "int",
+            "no_f_grade_allowed": "boolean",
+            "no_disciplinary_penalties": "boolean"
         }
+        res_hr = self.execute_structured(
+            "What are the requirements for honors?",
+            honors_schema
+        )
+        bundles["honors_rules"] = _warn_if_empty("honors_rules", res_hr.get("data", {}))
 
-        # ── credit_limit_rules ────────────────────────────────────────────────
-        # SOURCE: CIS Handbook Section 5 (Course Registration Limits)
-        credit_limit_rules = {
-            "cgpa_above_3_limit":             21,
-            "cgpa_between_2_and_3_limit":     18,
-            "cgpa_between_1_and_2_limit":     15,
-            "cgpa_below_1_limit":             12,
-            "minimum_per_semester":            9,
-            "final_semester_override":         21,
-            "incomplete_extra_course_allowed": True,
+        # 5. credit_limit_rules
+        credit_limit_schema = {
+            "cgpa_above_3_limit": "int",
+            "cgpa_between_2_and_3_limit": "int",
+            "cgpa_between_1_and_2_limit": "int",
+            "cgpa_below_1_limit": "int",
+            "minimum_per_semester": "int",
+            "final_semester_override": "int",
+            "incomplete_extra_course_allowed": "boolean"
         }
+        res_cl = self.execute_structured(
+            "What are the credit limit rules per semester based on CGPA?",
+            credit_limit_schema
+        )
+        bundles["credit_limit_rules"] = _warn_if_empty("credit_limit_rules", res_cl.get("data", {}))
 
-        # ── retake_rules ──────────────────────────────────────────────────────
-        # SOURCE: CIS Handbook retake/improvement policies
-        retake_rules = {
-            "failed_first_retake_grade_cap":           "B",
-            "improve_retake_first_attempt_cap":        None,
-            "improve_retake_subsequent_cap":           "B",
-            "improve_retake_max_courses_cgpa_above_2": 3,
-            "improve_retake_unlimited_below_cgpa":     2.0,
+        # 6. retake_rules
+        retake_schema = {
+            "failed_first_retake_grade_cap": "string",
+            "improve_retake_first_attempt_cap": "null or string",
+            "improve_retake_subsequent_cap": "string",
+            "improve_retake_max_courses_cgpa_above_2": "int",
+            "improve_retake_unlimited_below_cgpa": "float"
         }
+        res_rr = self.execute_structured(
+            "What are the course retake rules and grade caps?",
+            retake_schema
+        )
+        bundles["retake_rules"] = _warn_if_empty("retake_rules", res_rr.get("data", {}))
 
-        # ── summer_rules ──────────────────────────────────────────────────────
-        # SOURCE: CIS Handbook summer session rules
-        summer_rules = {
-            "default_max_courses":              2,
-            "cgpa_above_3_max_courses":         3,
-            "cgpa_threshold_for_extra_course":  3.0,
+        # 7. summer_semester_rules
+        summer_schema = {
+            "default_max_courses": "int",
+            "cgpa_above_3_max_courses": "int",
+            "cgpa_threshold_for_extra_course": "float"
         }
+        res_sr = self.execute_structured(
+            "What are the rules and maximum courses for summer semesters?",
+            summer_schema
+        )
+        bundles["summer_semester_rules"] = _warn_if_empty("summer_semester_rules", res_sr.get("data", {}))
 
-        # ── student_level_rules ───────────────────────────────────────────────
-        # SOURCE: CIS Handbook Section 2a (Student Level Classification)
-        # Used by SCP to map total_credit_hours_earned → level (1/2/3/4)
-        # NOTE: The ALE contract maps level numbers:
-        #   1=Freshman, 2=Sophomore, 3=Junior, 4=Senior
-        student_level_rules = {
-            "freshman_max_hours":  26,   # 0  – 26  → level 1
-            "sophomore_min_hours": 27,   # 27 – 59  → level 2
-            "sophomore_max_hours": 59,
-            "junior_min_hours":    60,   # 60 – 93  → level 3
-            "junior_max_hours":    93,
-            "senior_min_hours":    94,   # 94 – 133 → level 4
-            "senior_max_hours":    133,
+        # 8. student_level_rules
+        student_level_schema = {
+            "freshman_max_hours": "int",
+            "sophomore_min_hours": "int",
+            "sophomore_max_hours": "int",
+            "junior_min_hours": "int",
+            "junior_max_hours": "int",
+            "senior_min_hours": "int",
+            "senior_max_hours": "int"
         }
+        res_sl = self.execute_structured(
+            "What are the credit hour thresholds for student levels (Freshman, Sophomore, Junior, Senior)?",
+            student_level_schema
+        )
+        bundles["student_level_rules"] = _warn_if_empty("student_level_rules", res_sl.get("data", {}))
 
-        return {
-            "grading_scale":       grading_scale,
-            "graduation_rules":    graduation_rules,
-            "warning_rules":       warning_rules,
-            "honors_rules":        honors_rules,
-            "credit_limit_rules":  credit_limit_rules,
-            "retake_rules":        retake_rules,
-            "summer_rules":        summer_rules,
-            "student_level_rules": student_level_rules,
-        }
+        # Convert percentage_to_letter tuples/dicts to PercentageRange objects
+        gs_data = bundles.get("grading_scale_rules", {})
+        raw_pct = gs_data.get("percentage_to_letter", [])
+        if raw_pct and isinstance(raw_pct[0], (list, tuple)):
+            gs_data["percentage_to_letter"] = [
+                PercentageRange(min_pct=float(r[0]), max_pct=float(r[1]), letter=r[2])
+                for r in raw_pct
+            ]
+        elif raw_pct and isinstance(raw_pct[0], dict):
+            gs_data["percentage_to_letter"] = [
+                PercentageRange(**r) for r in raw_pct
+            ]
+
+        try:
+            return {
+                "retake_rules":                 RetakeRules(**bundles.get("retake_rules", {})),
+                "credit_limit_rules":           CreditLimitRules(**bundles.get("credit_limit_rules", {})),
+                "summer_semester_rules":        SummerSemesterRules(**bundles.get("summer_semester_rules", {})),
+                "graduation_requirement_rules": GraduationRequirementRules(**bundles.get("graduation_requirement_rules", {})),
+                "academic_warning_rules":       AcademicWarningRules(**bundles.get("academic_warning_rules", {})),
+                "honors_rules":                 HonorsRules(**bundles.get("honors_rules", {})),
+                "grading_scale_rules":          GradingScaleRules(**gs_data),
+                "student_level_rules":          StudentLevelRules(**bundles.get("student_level_rules", {})),
+            }
+        except Exception as exc:
+            logger.error("RAGAdapter.get_rule_bundles: Pydantic conversion failed: %s", exc)
+            return {}

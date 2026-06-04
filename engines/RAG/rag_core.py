@@ -36,7 +36,8 @@ import os
 import time
 from dotenv import load_dotenv
 
-load_dotenv()
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+load_dotenv(os.path.join(_ROOT, '.env'))
 
 # ── singleton retriever ──────────────────────────────────────────────────────
 try:

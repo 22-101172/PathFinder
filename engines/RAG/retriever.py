@@ -1,3 +1,4 @@
+import os
 import re
 import pickle
 from langchain_community.vectorstores import Chroma
@@ -6,8 +7,9 @@ from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
 # ── config ──────────────────────────────────────────────────────────────────
-PERSIST_DIR    = "./chroma_db"
-CHUNKS_FILE    = "chunks.pkl"
+_HERE          = os.path.dirname(os.path.abspath(__file__))
+PERSIST_DIR    = os.path.join(_HERE, "chroma_db")
+CHUNKS_FILE    = os.path.join(_HERE, "chunks.pkl")
 EMBED_MODEL    = "BAAI/bge-small-en-v1.5"
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 

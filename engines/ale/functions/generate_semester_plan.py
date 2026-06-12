@@ -34,6 +34,18 @@ _MIN_LEVEL_FOCUSED_COURSES = 2   # Plan C requires at least this many same-level
 _LEVEL_MAP = {"Freshman": 1, "Sophomore": 2, "Junior": 3, "Senior": 4}
 
 
+def _is_offered_in_semester(semester_offering: list, target_semester_type: str) -> bool:
+    """Return True when the course should be considered for target_semester_type.
+
+    Empty semester_offering means the data is missing/unspecified; treat the
+    course as available in every semester (MVP assumption).  A non-empty list
+    is authoritative — the course is only offered in those semesters.
+    """
+    if not semester_offering:
+        return True
+    return target_semester_type in semester_offering
+
+
 # ---------------------------------------------------------------------------
 # Internal per-course data
 # ---------------------------------------------------------------------------
@@ -158,9 +170,14 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
     cnt_already_completed = 0
     cnt_missing_prereqs   = 0
     cnt_credit_threshold  = 0
+    cnt_wrong_semester    = 0
 
     for course in input.available_courses:
         code = course.course_code
+
+        if not _is_offered_in_semester(course.semester_offering, input.target_semester_type):
+            cnt_wrong_semester += 1
+            continue
 
         if code in in_progress_set:
             cnt_in_progress += 1
@@ -200,6 +217,7 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
     ineligibility_summary = _build_ineligibility_summary(
         cnt_in_progress, cnt_already_completed,
         cnt_missing_prereqs, cnt_credit_threshold,
+        cnt_wrong_semester,
     )
 
     if not eligible_pool:
@@ -419,6 +437,7 @@ def _build_ineligibility_summary(
     already_completed: int,
     missing_prereqs: int,
     credit_threshold: int,
+    wrong_semester: int,
 ) -> str | None:
     parts: list[str] = []
     if already_completed:
@@ -429,5 +448,7 @@ def _build_ineligibility_summary(
         parts.append(f"{missing_prereqs} excluded — missing prerequisites")
     if credit_threshold:
         parts.append(f"{credit_threshold} excluded — credit threshold not met")
+    if wrong_semester:
+        parts.append(f"{wrong_semester} excluded — not offered this semester")
     return ("; ".join(parts) + ".") if parts else None
 

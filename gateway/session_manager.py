@@ -41,6 +41,8 @@ def _apply_overrides(
     if action == "replace":
         return SessionOverrides(
             added_courses=list(incoming.added_courses),
+            assumed_failed_courses=list(incoming.assumed_failed_courses),
+            assumed_passed_courses=list(incoming.assumed_passed_courses),
             target_role=incoming.target_role,
             course_override_type=incoming.course_override_type,
             override_action="accumulate",
@@ -48,6 +50,8 @@ def _apply_overrides(
 
     # accumulate (default)
     merged_courses = list(set(existing.added_courses) | set(incoming.added_courses))
+    merged_failed = list(set(existing.assumed_failed_courses) | set(incoming.assumed_failed_courses))
+    merged_passed = list(set(existing.assumed_passed_courses) | set(incoming.assumed_passed_courses))
     new_role = incoming.target_role if incoming.target_role is not None else existing.target_role
     new_type = (
         incoming.course_override_type
@@ -56,6 +60,8 @@ def _apply_overrides(
     )
     return SessionOverrides(
         added_courses=merged_courses,
+        assumed_failed_courses=merged_failed,
+        assumed_passed_courses=merged_passed,
         target_role=new_role,
         course_override_type=new_type,
         override_action="accumulate",
@@ -73,13 +79,39 @@ def _apply_last_referenced(
     )
 
 
-def _build_effective_context(
+def build_effective_context(
     base_context: StudentContext,
     overrides: SessionOverrides,
 ) -> StudentContext:
-    if overrides.course_override_type == "assumed_done" and overrides.added_courses:
-        merged = list(set(base_context.completed_courses) | set(overrides.added_courses))
+    override_type = overrides.course_override_type
+    courses = overrides.added_courses
+
+    if override_type == "assumed_done" and courses:
+        merged = list(set(base_context.completed_courses) | set(courses))
         return base_context.model_copy(update={"completed_courses": merged})
+
+    if override_type == "planned" and courses:
+        merged = list(set(base_context.in_progress_courses) | set(courses))
+        return base_context.model_copy(update={"in_progress_courses": merged})
+
+    if override_type == "assumed_failed" and overrides.assumed_failed_courses:
+        merged = list(set(base_context.failed_courses) | set(overrides.assumed_failed_courses))
+        completed_cleaned = [c for c in base_context.completed_courses if c not in set(overrides.assumed_failed_courses)]
+        zero_credit_cleaned = [c for c in base_context.zero_credit_courses_passed if c not in set(overrides.assumed_failed_courses)]
+        return base_context.model_copy(update={
+            "failed_courses": merged,
+            "completed_courses": completed_cleaned,
+            "zero_credit_courses_passed": zero_credit_cleaned,
+        })
+
+    if override_type == "assumed_passed" and overrides.assumed_passed_courses:
+        merged = list(set(base_context.completed_courses) | set(overrides.assumed_passed_courses))
+        failed_cleaned = [c for c in base_context.failed_courses if c not in set(overrides.assumed_passed_courses)]
+        return base_context.model_copy(update={
+            "completed_courses": merged,
+            "failed_courses": failed_cleaned,
+        })
+
     return base_context
 
 
@@ -136,10 +168,11 @@ def get_qu_context(session_id: str, user_text: str) -> QUContext | None:
 def apply_query_result(
     session_id: str,
     structured_query: StructuredQuery,
-) -> StudentContext | None:
+) -> None:
     session = _store.load(session_id)
     if session is None:
-        return None
+        logger.warning("SessionManager: apply_query_result called for unknown session %s", session_id)
+        return
 
     session.overrides = _apply_overrides(session.overrides, structured_query.session_overrides)
     session.last_referenced = _apply_last_referenced(
@@ -148,8 +181,7 @@ def apply_query_result(
     )
 
     _store.save(session)
-
-    return _build_effective_context(session.student_context, session.overrides)
+    logger.debug("SessionManager: session %s overrides and last_referenced updated", session_id)
 
 
 def update_session_after_turn(

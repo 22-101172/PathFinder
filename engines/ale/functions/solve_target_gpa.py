@@ -54,6 +54,19 @@ def solve_target_gpa(input: SolveTargetGPAInput) -> SolveTargetGPAOutput:
     if input.target_cgpa <= 0 or input.target_cgpa > 4.0:
         return _cannot_compute(["invalid_target_cgpa"], [], input)
 
+    # Step 1b — early exit if target already met
+    if input.current_cgpa >= input.target_cgpa:
+        return SolveTargetGPAOutput(
+            status="already_met",
+            current_cgpa=input.current_cgpa,
+            target_cgpa=input.target_cgpa,
+            delta_needed=round(input.target_cgpa - input.current_cgpa, 2),
+            required_average_grade_points=None,
+            required_average_letter=None,
+            gpa_neutral_courses=[],
+            planned_course_source=input.planned_course_source,
+        )
+
     # Step 2
     if not input.planned_courses:
         return _cannot_compute(["empty_planned_courses"], [], input)

@@ -34,7 +34,10 @@ import requests
 import json
 import os
 import time
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 load_dotenv(os.path.join(_ROOT, '.env'))
@@ -43,7 +46,7 @@ load_dotenv(os.path.join(_ROOT, '.env'))
 try:
     retriever = get_retriever()
 except Exception as e:
-    print(f"Warning: Retriever not ready — run ingest.py first. ({e})")
+    logger.warning("RAG: retriever not ready at import time: %s", e)
     retriever = None
 
 # ── system prompt ─────────────────────────────────────────────────────────────
@@ -134,7 +137,7 @@ def extract_facts(
     }
 
     if not retriever:
-        print("ERROR: Retriever not initialized. Run: python ingest.py")
+        logger.error("RAG: retriever not initialized — run ingest.py first")
         return empty_result
 
     # ── retrieve parent chunks ──
@@ -168,8 +171,7 @@ def extract_facts(
     api_key  = groq_api_key  or os.environ.get("GROQ_API_KEY")
 
     if not api_key:
-        print("ERROR: No Groq API key configured.")
-        print("  Pass groq_api_key= or set GROQ_API_KEY in .env (get free key at console.groq.com)")
+        logger.error("RAG: no Groq API key configured — set GROQ_API_KEY in .env")
         return empty_result
 
     # ── call LLM ──
@@ -177,7 +179,7 @@ def extract_facts(
         llm_result = _call_groq(context_text, query, api_key, groq_model)
 
     except Exception as e:
-        print(f"ERROR calling LLM: {e}")
+        logger.error("RAG: LLM call failed: %s", e)
         return {**empty_result, "error": str(e)}
 
     # ── build final output ──
@@ -213,7 +215,7 @@ def extract_structured(
     }
 
     if not retriever:
-        print("ERROR: Retriever not initialized. Run: python ingest.py")
+        logger.error("RAG: retriever not initialized — run ingest.py first")
         return empty_result
 
     # ── retrieve parent chunks ──
@@ -244,7 +246,7 @@ def extract_structured(
     api_key = groq_api_key or os.environ.get("GROQ_API_KEY")
 
     if not api_key:
-        print("ERROR: No Groq API key configured.")
+        logger.error("RAG: no Groq API key configured — set GROQ_API_KEY in .env")
         return empty_result
 
     # Inject the schema into the system prompt
@@ -254,7 +256,7 @@ def extract_structured(
     try:
         llm_result = _call_groq(context_text, query, api_key, groq_model, system_prompt=system_prompt)
     except Exception as e:
-        print(f"ERROR calling LLM: {e}")
+        logger.error("RAG: LLM call failed: %s", e)
         return {**empty_result, "error": str(e)}
 
     return {

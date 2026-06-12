@@ -24,8 +24,23 @@ def _is_valid_course_code(code: str) -> bool:
     return bool(code and _COURSE_CODE_RE.match(code.strip()))
 
 
+def _parse_credit_threshold_constraint(constraint_type, constraint_value):
+    """Extract the integer hour value from a CREDIT_THRESHOLD PrerequisiteConstraint.
+
+    pc.type is stored as "CREDIT_THRESHOLD"; pc.value is a free-text string
+    like "Passing 59 Credit Hours".  Returns the embedded integer, or None if
+    the type is not CREDIT_THRESHOLD, the value is absent, or no digit is found.
+    """
+    if constraint_type != "CREDIT_THRESHOLD":
+        return None
+    if constraint_value is None:
+        return None
+    m = re.search(r"\d+", str(constraint_value))
+    return int(m.group()) if m else None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# A2 — Course Catalogue Lookup
+# A1 — Course Catalogue Lookup
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── OP1: Get Course Profile ──────────────────────────────────────────────────
@@ -47,6 +62,11 @@ def q_get_course_profile(client, course_code: str) -> dict:
         """
         MATCH (c:Course {course_code: $code})
         OPTIONAL MATCH (c)-[:BELONGS_TO]->(t:Track)
+        WITH c,
+            collect(DISTINCT CASE
+                WHEN t IS NOT NULL THEN {track_id: t.track_id, name: t.name}
+            END) AS tracks
+        OPTIONAL MATCH (c)-[:HAS_PREREQ_CONSTRAINT]->(pc:PrerequisiteConstraint)
         RETURN
             c.course_code AS course_code,
             c.name AS name,
@@ -54,9 +74,9 @@ def q_get_course_profile(client, course_code: str) -> dict:
             c.level AS level,
             c.semester_offering AS semester_offering,
             c.description AS description,
-            collect(DISTINCT CASE
-                WHEN t IS NOT NULL THEN {track_id: t.track_id, name: t.name}
-            END) AS tracks
+            tracks,
+            pc.type  AS constraint_type,
+            pc.value AS constraint_value
         """,
         {"code": code}
     )
@@ -81,6 +101,9 @@ def q_get_course_profile(client, course_code: str) -> dict:
         "semester_offering": sem_list,
         "tracks": tracks,
         "description": row.get("description"),
+        "credit_threshold": _parse_credit_threshold_constraint(
+            row.get("constraint_type"), row.get("constraint_value")
+        ),
     }
 
 # ── OP2: Get Prerequisites ───────────────────────────────────────────────────
@@ -161,7 +184,15 @@ def q_get_prerequisites(client, course_code: str, depth: str = "direct") -> dict
     row = rows[0]
 
     direct_prereqs = row.get("direct_prerequisites") or []
-    non_course = [x for x in (row.get("non_course_prerequisites") or []) if x is not None]
+
+    raw_non_course = [x for x in (row.get("non_course_prerequisites") or []) if x is not None]
+    non_course = []
+    for x in raw_non_course:
+        parsed_value = _parse_credit_threshold_constraint(x.get("type"), x.get("value"))
+        non_course.append({
+            "type": x["type"],
+            "value": parsed_value if x.get("type") == "CREDIT_THRESHOLD" else x.get("value"),
+        })
 
     has_prereqs = bool(direct_prereqs or non_course)
 
@@ -306,69 +337,8 @@ def q_search_courses_by_skill(client, skills: list) -> dict:
     }
 
 
-# ── OP5: Get Course Focus ────────────────────────────────────────────────────
-def q_get_course_focus(client, course_code: str) -> dict:
-    """
-    Returns the primary focus/specialization area of a course.
-    Focus is derived from the track(s) the course belongs to and the
-    skill categories it teaches. Used for career guidance recommendations.
-    """
-    if not course_code or not str(course_code).strip():
-        return {"error": "invalid_course_code", "submitted_code": course_code}
 
-    code = str(course_code).strip()
-    if not _is_valid_course_code(code):
-        return {"error": "invalid_course_code", "submitted_code": code}
-
-    rows = client.execute_query(
-        """
-        MATCH (c:Course {course_code: $code})
-        OPTIONAL MATCH (c)-[:BELONGS_TO]->(t:Track)
-        RETURN
-            c.course_code AS course_code,
-            c.name        AS name,
-            collect(DISTINCT CASE
-                WHEN t IS NOT NULL THEN {track_id: t.track_id, name: t.name}
-            END) AS tracks
-        """,
-        {"code": code}
-    )
-
-    if not rows:
-        return {"error": "course_not_found", "submitted_code": code}
-
-    row = rows[0]
-    tracks = sorted([t for t in (row.get("tracks") or []) if t],
-                    key=lambda x: x.get("track_id") or "")
-
-    cat_rows = client.execute_query(
-        """
-        MATCH (c:Course {course_code: $code})-[:TEACHES]->(s:Skill)
-        WHERE s.category IS NOT NULL
-        RETURN s.category AS category, count(s) AS skill_count
-        ORDER BY skill_count DESC, s.category
-        """,
-        {"code": code}
-    )
-    skill_categories = [
-        {"category": r["category"], "skill_count": r["skill_count"]}
-        for r in cat_rows
-    ]
-
-    # Single-track course → track_id is the primary focus.
-    # Cross-track or general course → None (caller inspects tracks/skill_categories).
-    primary_focus = tracks[0]["track_id"] if len(tracks) == 1 else None
-
-    return {
-        "course_code": code,
-        "name": row["name"],
-        "tracks": tracks,
-        "skill_categories": skill_categories,
-        "primary_focus": primary_focus,
-    }
-
-
-# ── OP6: Get Focus Courses for Target ───────────────────────────────────────
+# ── OP5: Get Focus Courses for Target ───────────────────────────────────────
 def q_get_focus_courses_for_target(
     client,
     target_id: str,
@@ -487,7 +457,7 @@ def q_get_focus_courses_for_target(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# B1 — Career Role Exploration (Curriculum-aware)
+# A2 — Career Role Exploration (Curriculum-aware)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _weight_to_tier(weight: float) -> str:
@@ -606,7 +576,7 @@ def q_get_roles_by_track(client, track_id: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# B2 — Skill Gap & Alignment
+# A3 — Skill Gap & Alignment
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _resolve_courses(client, course_codes: list):
@@ -1124,7 +1094,7 @@ def q_find_best_matching_roles(client, completed_courses: list) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# B3 — Track Guidance & Comparison
+# A4 — Track Guidance & Comparison
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _track_alignment_score(track_skill_ids: set, role_skills: list) -> float:
@@ -1410,7 +1380,11 @@ def q_recommend_track_for_skill(client, skill_id: str) -> dict:
     }
 
 
-# ── OP B3-5: Get Courses by Track ────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# A5 — ALE Planning Support
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── OP6: Get Courses by Track ────────────────────────────────────────────────
 def q_get_courses_by_track(client, track_id: str) -> dict:
     """
     Returns all courses belonging to a track with full planning metadata:
@@ -1435,13 +1409,16 @@ def q_get_courses_by_track(client, track_id: str) -> dict:
         MATCH (c:Course)-[:BELONGS_TO]->(t:Track {track_id: $tid})
         OPTIONAL MATCH (c)-[:PREREQ]->(p:Course)
         WITH c, t, collect(DISTINCT CASE WHEN p IS NOT NULL THEN p.course_code END) AS prerequisites
+        OPTIONAL MATCH (c)-[:HAS_PREREQ_CONSTRAINT]->(pc:PrerequisiteConstraint)
         RETURN
             c.course_code       AS course_code,
             c.name              AS name,
             c.credits           AS credits,
             c.level             AS level,
             c.semester_offering AS semester_offering,
-            prerequisites
+            prerequisites,
+            pc.type             AS constraint_type,
+            pc.value            AS constraint_value
         ORDER BY c.level, c.course_code
         """,
         {"tid": tid}
@@ -1459,6 +1436,9 @@ def q_get_courses_by_track(client, track_id: str) -> dict:
             "level": r["level"],
             "prerequisites": prereqs,
             "semester_offering": sem_list,
+            "credit_threshold": _parse_credit_threshold_constraint(
+                r.get("constraint_type"), r.get("constraint_value")
+            ),
             "track": {"track_id": tid, "name": track_name},
         })
 
@@ -1471,7 +1451,7 @@ def q_get_courses_by_track(client, track_id: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Entity Resolver
+# A6 — Entity Resolution
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _ENTITY_CONFIG = {

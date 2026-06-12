@@ -27,6 +27,13 @@ from engines.ale.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _as_dict(value):
+    """Normalize a rule bundle value to a plain dict."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -35,9 +42,11 @@ def call(
     operation: str,
     student_context: StudentContext,
     rule_bundles: dict,
-    kg_data: dict = {},
-    params: dict = {},
+    kg_data: dict | None = None,
+    params: dict | None = None,
 ) -> dict:
+    kg_data = kg_data or {}
+    params = params or {}
     logger.info("ALE operation: %s", operation)
     try:
         return _dispatch(operation, student_context, rule_bundles, kg_data, params)
@@ -52,21 +61,44 @@ def call(
 
 def _parse_rules(rule_bundles: dict, key: str, model_class):
     try:
-        return model_class(**rule_bundles[key])
+        bundle_dict = _as_dict(rule_bundles[key])
+        return model_class(**bundle_dict)
     except (KeyError, Exception):
         raise ValueError(f"rule_bundles missing or invalid: '{key}'")
 
 
-def _map_course_history(course_history) -> list[CourseHistoryEntry]:
+def _map_course_history(course_history, grading_scale_rules: dict) -> list[CourseHistoryEntry]:
+    """
+    NOTE: credit_hours patching is orchestrator responsibility.
+    Course transcript credit_hours are currently 0 (SCP sentinel).
+    Until orchestrator patches them from KG, honors CGPA trajectory
+    will be incomplete.
+    """
+    _NO_POINTS_GRADES = {"P", "Con", "I", "W"}
+    _NO_POINTS_STATUSES = {"in_progress", "incomplete", "withdrawn"}
+    letter_to_points = grading_scale_rules.get("letter_to_points", {})
+
     entries = []
     for r in course_history:
+        grade = r.grade
+        status = r.status
+        if (
+            grade is None
+            or grade in _NO_POINTS_GRADES
+            or status in _NO_POINTS_STATUSES
+            or grade not in letter_to_points
+        ):
+            grade_points = None
+        else:
+            grade_points = letter_to_points[grade]
+
         entries.append(CourseHistoryEntry(
             course_code=r.course_code,
             semester=r.semester_taken,
             semester_type="summer" if "summer" in r.semester_taken.lower() else "regular",
-            grade_points=None,
+            grade_points=grade_points,
             credits=r.credit_hours,
-            status=r.status,
+            status=status,
         ))
     return entries
 
@@ -95,6 +127,7 @@ def _map_available_courses(kg_data: dict) -> list[AvailableCourse]:
             level=c.get("level"),
             prerequisites=c.get("prerequisites", []),
             semester_offering=sem_list,
+            credit_threshold=c.get("credit_threshold"),
             track=track_list,
         ))
     return courses
@@ -191,6 +224,7 @@ def _check_course_eligibility(sc: StudentContext, rule_bundles: dict, kg_data: d
 
 
 def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
+    grading_scale = _parse_rules(rule_bundles, "grading_scale_rules", GradingScaleRules)
     graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
     warning_rules = _parse_rules(rule_bundles, "academic_warning_rules", AcademicWarningRules)
     honors_rules = _parse_rules(rule_bundles, "honors_rules", HonorsRules)
@@ -206,8 +240,8 @@ def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict,
         total_warnings=sc.total_warnings,
         military_status=sc.military_status,
         completed_regular_semesters=sc.completed_regular_semesters,
-        zero_credit_courses_passed=sc.zero_credit_courses_passed,
-        course_history=_map_course_history(sc.course_history),
+        zero_credit_courses_passed=bool(sc.zero_credit_courses_passed),
+        course_history=_map_course_history(sc.course_history, grading_scale.model_dump()),
         graduation_rules=graduation_rules,
         warning_rules=warning_rules,
         honors_rules=honors_rules,
@@ -255,6 +289,7 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
 
 
 def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
+    grading_scale = _parse_rules(rule_bundles, "grading_scale_rules", GradingScaleRules)
     credit_limit_rules = _parse_rules(rule_bundles, "credit_limit_rules", CreditLimitRules)
     graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
     retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
@@ -280,7 +315,7 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
         student_level=level_map.get(sc.level, "Freshman"),
         official_track=sc.track_id,
         incomplete_grade_flag=_derive_incomplete_flag(sc.course_history),
-        zero_credit_courses_passed=sc.zero_credit_courses_passed,
+        zero_credit_courses_passed=bool(sc.zero_credit_courses_passed),
         military_status=sc.military_status,
         completed_regular_semesters=sc.completed_regular_semesters,
         available_courses=_map_available_courses(kg_data),

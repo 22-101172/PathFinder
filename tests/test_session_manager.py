@@ -190,25 +190,26 @@ def test_assumed_done_merges_into_completed(patched_sm):
     state, _ = sm.get_or_create_session(None, "S001", ctx, "first message")
     sid = state.session_id
 
-    effective = sm.apply_query_result(
-        sid, make_sq(["C-AI311"], course_override_type="assumed_done")
-    )
+    sm.apply_query_result(sid, make_sq(["C-AI311"], course_override_type="assumed_done"))
 
-    assert effective is not None
+    session = sm._store.load(sid)
+    effective = sm.build_effective_context(session.student_context, session.overrides)
+
     assert "C-AI311" in effective.completed_courses
     assert "C-CS101" in effective.completed_courses
 
 
-def test_planned_does_not_merge(patched_sm):
+def test_planned_merges_into_in_progress(patched_sm):
     ctx = make_student_context(completed_courses=["C-CS101"])
     state, _ = sm.get_or_create_session(None, "S001", ctx, "first message")
     sid = state.session_id
 
-    effective = sm.apply_query_result(
-        sid, make_sq(["C-AI311"], course_override_type="planned")
-    )
+    sm.apply_query_result(sid, make_sq(["C-AI311"], course_override_type="planned"))
 
-    assert effective is not None
+    session = sm._store.load(sid)
+    effective = sm.build_effective_context(session.student_context, session.overrides)
+
+    assert "C-AI311" in effective.in_progress_courses
     assert "C-AI311" not in effective.completed_courses
     assert "C-CS101" in effective.completed_courses
 
@@ -224,6 +225,60 @@ def test_last_referenced_accumulates(patched_sm):
     session = sm._store.load(sid)
     assert session.last_referenced.course_code == "C-AI311"
     assert session.last_referenced.role_id == "SWE"
+
+
+def test_assumed_failed_moves_course_to_failed(patched_sm):
+    ctx = make_student_context(completed_courses=["C-CS101", "C-MA111"])
+    state, _ = sm.get_or_create_session(None, "S001", ctx, "first message")
+    sid = state.session_id
+
+    sq = StructuredQuery(
+        intent="test",
+        engine_pattern="test",
+        query_type="test",
+        entities=EntitySet(),
+        session_overrides=SessionOverrides(
+            assumed_failed_courses=["C-MA111"],
+            course_override_type="assumed_failed",
+            override_action="accumulate",
+        ),
+    )
+    sm.apply_query_result(sid, sq)
+
+    session = sm._store.load(sid)
+    effective = sm.build_effective_context(session.student_context, session.overrides)
+
+    assert "C-MA111" in effective.failed_courses
+    assert "C-MA111" not in effective.completed_courses
+    assert "C-CS101" in effective.completed_courses
+
+
+def test_assumed_passed_moves_course_to_completed(patched_sm):
+    ctx = make_student_context(completed_courses=["C-CS101"])
+    # Manually inject a failed course into context
+    ctx = ctx.model_copy(update={"failed_courses": ["C-MA111"]})
+    state, _ = sm.get_or_create_session(None, "S001", ctx, "first message")
+    sid = state.session_id
+
+    sq = StructuredQuery(
+        intent="test",
+        engine_pattern="test",
+        query_type="test",
+        entities=EntitySet(),
+        session_overrides=SessionOverrides(
+            assumed_passed_courses=["C-MA111"],
+            course_override_type="assumed_passed",
+            override_action="accumulate",
+        ),
+    )
+    sm.apply_query_result(sid, sq)
+
+    session = sm._store.load(sid)
+    effective = sm.build_effective_context(session.student_context, session.overrides)
+
+    assert "C-MA111" in effective.completed_courses
+    assert "C-MA111" not in effective.failed_courses
+    assert "C-CS101" in effective.completed_courses
 
 
 # ---------------------------------------------------------------------------
@@ -264,8 +319,7 @@ def test_full_turn_lifecycle(patched_sm):
     assert qu is not None
     assert qu.user_text == "What courses should I take?"
 
-    effective = sm.apply_query_result(sid, make_sq())
-    assert effective is not None
+    sm.apply_query_result(sid, make_sq())
 
     sm.update_session_after_turn(sid, "What courses should I take?", "You should take C-AI311.")
 

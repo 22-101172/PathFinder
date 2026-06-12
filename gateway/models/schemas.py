@@ -31,10 +31,14 @@ class EntitySet(BaseModel):
 
 class SessionOverrides(BaseModel):
     added_courses: list[str] = []
+    assumed_failed_courses: list[str] = []
+    assumed_passed_courses: list[str] = []
     target_role: Optional[str] = None
     course_override_type: Literal[
         "planned",
         "assumed_done",
+        "assumed_failed",
+        "assumed_passed",
         "gpa_scenario",
         "none"
     ] = "none"

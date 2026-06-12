@@ -37,6 +37,18 @@ _MAX_LOOP_GUARD        = 300  # absolute safeguard; prevents infinite loops on b
 _LEVEL_MAP = {"Freshman": 1, "Sophomore": 2, "Junior": 3, "Senior": 4}
 
 
+def _is_offered_in_semester(semester_offering: list, target_semester_type: str) -> bool:
+    """Return True when the course should be considered for target_semester_type.
+
+    Empty semester_offering means the data is missing/unspecified; treat the
+    course as available in every semester (MVP assumption).  A non-empty list
+    is authoritative — the course is only offered in those semesters.
+    """
+    if not semester_offering:
+        return True
+    return target_semester_type in semester_offering
+
+
 # ---------------------------------------------------------------------------
 # Internal per-course pool entry
 # ---------------------------------------------------------------------------
@@ -268,7 +280,7 @@ def generate_graduation_roadmap(
         for ac in input.available_courses:
             code = ac.course_code
 
-            if current_season not in ac.semester_offering:
+            if not _is_offered_in_semester(ac.semester_offering, current_season):
                 continue
 
             # Skip if completed and not a pending retake

@@ -1,6 +1,6 @@
 """
 Thin adapter between the orchestrator and the KG engine.
-All 15 KG operations callable via call(operation, params).
+All 18 KG operations callable via call(operation, params).
 """
 from __future__ import annotations
 import logging
@@ -51,7 +51,6 @@ class KGAdapter:
             "recommend_track_for_role":        self.recommend_track_for_role,
             "recommend_track_for_skill":       self.recommend_track_for_skill,
             "get_courses_by_track":            self.get_courses_by_track,
-            "get_course_focus":                self.get_course_focus,
             "get_focus_courses_for_target":    self.get_focus_courses_for_target,
             "resolve_entity":                  self.resolve_entity,
         }
@@ -114,9 +113,6 @@ class KGAdapter:
 
     def get_courses_by_track(self, track_id: str) -> dict:
         return Q.q_get_courses_by_track(self._client, track_id)
-
-    def get_course_focus(self, course_code: str) -> dict:
-        return Q.q_get_course_focus(self._client, course_code)
 
     def get_focus_courses_for_target(
         self,

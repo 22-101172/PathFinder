@@ -452,7 +452,10 @@ def _cap_grade_points_for_course(
 
     if course.attempt_type == "failed_retake":
         cap_letter = retake_rules.failed_first_retake_grade_cap
-        cap_reason = "First retake after failure — maximum grade is B"
+        cap_reason = (
+            f"First retake after failure — maximum grade is "
+            f"{retake_rules.failed_first_retake_grade_cap}"
+        )
 
     elif course.attempt_type == "improve_retake":
         number = course.improve_retake_number if course.improve_retake_number is not None else 1
@@ -463,7 +466,10 @@ def _cap_grade_points_for_course(
             cap_reason = "First improve retake cap applied"
         else:
             cap_letter = retake_rules.improve_retake_subsequent_cap
-            cap_reason = "Subsequent improve retake — maximum grade is B"
+            cap_reason = (
+                f"Subsequent improve retake — maximum grade is "
+                f"{retake_rules.improve_retake_subsequent_cap}"
+            )
 
     if cap_letter is None:
         return grade_points, None

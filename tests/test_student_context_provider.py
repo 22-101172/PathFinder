@@ -4,11 +4,15 @@ Unit and integration tests for gateway.student_context_provider.
 Tests 1–11 use synthetic DataFrames injected directly into the module
 globals — no real Excel file dependency.
 Test 12 uses the real students_anonymous.xlsx (STU000001).
+Tests 13–22 are regression tests for bug fixes (SCP data-correctness pass).
 """
 
+import io
 import math
 import re
+from unittest.mock import patch
 
+import openpyxl
 import pandas as pd
 import pytest
 
@@ -278,3 +282,221 @@ def test_real_data_stu000001():
     assert ctx.level == 4
     assert ctx.cgpa is not None
     assert ctx.cgpa > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Helpers for regression tests
+# ---------------------------------------------------------------------------
+
+def _make_excel_bytes(data_rows: list[dict], reg_rows: list[dict]) -> bytes:
+    """Build an in-memory .xlsx with 'data' and 'registrations' sheets."""
+    wb = openpyxl.Workbook()
+
+    # data sheet
+    ws_data = wb.active
+    ws_data.title = "data"
+    data_cols = [
+        "ID", "Name", "Program", "Level", "Study Status",
+        "Cumulative GPA", "Consecutive Warning", "Total Warnings",
+        "Military Status", "First Semester",
+        "Cumulative PHs", "Cumulative CHs", "Cumulative CPs",
+        "Last Semester GPA", "Last Semester CHs", "Last Semester CPs",
+        "Last Semester PHs", "Last Semester Warning", "Current Semester CHs",
+    ]
+    ws_data.append(data_cols)
+    for row in data_rows:
+        ws_data.append([row.get(c, "") for c in data_cols])
+
+    # registrations sheet
+    ws_reg = wb.create_sheet("registrations")
+    reg_cols = ["ID", "Course Code", "Semester", "Registration Status", "Letter Grade"]
+    ws_reg.append(reg_cols)
+    for row in reg_rows:
+        ws_reg.append([row.get(c, "") for c in reg_cols])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Test 13 — completed_regular_semesters excludes current semester
+# ---------------------------------------------------------------------------
+
+def test_completed_regular_semesters_excludes_current_semester():
+    current_sem = scp.get_current_semester()
+    _inject(
+        [_BASE_DATA],
+        [
+            _reg("C-CS111", "Fresh, Succeeded, Registered", "B", semester="Fall 2024"),
+            _reg("C-CS112", "Fresh, Succeeded, Registered", "B", semester="Spring 2025"),
+            _reg("C-CS113", "Registered", None, semester=current_sem),
+        ],
+    )
+    ctx = scp.get_context("TST001")
+    assert ctx is not None
+    assert ctx.completed_regular_semesters == 2, (
+        f"Expected 2 (current semester excluded), got {ctx.completed_regular_semesters}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 14 — _map_status: Failed tag + blank grade → "failed", not "in_progress"
+# ---------------------------------------------------------------------------
+
+def test_map_status_failed_tag_with_blank_grade():
+    result = scp._map_status("Failed, Registered", None)
+    assert result == "failed", (
+        f"Expected 'failed' for Failed tag + blank grade, got {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 15 — in_progress_courses shows current retakes of previously passed course
+# ---------------------------------------------------------------------------
+
+def test_in_progress_courses_shows_current_retakes():
+    current_sem = scp.get_current_semester()
+    _inject(
+        [_BASE_DATA],
+        [
+            _reg("C-AI321", "Fresh, Succeeded, Registered", "B+", semester="Fall 2024"),
+            _reg("C-AI321", "Improve, Registered", None, semester=current_sem),
+        ],
+    )
+    ctx = scp.get_context("TST001")
+    assert ctx is not None
+    assert "C-AI321" in ctx.completed_courses, "Expected C-AI321 in completed_courses"
+    assert "C-AI321" in ctx.in_progress_courses, (
+        "Expected C-AI321 in in_progress_courses (current retake)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 16 — in_progress_courses excludes resolved incomplete
+# ---------------------------------------------------------------------------
+
+def test_in_progress_courses_excludes_resolved_incomplete():
+    _inject(
+        [_BASE_DATA],
+        [
+            _reg("C-AI321", "Registered", "I", semester="Fall 2024"),
+            _reg("C-AI321", "Repeat, Succeeded, Registered", "B", semester="Spring 2025"),
+        ],
+    )
+    ctx = scp.get_context("TST001")
+    assert ctx is not None
+    assert "C-AI321" in ctx.completed_courses, "Expected C-AI321 in completed_courses"
+    assert "C-AI321" not in ctx.in_progress_courses, (
+        "Old resolved incomplete must not remain in in_progress_courses"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 17 — in_progress_courses includes unresolved incomplete
+# ---------------------------------------------------------------------------
+
+def test_in_progress_courses_includes_unresolved_incomplete():
+    _inject(
+        [_BASE_DATA],
+        [
+            _reg("C-AI321", "Registered", "I", semester="Fall 2024"),
+        ],
+    )
+    ctx = scp.get_context("TST001")
+    assert ctx is not None
+    assert "C-AI321" in ctx.in_progress_courses, (
+        "Unresolved incomplete must appear in in_progress_courses"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 18 — blank Study Status → "Studying"
+# ---------------------------------------------------------------------------
+
+def test_study_status_blank_becomes_studying():
+    data_blank = dict(_BASE_DATA)
+    data_blank["Study Status"] = ""
+    _inject([data_blank], [])
+    ctx = scp.get_context("TST001")
+    assert ctx is not None
+    assert ctx.study_status == "Studying"
+
+    data_nan = dict(_BASE_DATA)
+    data_nan["Study Status"] = float("nan")
+    _inject([data_nan], [])
+    ctx2 = scp.get_context("TST001")
+    assert ctx2 is not None
+    assert ctx2.study_status == "Studying"
+
+
+# ---------------------------------------------------------------------------
+# Test 19 — zero_credit_courses_passed deduplicated
+# ---------------------------------------------------------------------------
+
+def test_zero_credit_passed_deduplicated():
+    _inject(
+        [_BASE_DATA],
+        [
+            _reg("C-MANDATORY-001", "Succeeded, Registered", "P"),
+            _reg("C-MANDATORY-001", "Succeeded, Registered", "P"),
+        ],
+    )
+    ctx = scp.get_context("TST001")
+    assert ctx is not None
+    assert ctx.zero_credit_courses_passed.count("C-MANDATORY-001") == 1, (
+        "Duplicate P records must be deduplicated"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 20 — load_excel raises FileNotFoundError for missing file
+# ---------------------------------------------------------------------------
+
+def test_load_excel_file_not_found():
+    with pytest.raises(FileNotFoundError) as exc_info:
+        scp.load_excel("nonexistent_path/students.xlsx")
+    assert "not found" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Test 21 — load_excel raises ValueError for missing sheet
+# ---------------------------------------------------------------------------
+
+def test_load_excel_missing_sheet(tmp_path):
+    # Excel with only a 'data' sheet — 'registrations' is absent
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append(["ID"])
+    xls_path = tmp_path / "missing_sheet.xlsx"
+    wb.save(str(xls_path))
+
+    with pytest.raises(ValueError) as exc_info:
+        scp.load_excel(str(xls_path))
+    msg = str(exc_info.value).lower()
+    assert "sheet" in msg or "registrations" in msg
+
+
+# ---------------------------------------------------------------------------
+# Test 22 — load_excel raises ValueError for missing required columns
+# ---------------------------------------------------------------------------
+
+def test_load_excel_missing_required_columns(tmp_path):
+    # 'data' sheet is missing the 'ID' column
+    wb = openpyxl.Workbook()
+    ws_data = wb.active
+    ws_data.title = "data"
+    ws_data.append(["Name"])  # ID is absent
+
+    ws_reg = wb.create_sheet("registrations")
+    ws_reg.append(["ID", "Course Code", "Semester", "Registration Status", "Letter Grade"])
+
+    xls_path = tmp_path / "missing_cols.xlsx"
+    wb.save(str(xls_path))
+
+    with pytest.raises(ValueError) as exc_info:
+        scp.load_excel(str(xls_path))
+    msg = str(exc_info.value)
+    assert "ID" in msg or "missing" in msg.lower()

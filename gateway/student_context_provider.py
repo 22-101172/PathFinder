@@ -47,17 +47,91 @@ _df_data: Optional[pd.DataFrame] = None
 _df_reg: Optional[pd.DataFrame] = None
 
 
+def _load_and_validate_excel(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load and validate student Excel file.
+    Raises with clear messages if file or schema is wrong.
+
+    Returns:
+      (df_data, df_reg): validated DataFrames
+
+    Raises:
+      FileNotFoundError: if path does not exist
+      ValueError: if required sheets or columns are missing
+    """
+    import os
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Student data file not found: {path}\n"
+            f"Expected path: {os.path.abspath(path)}"
+        )
+
+    try:
+        df_data = pd.read_excel(path, sheet_name="data")
+        df_reg = pd.read_excel(path, sheet_name="registrations")
+    except ValueError as exc:
+        raise ValueError(
+            f"Excel file is missing required sheets. Error: {exc}\n"
+            f"Expected sheets: 'data', 'registrations'"
+        ) from exc
+
+    required_data_cols = {
+        "ID", "Name", "Program", "Level", "Study Status",
+        "Cumulative GPA", "Consecutive Warning", "Total Warnings",
+        "Military Status", "First Semester",
+        "Cumulative PHs", "Cumulative CHs", "Cumulative CPs",
+        "Last Semester GPA", "Last Semester CHs", "Last Semester CPs",
+        "Last Semester PHs", "Last Semester Warning", "Current Semester CHs",
+    }
+
+    missing_data_cols = required_data_cols - set(df_data.columns)
+    if missing_data_cols:
+        raise ValueError(
+            f"Data sheet missing columns: {sorted(missing_data_cols)}\n"
+            f"Available columns: {sorted(set(df_data.columns))}"
+        )
+
+    required_reg_cols = {
+        "ID", "Course Code", "Semester", "Registration Status", "Letter Grade",
+    }
+
+    missing_reg_cols = required_reg_cols - set(df_reg.columns)
+    if missing_reg_cols:
+        raise ValueError(
+            f"Registrations sheet missing columns: {sorted(missing_reg_cols)}\n"
+            f"Available columns: {sorted(set(df_reg.columns))}"
+        )
+
+    if df_data.empty:
+        logger.warning("SCP | data sheet is empty (no student records)")
+    if df_reg.empty:
+        logger.warning("SCP | registrations sheet is empty (no enrollment records)")
+
+    logger.info(
+        "SCP | Excel validation passed: %d students, %d registration rows",
+        len(df_data), len(df_reg),
+    )
+
+    return df_data, df_reg
+
+
 def load_excel(path: str) -> None:
     """
     Load the student registrar Excel file into module-level DataFrames.
     Must be called once at startup before any get_context() call.
+
+    Validates file existence and schema before loading.
+    Raises FileNotFoundError or ValueError with clear messages if validation fails.
+
     Both sheets are loaded: "data" (one row per student) and
     "registrations" (one row per course registration attempt).
     """
     global _df_data, _df_reg
-    logger.info("SCP | loading %s", path)
-    _df_data = pd.read_excel(path, sheet_name="data")
-    _df_reg  = pd.read_excel(path, sheet_name="registrations")
+
+    logger.info("SCP | validating and loading %s", path)
+    _df_data, _df_reg = _load_and_validate_excel(path)
+
     logger.info(
         "SCP | loaded %d students, %d registration rows",
         len(_df_data), len(_df_reg),
@@ -132,7 +206,10 @@ def _map_status(reg_status: str, grade: Optional[str]) -> str:
       It is treated as passed so that prerequisites for the next part
       are satisfied immediately.
 
-    Order of checks matters — do not reorder.
+    Order of checks:
+      All explicit outcomes (grades, tags) are checked BEFORE implicit
+      statuses (blank = in_progress). This ensures a failed tag with
+      blank grade is caught as failed, not misclassified as in_progress.
     """
     tags = {t.strip().lower() for t in reg_status.split(",")}
     g = grade or ""
@@ -145,19 +222,15 @@ def _map_status(reg_status: str, grade: Optional[str]) -> str:
     if g == "Con":
         return "passed"
 
-    # No grade yet — currently in progress this semester
-    if not g:
-        return "in_progress"
+    # P grade — zero-credit pass-only course, treated as passed
+    if g == "P":
+        return "passed"
 
     # Incomplete — taken in a past semester, unresolved
     if g == "I":
         return "incomplete"
 
-    # P grade — zero-credit pass-only course, treated as passed
-    if g == "P":
-        return "passed"
-
-    # Failed outcomes
+    # Failed outcomes — must be checked before blank grade
     if g in ("F", "Abs") or "failed" in tags:
         return "failed"
 
@@ -169,7 +242,15 @@ def _map_status(reg_status: str, grade: Optional[str]) -> str:
     if "succeeded" in tags:
         return "passed"
 
-    # Safe fallback
+    # No grade yet — currently in progress this semester
+    if not g:
+        return "in_progress"
+
+    # Safe fallback — log warning for unusual combos
+    logger.warning(
+        "SCP | unusual status/grade combo: tags=%s, grade=%s — defaulting to failed",
+        tags, grade
+    )
     return "failed"
 
 
@@ -203,7 +284,17 @@ def _compute_retake_count(student_regs: pd.DataFrame) -> dict[str, int]:
 
 def _compute_improve_retakes(student_regs: pd.DataFrame) -> int:
     """
-    Counts the total lifetime improve-retake attempts used by the student.
+    Counts the total lifetime improve-retake attempts used by the student,
+    including withdrawn attempts (which still consume a slot).
+
+    Policy decision:
+      A withdrawn improve-retake attempt counts as used because the registrar
+      approved the student's request to improve-retake the course.
+      Withdrawal does not "refund" the attempt.
+
+    This is different from regular retake attempts, where a withdrawal is not
+    counted as an attempt at all. See _compute_retake_count() for contrast.
+
     The ALE checks this against the improve-retake cap rule from RAG.
 
     IMPORTANT: Must be called on raw registration data BEFORE _map_status()
@@ -221,50 +312,84 @@ def _compute_improve_retakes(student_regs: pd.DataFrame) -> int:
 
 def _compute_regular_semesters(student_regs: pd.DataFrame) -> int:
     """
-    Counts distinct Fall and Spring semesters in which the student had
-    at least one non-withdrawn registration.
+    Counts distinct Fall and Spring semesters that are complete
+    (excludes current semester).
 
     Rules:
       - Summer semesters excluded entirely (not regular semesters)
+      - Current semester excluded — only count completed semesters
       - A semester where ALL registrations were withdrawn does not count
-      - A single non-withdrawn row in a semester is enough to count it
+      - A single non-withdrawn row in a completed semester is enough to count it
+
+    Rationale:
+      ALE graduation audit uses this count to determine eligibility.
+      Including current semester would incorrectly overcount study time.
     """
+    current_sem = get_current_semester()
     valid: set[str] = set()
+
     for _, row in student_regs.iterrows():
         semester = str(row.get("Semester", "")).strip()
         if not semester or semester.lower() == "nan":
             continue
+
+        # Skip current semester — it is not complete yet
+        if semester == current_sem:
+            continue
+
+        # Skip Summer
         if "Fall" not in semester and "Spring" not in semester:
-            continue  # Skip Summer
+            continue
 
         reg_status = str(row.get("Registration Status", "")).strip()
         grade = _clean_grade(row.get("Letter Grade"))
         tags = {t.strip().lower() for t in reg_status.split(",")}
 
+        # Skip withdrawn rows
         if "withdrawn" in tags or "forced withdraw" in tags or grade == "W":
-            continue  # This row is a withdrawal — skip it
+            continue
 
         valid.add(semester)
+
     return len(valid)
 
 
 def _compute_zero_credit_passed(student_regs: pd.DataFrame) -> list[str]:
     """
-    Returns course codes where the student received a P grade.
+    Returns unique course codes where the student received a P grade.
     P = pass-only grade for zero-credit mandatory courses.
 
+    De-duplicated: if a student has multiple P records for the same course
+    (data entry anomaly), it appears once in the result.
+
     The orchestrator cross-references this list against KG to determine
-    whether all required zero-credit courses have been completed,
-    then resolves to a boolean for the ALE graduation audit.
+    whether all required zero-credit courses have been completed, then
+    resolves to a boolean for the ALE graduation audit.
     """
-    result: list[str] = []
+    result: set[str] = set()
+
     for _, row in student_regs.iterrows():
         grade = _clean_grade(row.get("Letter Grade"))
         if grade == "P":
             code = str(row.get("Course Code", "")).strip()
             if code and code.lower() != "nan":
-                result.append(code)
-    return result
+                result.add(code)
+
+    return sorted(list(result))
+
+
+def _get_study_status(row) -> str:
+    """
+    Safely extract and normalize Study Status field from Excel row.
+    Returns "Studying" as default for blank/missing/NaN cells.
+
+    Handles the edge case where pandas returns NaN for blank cells,
+    and str(NaN) produces the string "nan", not None.
+    """
+    raw = str(row.get("Study Status", "") or "").strip()
+    if not raw or raw.lower() in ("nan", ""):
+        return "Studying"
+    return raw
 
 
 def get_context(student_id: str) -> Optional[StudentContext]:
@@ -322,9 +447,16 @@ def get_context(student_id: str) -> Optional[StudentContext]:
     course_history: list[CourseRecord] = []
     best_outcome: dict[str, str] = {}
 
+    # Track latest row per course to identify unresolved active attempts.
+    # Assumption: Excel registration rows are chronological; later rows
+    # appear later in the sheet.
+    latest_row_per_course: dict[str, tuple[int, str]] = {}
+
+    row_index = 0
     for _, reg in student_regs.iterrows():
         code = str(reg.get("Course Code", "")).strip()
         if not code or code.lower() == "nan":
+            row_index += 1
             continue
 
         reg_status = str(reg.get("Registration Status", "")).strip()
@@ -341,16 +473,43 @@ def get_context(student_id: str) -> Optional[StudentContext]:
             status=status,
         ))
 
-        # Keep best outcome per course using priority map
+        # Keep best outcome per course using priority map.
+        # This drives completed_courses and failed_courses only.
         current = best_outcome.get(code, "withdrawn")
         if _OUTCOME_PRIORITY.get(status, 0) > _OUTCOME_PRIORITY.get(current, 0):
             best_outcome[code] = status
 
-    # --- Derive course lists from best outcomes ---
-    completed   = [c for c, s in best_outcome.items() if s in ("passed", "repeated")]
-    failed      = [c for c, s in best_outcome.items() if s == "failed"]
-    in_progress = [c for c, s in best_outcome.items() if s in ("in_progress", "incomplete")]
-    # Note: withdrawn courses are intentionally excluded from all lists
+        # Track latest row per course to detect currently active attempts.
+        latest_row_per_course[code] = (row_index, status)
+
+        row_index += 1
+
+    # --- Derive course lists ---
+    # completed/failed: use best-outcome (final status per course)
+    completed = [c for c, s in best_outcome.items() if s in ("passed", "repeated")]
+    failed = [c for c, s in best_outcome.items() if s == "failed"]
+
+    # in_progress: include active registrations and unresolved incomplete attempts.
+    # A course is in_progress if its latest attempt has status in_progress
+    # or unresolved incomplete. Old incomplete attempts that were later
+    # passed/repeated/failed do not remain in_progress.
+    in_progress_set: set[str] = set()
+
+    for course_code, (_latest_index, latest_status) in latest_row_per_course.items():
+        if latest_status == "in_progress":
+            in_progress_set.add(course_code)
+        elif (
+            latest_status == "incomplete"
+            and best_outcome.get(course_code) == "incomplete"
+        ):
+            in_progress_set.add(course_code)
+
+    in_progress = sorted(list(in_progress_set))
+
+    # Note: course_history remains authoritative for all attempt-level details.
+    # Downstream components needing exact attempt history should query
+    # course_history, not rely only on derived completed/failed/in_progress lists.
+    # Withdrawn courses are intentionally excluded from all derived lists.
 
     ctx = StudentContext(
         student_id=str(r["ID"]),
@@ -359,7 +518,7 @@ def get_context(student_id: str) -> Optional[StudentContext]:
         track_id=_parse_track(str(r.get("Program", ""))),
         level=LEVEL_MAP.get(str(r.get("Level", "")).strip().lower(), 1),
         first_semester=str(r.get("First Semester", "")).strip(),
-        study_status=str(r.get("Study Status", "Studying")).strip(),
+        study_status=_get_study_status(r),
         military_status=military_status,
         cgpa=cgpa,
         last_semester_gpa=_safe_float(r.get("Last Semester GPA")),

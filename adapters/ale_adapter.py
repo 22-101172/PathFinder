@@ -7,6 +7,8 @@ See ALE_Integration_Contract.md for the full contract."""
 
 import logging
 
+from pydantic import ValidationError
+
 from gateway.models.schemas import StudentContext
 from engines.ale.functions.simulate_gpa_forward import simulate_gpa_forward
 from engines.ale.functions.solve_target_gpa import solve_target_gpa
@@ -14,6 +16,7 @@ from engines.ale.functions.check_course_eligibility import check_course_eligibil
 from engines.ale.functions.run_graduation_audit import run_graduation_audit
 from engines.ale.functions.generate_semester_plan import generate_semester_plan
 from engines.ale.functions.generate_graduation_roadmap import generate_graduation_roadmap
+from engines.ale.utils.grade_resolver import GradeResolutionError, resolve_grade
 from engines.ale.schemas import (
     SimulateGPAForwardInput, SolveTargetGPAInput,
     CheckCourseEligibilityInput, RunGraduationAuditInput,
@@ -50,8 +53,23 @@ def call(
     logger.info("ALE operation: %s", operation)
     try:
         return _dispatch(operation, student_context, rule_bundles, kg_data, params)
+    except ValidationError as exc:
+        logger.error(
+            "ALE operation %s: input validation failed — likely missing or invalid "
+            "StudentContext field or rule bundle: %s", operation, exc
+        )
+        return {
+            "status": "cannot_compute",
+            "reason_codes": ["invalid_input"],
+            "required_data_missing": [],
+            "message": str(exc),
+            "operation": operation,
+        }
+    except ValueError as exc:
+        logger.error("ALE operation %s: unknown operation or bad value: %s", operation, exc)
+        return {"status": "error", "message": str(exc), "operation": operation}
     except Exception as exc:
-        logger.error("ALE operation %s failed: %s", operation, exc)
+        logger.error("ALE operation %s failed unexpectedly: %s", operation, exc)
         return {"status": "error", "message": str(exc), "operation": operation}
 
 
@@ -67,7 +85,11 @@ def _parse_rules(rule_bundles: dict, key: str, model_class):
         raise ValueError(f"rule_bundles missing or invalid: '{key}'")
 
 
-def _map_course_history(course_history, grading_scale_rules: dict) -> list[CourseHistoryEntry]:
+def _map_course_history(
+    course_history,
+    grading_scale_rules: dict,
+    course_credit_lookup: dict[str, int] | None = None,
+) -> list[CourseHistoryEntry]:
     """
     NOTE: credit_hours patching is orchestrator responsibility.
     Course transcript credit_hours are currently 0 (SCP sentinel).
@@ -92,12 +114,18 @@ def _map_course_history(course_history, grading_scale_rules: dict) -> list[Cours
         else:
             grade_points = letter_to_points[grade]
 
+        real_credits = (
+            course_credit_lookup.get(r.course_code, r.credit_hours)
+            if course_credit_lookup
+            else r.credit_hours
+        )
+
         entries.append(CourseHistoryEntry(
             course_code=r.course_code,
             semester=r.semester_taken,
             semester_type="summer" if "summer" in r.semester_taken.lower() else "regular",
             grade_points=grade_points,
-            credits=r.credit_hours,
+            credits=real_credits,
             status=status,
         ))
     return entries
@@ -241,7 +269,11 @@ def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict,
         military_status=sc.military_status,
         completed_regular_semesters=sc.completed_regular_semesters,
         zero_credit_courses_passed=bool(sc.zero_credit_courses_passed),
-        course_history=_map_course_history(sc.course_history, grading_scale.model_dump()),
+        course_history=_map_course_history(
+            sc.course_history,
+            grading_scale.model_dump(),
+            course_credit_lookup=kg_data.get("course_credit_lookup"),
+        ),
         graduation_rules=graduation_rules,
         warning_rules=warning_rules,
         honors_rules=honors_rules,
@@ -252,8 +284,6 @@ def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict,
 def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dict, params: dict) -> dict:
     credit_limit_rules = _parse_rules(rule_bundles, "credit_limit_rules", CreditLimitRules)
     graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
-    retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
-    student_level_rules = _parse_rules(rule_bundles, "student_level_rules", StudentLevelRules)
 
     summer_rules = None
     if "summer_semester_rules" in rule_bundles:
@@ -276,14 +306,11 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
         available_courses=_map_available_courses(kg_data),
         credit_limit_rules=credit_limit_rules,
         graduation_rules=graduation_rules,
-        retake_rules=retake_rules,
-        specialization_credit_threshold=params.get("specialization_credit_threshold", 60),
         summer_semester_rules=summer_rules,
         target_semester_type=params["target_semester_type"],
         target_track=params.get("target_track", None),
         target_credit_load=params.get("target_credit_load", None),
         max_credits_mode=params.get("max_credits_mode", False),
-        student_level_rules=student_level_rules,
     )
     return generate_semester_plan(inp).model_dump()
 
@@ -292,7 +319,6 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
     grading_scale = _parse_rules(rule_bundles, "grading_scale_rules", GradingScaleRules)
     credit_limit_rules = _parse_rules(rule_bundles, "credit_limit_rules", CreditLimitRules)
     graduation_rules = _parse_rules(rule_bundles, "graduation_requirement_rules", GraduationRequirementRules)
-    retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
     student_level_rules = _parse_rules(rule_bundles, "student_level_rules", StudentLevelRules)
 
     summer_rules = None
@@ -300,6 +326,29 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
         summer_rules = _parse_rules(rule_bundles, "summer_semester_rules", SummerSemesterRules)
 
     level_map = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
+
+    raw_grade = params.get("assumed_grade_per_pass", None)
+    resolved_grade: float | None = None
+
+    if raw_grade is not None:
+        try:
+            resolved_grade = resolve_grade(raw_grade, grading_scale, "_assumed_grade")
+            if resolved_grade is None:
+                return {
+                    "status": "cannot_compute",
+                    "reason_codes": ["invalid_assumed_grade"],
+                    "required_data_missing": [],
+                    "message": "P/pass grade cannot be used as the assumed GPA grade for roadmap simulation.",
+                    "operation": "generate_graduation_roadmap",
+                }
+        except GradeResolutionError:
+            return {
+                "status": "cannot_compute",
+                "reason_codes": ["invalid_assumed_grade"],
+                "required_data_missing": [],
+                "message": f"Cannot resolve assumed grade '{raw_grade}' to grade points.",
+                "operation": "generate_graduation_roadmap",
+            }
 
     inp = GenerateGraduationRoadmapInput(
         study_status=sc.study_status,
@@ -321,13 +370,11 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
         available_courses=_map_available_courses(kg_data),
         credit_limit_rules=credit_limit_rules,
         graduation_rules=graduation_rules,
-        retake_rules=retake_rules,
-        specialization_credit_threshold=params.get("specialization_credit_threshold", 60),
         summer_semester_rules=summer_rules,
         target_semester_type=params["target_semester_type"],
         starting_year=params["starting_year"],
         target_track=params.get("target_track", None),
-        assumed_grade_per_pass=params.get("assumed_grade_per_pass", None),
+        assumed_grade_per_pass=resolved_grade,
         accelerated_mode=params.get("accelerated_mode", False),
         max_credits_mode=params.get("max_credits_mode", False),
         target_credit_load=params.get("target_credit_load", None),

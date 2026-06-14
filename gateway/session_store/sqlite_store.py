@@ -51,7 +51,15 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         if row is None:
             return None
-        return SessionState.model_validate_json(row[0])
+        try:
+            return SessionState.model_validate_json(row[0])
+        except Exception as e:
+            logger.warning(
+                "SQLiteSessionStore: corrupted or invalid session blob for %s "
+                "(treating as not found): %s",
+                session_id, str(e)
+            )
+            return None
 
     def delete(self, session_id: str) -> bool:
         logger.debug("SQLiteSessionStore: deleting session %s", session_id)
@@ -70,7 +78,17 @@ class SQLiteSessionStore(SessionStore):
                 "WHERE student_id = ? ORDER BY last_updated DESC",
                 (student_id,),
             ).fetchall()
-        return [SessionState.model_validate_json(row[0]) for row in rows]
+        sessions = []
+        for row in rows:
+            try:
+                sessions.append(SessionState.model_validate_json(row[0]))
+            except Exception as e:
+                logger.warning(
+                    "SQLiteSessionStore: skipping corrupted session blob for student %s: %s",
+                    student_id, str(e)
+                )
+                continue
+        return sessions
 
     def get_summaries_for_student(self, student_id: str) -> list[tuple[str, str, str]]:
         """Return (session_id, session_name, last_updated) tuples ordered by last_updated DESC."""

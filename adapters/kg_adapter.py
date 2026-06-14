@@ -75,8 +75,8 @@ class KGAdapter:
     def get_skills_taught(self, course_code: str) -> dict:
         return Q.q_get_skills_taught(self._client, course_code)
 
-    def search_courses_by_skill(self, skills: list[str]) -> dict:
-        return Q.q_search_courses_by_skill(self._client, skills)
+    def search_courses_by_skill(self, skill_ids: list[str]) -> dict:
+        return Q.q_search_courses_by_skill(self._client, skill_ids)
 
     def get_role_profile(self, role_id: str) -> dict:
         return Q.q_get_role_profile(self._client, role_id)

@@ -15,8 +15,7 @@
         "advanced ml"
       ],
       "C-AI424": [
-        "nlp",
-        "nlp course"
+        "nlp"
       ],
       "C-AI311": [
         "intro ai",
@@ -41,8 +40,8 @@
         "intelligent robotic systems"
       ],
       "C-CS435": [
-        "computer vision course",
-        "cv course"
+        "computer vision",
+        "cv"
       ],
       "C-DE312": [
         "intro to database systems",
@@ -75,7 +74,8 @@
         "big data engineering"
       ],
       "C-DE211": [
-        "statistical analysis"
+        "statistical analysis",
+        "data analysis"
       ],
       "C-ST211": [
         "stats",
@@ -206,8 +206,8 @@
       ],
       "C-CS417": [
         "web programming",
-        "web dev course",
-        "web development course"
+        "web dev",
+        "web development"
       ],
       "C-TR304": [
         "field training",
@@ -229,6 +229,10 @@
       "HUM110": [
         "english fundamentals",
         "english basics"
+      ],
+      "HUM111": [
+        "english",
+        "english language"
       ],
       "HUM412": [
         "technical writing"
@@ -255,6 +259,22 @@
       "HUM129": [
         "humanities 3",
         "selected topics humanities 3"
+      ],
+      "C-CS351": [
+        "selected topics basic cs",
+        "selected topics basic computer science"
+      ],
+      "C-CS352": [
+        "selected topics basic cs 2",
+        "selected topics basic computer science 2"
+      ],
+      "C-CS495": [
+        "selected topics cs 1",
+        "selected topics computer science 1"
+      ],
+      "C-CS496": [
+        "selected topics cs 2",
+        "selected topics computer science 2"
       ]
     },
     "ambiguous_terms": {

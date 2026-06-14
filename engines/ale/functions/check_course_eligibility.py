@@ -190,10 +190,10 @@ def check_course_eligibility(
     # Phase 4 — Warnings
     # -----------------------------------------------------------------------
 
-    # Warning 1 — B cap reminder for failed retake
+    # Warning 1 — grade cap reminder for failed retake (rule-driven, not hardcoded)
     if input.attempt_type == "failed_retake":
         warnings.append(
-            "B grade cap applies on first retake after failure. Does not affect eligibility."
+            f"{retake_rules.failed_first_retake_grade_cap} grade cap applies on first retake after failure. Does not affect eligibility."
         )
 
     # Warning 2 — in-progress missing prerequisites

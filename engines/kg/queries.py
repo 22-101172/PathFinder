@@ -30,6 +30,11 @@ def _parse_credit_threshold_constraint(constraint_type, constraint_value):
     pc.type is stored as "CREDIT_THRESHOLD"; pc.value is a free-text string
     like "Passing 59 Credit Hours".  Returns the embedded integer, or None if
     the type is not CREDIT_THRESHOLD, the value is absent, or no digit is found.
+
+    NOTE: Only CREDIT_THRESHOLD is handled here. If new PrerequisiteConstraint
+    types are added to the graph (e.g. MIN_GPA, CO_REQ), add explicit branches
+    rather than letting them fall through silently. Do NOT repurpose this
+    function to parse unsupported types as credit thresholds.
     """
     if constraint_type != "CREDIT_THRESHOLD":
         return None
@@ -40,7 +45,9 @@ def _parse_credit_threshold_constraint(constraint_type, constraint_value):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A1 — Course Catalogue Lookup
+# A1 — Course Catalogue / Course Discovery
+# NOTE: Function names are the stable runtime contract; operation numbers are
+#       documentation/grouping labels only. Do not use OP numbers in code.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── OP1: Get Course Profile ──────────────────────────────────────────────────
@@ -261,34 +268,32 @@ def q_get_skills_taught(client, course_code: str) -> dict:
 
 # ── OP4: Search Courses by Skill ─────────────────────────────────────────────
 
-def q_search_courses_by_skill(client, skills: list) -> dict:
-    """Given a list of skill names, return all courses that teach any of them."""
-    if not skills:
-        return {"error": "no_skills_provided"}
+def q_search_courses_by_skill(client, skill_ids: list) -> dict:
+    """Given a list of skill IDs, return all courses that teach any of them."""
+    if not skill_ids:
+        return {"error": "no_skill_ids_provided"}
 
-    skill_names = [s.strip() for s in skills if s and s.strip()]
-    if not skill_names:
-        return {"error": "no_skills_provided"}
+    raw_ids = [s.strip() for s in skill_ids if s and str(s).strip()]
+    if not raw_ids:
+        return {"error": "no_skill_ids_provided"}
 
-    cleaned_skill_names = []
-    seen_inputs = set()
-    for s in skill_names:
-        s_lower = s.lower()
-        if s_lower not in seen_inputs:
-            seen_inputs.add(s_lower)
-            cleaned_skill_names.append(s)
+    # Deduplicate while preserving first-seen order; exact match, no lowercasing.
+    seen = set()
+    cleaned_ids = []
+    for sid in raw_ids:
+        if sid not in seen:
+            seen.add(sid)
+            cleaned_ids.append(sid)
 
     rows = client.execute_query(
         """
-        UNWIND $skill_names AS sname
-        MATCH (s:Skill)
-        WHERE toLower(s.name) = toLower(sname)
-        WITH s, sname
+        UNWIND $skill_ids AS sid
+        MATCH (s:Skill {skill_id: sid})
         MATCH (c:Course)-[:TEACHES]->(s)
         OPTIONAL MATCH (c)-[:BELONGS_TO]->(t:Track)
         RETURN
-            sname AS queried_skill,
-            s.name AS matched_skill,
+            sid AS queried_skill_id,
+            s.skill_id AS matched_skill_id,
             c.course_code AS course_code,
             c.name AS name,
             collect(DISTINCT CASE
@@ -299,46 +304,43 @@ def q_search_courses_by_skill(client, skills: list) -> dict:
             END) AS tracks
         ORDER BY c.course_code
         """,
-        {"skill_names": cleaned_skill_names}
+        {"skill_ids": cleaned_ids}
     )
 
-    recognized_skills = set()
+    recognized_ids = set()
     seen_courses = {}
     for r in rows:
-        recognized_skills.add(r["queried_skill"].lower())
+        recognized_ids.add(r["queried_skill_id"])
         cc = r["course_code"]
         if cc not in seen_courses:
             seen_courses[cc] = {
                 "course_code": cc,
                 "name": r["name"],
                 "tracks": [t for t in (r.get("tracks") or []) if t],
-                "matched_skills": [r["matched_skill"]] if r.get("matched_skill") else [],
+                "matched_skill_ids": [r["matched_skill_id"]] if r.get("matched_skill_id") else [],
             }
         else:
             for t in (r.get("tracks") or []):
                 if t and t not in seen_courses[cc]["tracks"]:
                     seen_courses[cc]["tracks"].append(t)
-            if r.get("matched_skill") and r["matched_skill"] not in seen_courses[cc]["matched_skills"]:
-                seen_courses[cc]["matched_skills"].append(r["matched_skill"])
+            if r.get("matched_skill_id") and r["matched_skill_id"] not in seen_courses[cc]["matched_skill_ids"]:
+                seen_courses[cc]["matched_skill_ids"].append(r["matched_skill_id"])
 
     results = list(seen_courses.values())
-    results.sort(key=lambda x: (-len(x["matched_skills"]), x["course_code"]))
+    results.sort(key=lambda x: (-len(x["matched_skill_ids"]), x["course_code"]))
 
-    unrecognized_skills = [
-        s for s in cleaned_skill_names
-        if s.lower() not in recognized_skills
-    ]
+    unrecognized_skill_ids = [sid for sid in cleaned_ids if sid not in recognized_ids]
 
     return {
-        "queried_skills": cleaned_skill_names,
-        "unrecognized_skills": unrecognized_skills,
-        "results": results[:10],
+        "queried_skill_ids": cleaned_ids,
+        "unrecognized_skill_ids": unrecognized_skill_ids,
+        "results": results,
         "total_results": len(results),
     }
 
 
 
-# ── OP5: Get Focus Courses for Target ───────────────────────────────────────
+# ── OP17: Get Focus Courses for Target (logical group: A6) ──────────────────
 def q_get_focus_courses_for_target(
     client,
     target_id: str,
@@ -457,7 +459,7 @@ def q_get_focus_courses_for_target(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A2 — Career Role Exploration (Curriculum-aware)
+# A2 — Career Role Exploration
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _weight_to_tier(weight: float) -> str:
@@ -469,6 +471,7 @@ def _weight_to_tier(weight: float) -> str:
         return "optional"
 
 
+# ── OP5: Get Role Profile ────────────────────────────────────────────────────
 def q_get_role_profile(client, role_id: str) -> dict:
     """Returns the profile of a role including required skills."""
     if not role_id or not str(role_id).strip():
@@ -526,6 +529,7 @@ def q_get_role_profile(client, role_id: str) -> dict:
     }
 
 
+# ── OP6: Get Roles by Track ──────────────────────────────────────────────────
 def q_get_roles_by_track(client, track_id: str) -> dict:
     """Returns roles reachable through the Track → Course → Skill → Role path."""
     if not track_id or not str(track_id).strip():
@@ -576,7 +580,7 @@ def q_get_roles_by_track(client, track_id: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A3 — Skill Gap & Alignment
+# A3 — Skill Gap & Role Alignment
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _resolve_courses(client, course_codes: list):
@@ -649,6 +653,7 @@ def _compute_alignment_metrics(role_skills: list, covered_skill_ids: set) -> dic
     }
 
 
+# ── OP7: Compute Skill Gap ───────────────────────────────────────────────────
 def q_compute_skill_gap(client, role_id: str, completed_courses: list) -> dict:
     """Computes covered and missing skills for a role given completed courses."""
     if not role_id or not str(role_id).strip():
@@ -705,6 +710,7 @@ def q_compute_skill_gap(client, role_id: str, completed_courses: list) -> dict:
     return result
 
 
+# ── OP8: Compute Alignment Score ─────────────────────────────────────────────
 def q_compute_alignment_score(client, role_id: str, completed_courses: list) -> dict:
     """Computes the weighted alignment score [0,1]."""
     if not role_id or not str(role_id).strip():
@@ -753,6 +759,7 @@ def q_compute_alignment_score(client, role_id: str, completed_courses: list) -> 
     return result
 
 
+# ── OP9: Recommend Courses to Close Gap ──────────────────────────────────────
 def q_recommend_courses_to_close_gap(client, role_id: str, completed_courses: list) -> dict:
     """Recommends courses that teach missing skills, excluding already completed."""
     if not role_id or not str(role_id).strip():
@@ -880,6 +887,7 @@ def q_recommend_courses_to_close_gap(client, role_id: str, completed_courses: li
     return result
 
 
+# ── OP10: Estimate Alignment Improvement ─────────────────────────────────────
 def q_estimate_alignment_improvement(client, role_id: str, completed_courses: list, planned_courses: list) -> dict:
     """Estimates how much planned courses improve alignment score."""
     if not role_id or not str(role_id).strip():
@@ -1021,6 +1029,7 @@ def q_estimate_alignment_improvement(client, role_id: str, completed_courses: li
     return result
 
 
+# ── OP11: Find Best Matching Roles ───────────────────────────────────────────
 def q_find_best_matching_roles(client, completed_courses: list) -> dict:
     """Ranks all roles by alignment score for the given completed courses."""
     if not completed_courses:
@@ -1069,14 +1078,13 @@ def q_find_best_matching_roles(client, completed_courses: list) -> dict:
         role_skills = [sk for sk in (row.get("role_skills") or []) if sk]
         if not role_skills:
             continue
-        total_weight = sum(sk["weight"] for sk in role_skills)
-        covered_weight = sum(sk["weight"] for sk in role_skills if sk["skill_id"] in covered_ids)
-        score = round(covered_weight / total_weight, 4) if total_weight else 0.0
-        if score > 0.0:
+        metrics = _compute_alignment_metrics(role_skills, covered_ids)
+        if metrics["alignment_score"] > 0.0:
             ranked.append({
                 "role_id": row["role_id"], "role_name": row["role_name"],
                 "domains": [row["domain"]] if row.get("domain") else [],
-                "alignment_score": score, "alignment_percentage": round(score * 100, 2),
+                "alignment_score": metrics["alignment_score"],
+                "alignment_percentage": metrics["alignment_percentage"],
             })
 
     ranked.sort(key=lambda x: (-x["alignment_score"], x["role_name"]))
@@ -1094,13 +1102,19 @@ def q_find_best_matching_roles(client, completed_courses: list) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A4 — Track Guidance & Comparison
+# A4 — Track Exploration & Comparison
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _track_alignment_score(track_skill_ids: set, role_skills: list) -> float:
+def _track_alignment_score(track_skill_ids: set, role_skills: list) -> dict:
     total_weight = sum(sk["weight"] for sk in role_skills)
     covered_weight = sum(sk["weight"] for sk in role_skills if sk["skill_id"] in track_skill_ids)
-    return round(covered_weight / total_weight, 4) if total_weight else 0.0
+    score = round(covered_weight / total_weight, 4) if total_weight else 0.0
+    return {
+        "alignment_score": score,
+        "alignment_percentage": round(score * 100, 2),
+        "covered_weight": round(covered_weight, 4),
+        "total_weight": round(total_weight, 4),
+    }
 
 
 def _get_track_skills(client, track_id: str) -> list:
@@ -1161,8 +1175,8 @@ def _get_track_supported_roles(client, track_id: str) -> list:
         role_skills = [sk for sk in (row.get("role_skills") or []) if sk]
         if not role_skills:
             continue
-        score = _track_alignment_score(track_skill_ids, role_skills)
-        if score > 0.0:
+        metrics = _track_alignment_score(track_skill_ids, role_skills)
+        if metrics["alignment_score"] > 0.0:
             supported.append({
                 "role_id": row["role_id"], "role_name": row["role_name"],
                 "domains": [row["domain"]] if row.get("domain") else [],
@@ -1170,6 +1184,7 @@ def _get_track_supported_roles(client, track_id: str) -> list:
     return supported
 
 
+# ── OP12: Get Track Overview ──────────────────────────────────────────────────
 def q_get_track_overview(client, track_id: str) -> dict:
     if not track_id or not str(track_id).strip():
         return {"error": "no_track_provided"}
@@ -1189,6 +1204,7 @@ def q_get_track_overview(client, track_id: str) -> dict:
     }
 
 
+# ── OP13: Compare Tracks ─────────────────────────────────────────────────────
 def q_compare_tracks(client, track_id_1: str, track_id_2: str) -> dict:
     if not track_id_1 or not track_id_2:
         return {"error": "missing_track_ids"}
@@ -1263,10 +1279,10 @@ def q_compare_tracks(client, track_id_1: str, track_id_2: str) -> dict:
         role_map[rid] = {
             "role_id": rid, "role_name": row["role_name"],
             "domains": [row["domain"]] if row.get("domain") else [],
-            "track_1_score": sc1, "track_2_score": sc2,
+            "track_1_score": sc1["alignment_score"], "track_2_score": sc2["alignment_score"],
         }
-        if sc1 > 0.0: t1_role_ids.add(rid)
-        if sc2 > 0.0: t2_role_ids.add(rid)
+        if sc1["alignment_score"] > 0.0: t1_role_ids.add(rid)
+        if sc2["alignment_score"] > 0.0: t2_role_ids.add(rid)
 
     shared_role_ids = t1_role_ids & t2_role_ids
 
@@ -1290,6 +1306,7 @@ def q_compare_tracks(client, track_id_1: str, track_id_2: str) -> dict:
     }
 
 
+# ── OP14: Recommend Track for Role ───────────────────────────────────────────
 def q_recommend_track_for_role(client, role_id: str) -> dict:
     if not role_id or not str(role_id).strip():
         return {"error": "no_role_provided"}
@@ -1314,19 +1331,19 @@ def q_recommend_track_for_role(client, role_id: str) -> dict:
         {}
     )
     track_skill_map = {r["track_id"]: set(r.get("skill_ids") or []) for r in track_skill_rows}
-    total_weight = sum(sk["weight"] for sk in role_skills)
 
     ranked = []
     for tr in all_tracks:
         tid = tr["track_id"]
         track_skill_ids = track_skill_map.get(tid, set())
-        score = _track_alignment_score(track_skill_ids, role_skills)
-        if score > 0.0:
-            covered_weight = sum(sk["weight"] for sk in role_skills if sk["skill_id"] in track_skill_ids)
+        metrics = _track_alignment_score(track_skill_ids, role_skills)
+        if metrics["alignment_score"] > 0.0:
             ranked.append({
                 "track_id": tid, "track_name": tr["name"],
-                "alignment_score": score, "alignment_percentage": round(score * 100, 2),
-                "covered_weight": round(covered_weight, 4), "total_weight": round(total_weight, 4),
+                "alignment_score": metrics["alignment_score"],
+                "alignment_percentage": metrics["alignment_percentage"],
+                "covered_weight": metrics["covered_weight"],
+                "total_weight": metrics["total_weight"],
             })
 
     ranked.sort(key=lambda x: (-x["alignment_score"], x["track_name"]))
@@ -1339,6 +1356,7 @@ def q_recommend_track_for_role(client, role_id: str) -> dict:
     }
 
 
+# ── OP15: Recommend Track for Skill ──────────────────────────────────────────
 def q_recommend_track_for_skill(client, skill_id: str) -> dict:
     if not skill_id or not str(skill_id).strip():
         return {"error": "no_skill_provided"}
@@ -1381,10 +1399,12 @@ def q_recommend_track_for_skill(client, skill_id: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A5 — ALE Planning Support
+# A5 — Orchestrator Planning Support
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── OP6: Get Courses by Track ────────────────────────────────────────────────
+# ── OP16: Get Courses by Track ───────────────────────────────────────────────
+# Feeds Orchestrator with full track course data for ALE available_courses list.
+# Not user-facing.
 def q_get_courses_by_track(client, track_id: str) -> dict:
     """
     Returns all courses belonging to a track with full planning metadata:
@@ -1451,7 +1471,7 @@ def q_get_courses_by_track(client, track_id: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A6 — Entity Resolution
+# A7 — Entity Resolution
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _ENTITY_CONFIG = {
@@ -1586,6 +1606,7 @@ def _format_resolver_error(error_code, entity_type, entity_text, **extra):
     return result
 
 
+# ── OP18: Resolve Entity ─────────────────────────────────────────────────────
 def q_resolve_entity(client, entity_type: str, entity_text: str) -> dict:
     """
     Resolve a natural-language entity reference to a graph ID.

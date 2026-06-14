@@ -124,7 +124,6 @@ def _make_input(target_semester_type: str = "Fall") -> GenerateSemesterPlanInput
         graduation_rules=_GRADUATION_RULES,
         retake_rules=_RETAKE_RULES,
         student_level_rules=_STUDENT_LEVEL_RULES,
-        specialization_credit_threshold=60,
         target_semester_type=target_semester_type,
     )
 
@@ -257,7 +256,6 @@ def _make_roadmap_input(
         credit_limit_rules=_CREDIT_LIMIT_RULES,
         graduation_rules=_ROADMAP_GRAD_RULES,
         retake_rules=_RETAKE_RULES,
-        specialization_credit_threshold=60,
         target_semester_type=target_semester_type,
         starting_year=2026,
         student_level_rules=_STUDENT_LEVEL_RULES,

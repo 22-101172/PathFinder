@@ -105,12 +105,14 @@ class RAGAdapter:
 
         try:
             result = self.extract_structured_fn(sub_query, expected_schema)
-            data   = result.get("data", {})
             docs   = result.get("source_documents", [])
             citations = [
                 {"source": "CIS Handbook", "page": d.get("page"), "text": d.get("text", "")}
                 for d in docs
             ]
+            if "error" in result:
+                return {"data": {}, "citations": citations, "error": result["error"]}
+            data = result.get("data", {})
             return {"data": data, "citations": citations}
 
         except Exception as exc:
@@ -119,7 +121,7 @@ class RAGAdapter:
 
     # ── get_rule_bundles ─────────────────────────────────────────────────────
 
-    def get_rule_bundles(self) -> dict[str, BaseModel]:
+    def get_rule_bundles(self) -> dict[str, BaseModel | None]:
         """
         Retrieves all 8 rule bundles required by ALE by querying the RAG engine
         with expected schemas.
@@ -156,6 +158,11 @@ class RAGAdapter:
             "What is the grading scale, letter grades to GPA points mapping, and percentage ranges?",
             grading_scale_schema
         )
+        if "error" in res_gs:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'grading_scale_rules' extraction error: %s",
+                res_gs["error"],
+            )
         bundles["grading_scale_rules"] = _warn_if_empty("grading_scale_rules", res_gs.get("data", {}))
 
         # 2. graduation_requirement_rules
@@ -171,6 +178,11 @@ class RAGAdapter:
             "What are the graduation requirements including total credits, minimum CGPA, min and max semesters?",
             graduation_schema
         )
+        if "error" in res_gr:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'graduation_requirement_rules' extraction error: %s",
+                res_gr["error"],
+            )
         bundles["graduation_requirement_rules"] = _warn_if_empty("graduation_requirement_rules", res_gr.get("data", {}))
 
         # 3. academic_warning_rules
@@ -187,6 +199,11 @@ class RAGAdapter:
             "What are the academic warning and dismissal rules?",
             warning_schema
         )
+        if "error" in res_wr:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'academic_warning_rules' extraction error: %s",
+                res_wr["error"],
+            )
         bundles["academic_warning_rules"] = _warn_if_empty("academic_warning_rules", res_wr.get("data", {}))
 
         # 4. honors_rules
@@ -201,6 +218,11 @@ class RAGAdapter:
             "What are the requirements for honors?",
             honors_schema
         )
+        if "error" in res_hr:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'honors_rules' extraction error: %s",
+                res_hr["error"],
+            )
         bundles["honors_rules"] = _warn_if_empty("honors_rules", res_hr.get("data", {}))
 
         # 5. credit_limit_rules
@@ -217,6 +239,11 @@ class RAGAdapter:
             "What are the credit limit rules per semester based on CGPA?",
             credit_limit_schema
         )
+        if "error" in res_cl:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'credit_limit_rules' extraction error: %s",
+                res_cl["error"],
+            )
         bundles["credit_limit_rules"] = _warn_if_empty("credit_limit_rules", res_cl.get("data", {}))
 
         # 6. retake_rules
@@ -231,6 +258,11 @@ class RAGAdapter:
             "What are the course retake rules and grade caps?",
             retake_schema
         )
+        if "error" in res_rr:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'retake_rules' extraction error: %s",
+                res_rr["error"],
+            )
         bundles["retake_rules"] = _warn_if_empty("retake_rules", res_rr.get("data", {}))
 
         # 7. summer_semester_rules
@@ -243,6 +275,11 @@ class RAGAdapter:
             "What are the rules and maximum courses for summer semesters?",
             summer_schema
         )
+        if "error" in res_sr:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'summer_semester_rules' extraction error: %s",
+                res_sr["error"],
+            )
         bundles["summer_semester_rules"] = _warn_if_empty("summer_semester_rules", res_sr.get("data", {}))
 
         # 8. student_level_rules
@@ -259,6 +296,11 @@ class RAGAdapter:
             "What are the credit hour thresholds for student levels (Freshman, Sophomore, Junior, Senior)?",
             student_level_schema
         )
+        if "error" in res_sl:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'student_level_rules' extraction error: %s",
+                res_sl["error"],
+            )
         bundles["student_level_rules"] = _warn_if_empty("student_level_rules", res_sl.get("data", {}))
 
         # Convert percentage_to_letter tuples/dicts to PercentageRange objects
@@ -274,17 +316,41 @@ class RAGAdapter:
                 PercentageRange(**r) for r in raw_pct
             ]
 
-        try:
-            return {
-                "retake_rules":                 RetakeRules(**bundles.get("retake_rules", {})),
-                "credit_limit_rules":           CreditLimitRules(**bundles.get("credit_limit_rules", {})),
-                "summer_semester_rules":        SummerSemesterRules(**bundles.get("summer_semester_rules", {})),
-                "graduation_requirement_rules": GraduationRequirementRules(**bundles.get("graduation_requirement_rules", {})),
-                "academic_warning_rules":       AcademicWarningRules(**bundles.get("academic_warning_rules", {})),
-                "honors_rules":                 HonorsRules(**bundles.get("honors_rules", {})),
-                "grading_scale_rules":          GradingScaleRules(**gs_data),
-                "student_level_rules":          StudentLevelRules(**bundles.get("student_level_rules", {})),
-            }
-        except Exception as exc:
-            logger.error("RAGAdapter.get_rule_bundles: Pydantic conversion failed: %s", exc)
-            return {}
+        pydantic_schemas = {
+            "retake_rules":                 RetakeRules,
+            "credit_limit_rules":           CreditLimitRules,
+            "summer_semester_rules":        SummerSemesterRules,
+            "graduation_requirement_rules": GraduationRequirementRules,
+            "academic_warning_rules":       AcademicWarningRules,
+            "honors_rules":                 HonorsRules,
+            "grading_scale_rules":          GradingScaleRules,
+            "student_level_rules":          StudentLevelRules,
+        }
+
+        converted_bundles: dict[str, BaseModel | None] = {}
+
+        for bundle_name, schema_class in pydantic_schemas.items():
+            bundle_data = bundles.get(bundle_name, {})
+            try:
+                converted_bundles[bundle_name] = schema_class(**bundle_data)
+            except Exception as exc:
+                logger.error(
+                    "RAGAdapter.get_rule_bundles: Pydantic instantiation failed for bundle '%s': %s",
+                    bundle_name,
+                    exc,
+                )
+                converted_bundles[bundle_name] = None
+
+        if any(value is not None for value in converted_bundles.values()):
+            failed = [k for k, v in converted_bundles.items() if v is None]
+            if failed:
+                logger.warning(
+                    "RAGAdapter.get_rule_bundles: partial rule bundle load. Failed bundles: %s",
+                    failed,
+                )
+            return converted_bundles
+
+        logger.critical(
+            "RAGAdapter.get_rule_bundles: all rule bundle conversions failed — returning {}"
+        )
+        return {}

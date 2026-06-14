@@ -488,10 +488,6 @@ class GenerateSemesterPlanInput(BaseModel):
     )
     credit_limit_rules: CreditLimitRules
     graduation_rules: GraduationRequirementRules
-    retake_rules: RetakeRules
-    specialization_credit_threshold: int = Field(
-        description="PHs threshold for unofficial track students to access target track courses"
-    )
     summer_semester_rules: SummerSemesterRules | None = Field(
         default=None,
         description="Only provided when target_semester_type = Summer"
@@ -509,7 +505,6 @@ class GenerateSemesterPlanInput(BaseModel):
         default=False,
         description="If True, always applies CGPA-bracket maximum"
     )
-    student_level_rules: StudentLevelRules
 
 
 class GenerateGraduationRoadmapInput(BaseModel):
@@ -547,8 +542,6 @@ class GenerateGraduationRoadmapInput(BaseModel):
     )
     credit_limit_rules: CreditLimitRules
     graduation_rules: GraduationRequirementRules
-    retake_rules: RetakeRules
-    specialization_credit_threshold: int
     summer_semester_rules: SummerSemesterRules | None = Field(
         default=None,
         description="Only provided when accelerated_mode=True"

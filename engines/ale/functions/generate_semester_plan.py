@@ -16,7 +16,6 @@ from engines.ale.schemas import (
     GenerateSemesterPlanOutput,
     GraduationRequirementRules,
     PlannedCourse,
-    RetakeRules,
     SemesterPlan,
     SummerSemesterRules,
 )
@@ -317,15 +316,11 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
             "Summer course availability is subject to faculty council announcement."
         )
 
-    # 5. Unofficial track advisory (student meets threshold but not yet officially assigned)
-    if (
-        input.official_track is None
-        and input.target_track is not None
-        and input.cumulative_passed_hours >= input.specialization_credit_threshold
-    ):
+    # 5. Unofficial track advisory — student has no official track assignment in the record
+    if input.official_track is None and input.target_track is not None:
         warnings.append(
-            "Track specialization not yet officially assigned. Plan includes target "
-            "track courses as advisory — confirm with your advisor."
+            "No official track is assigned in your academic record. This plan is based "
+            "on your stated target track and is advisory — confirm with your advisor."
         )
 
     # -----------------------------------------------------------------------

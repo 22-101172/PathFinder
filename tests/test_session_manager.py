@@ -355,3 +355,114 @@ def test_delete_session(patched_sm):
     result = sm.delete_session(sid)
     assert result is True
     assert sm.get_session_history(sid) is None
+
+
+# ---------------------------------------------------------------------------
+# Group 4 — Schema compatibility
+# ---------------------------------------------------------------------------
+
+def test_session_overrides_schema_has_assumed_failed():
+    ovr = SessionOverrides(assumed_failed_courses=["C-AI321"])
+    assert ovr.assumed_failed_courses == ["C-AI321"]
+    dumped = ovr.model_dump_json()
+    reloaded = SessionOverrides.model_validate_json(dumped)
+    assert reloaded.assumed_failed_courses == ["C-AI321"]
+
+
+def test_session_overrides_schema_has_assumed_passed():
+    ovr = SessionOverrides(assumed_passed_courses=["C-AI321"])
+    assert ovr.assumed_passed_courses == ["C-AI321"]
+    dumped = ovr.model_dump_json()
+    reloaded = SessionOverrides.model_validate_json(dumped)
+    assert reloaded.assumed_passed_courses == ["C-AI321"]
+
+
+def test_session_overrides_accepts_assumed_failed_type():
+    ovr = SessionOverrides(course_override_type="assumed_failed")
+    assert ovr.course_override_type == "assumed_failed"
+
+
+def test_session_overrides_accepts_assumed_passed_type():
+    ovr = SessionOverrides(course_override_type="assumed_passed")
+    assert ovr.course_override_type == "assumed_passed"
+
+
+# ---------------------------------------------------------------------------
+# Group 5 — Override cleanup regression tests (bugs #1, #2, #3)
+# ---------------------------------------------------------------------------
+
+def test_assumed_done_cleans_failed_courses():
+    ctx = make_student_context()
+    ctx = ctx.model_copy(update={"failed_courses": ["C-AI321"]})
+    overrides = SessionOverrides(added_courses=["C-AI321"], course_override_type="assumed_done")
+
+    effective = sm.build_effective_context(ctx, overrides)
+
+    assert "C-AI321" in effective.completed_courses, "assumed_done must add to completed_courses"
+    assert "C-AI321" not in effective.failed_courses, "assumed_done must remove from failed_courses"
+
+
+def test_assumed_done_cleans_in_progress_courses():
+    ctx = make_student_context()
+    ctx = ctx.model_copy(update={"in_progress_courses": ["C-AI321"]})
+    overrides = SessionOverrides(added_courses=["C-AI321"], course_override_type="assumed_done")
+
+    effective = sm.build_effective_context(ctx, overrides)
+
+    assert "C-AI321" in effective.completed_courses, "assumed_done must add to completed_courses"
+    assert "C-AI321" not in effective.in_progress_courses, "assumed_done must remove from in_progress_courses"
+
+
+def test_assumed_passed_cleans_in_progress_courses():
+    ctx = make_student_context()
+    ctx = ctx.model_copy(update={"in_progress_courses": ["C-AI321"]})
+    overrides = SessionOverrides(assumed_passed_courses=["C-AI321"], course_override_type="assumed_passed")
+
+    effective = sm.build_effective_context(ctx, overrides)
+
+    assert "C-AI321" in effective.completed_courses, "assumed_passed must add to completed_courses"
+    assert "C-AI321" not in effective.in_progress_courses, "assumed_passed must remove from in_progress_courses"
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — Corrupted blob handling (bugs #4, #5)
+# ---------------------------------------------------------------------------
+
+def test_load_corrupted_blob_returns_none(store):
+    import sqlite3 as _sqlite3
+    sid = "corrupted-session-001"
+    with _sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "INSERT INTO sessions (session_id, student_id, session_name, last_updated, session_blob) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sid, "S001", "Test", "2026-01-01T00:00:00+00:00", "{not valid json at all!!!"),
+        )
+
+    result = store.load(sid)
+    assert result is None, "load() must return None for a corrupted blob, not raise"
+
+
+def test_get_all_for_student_skips_corrupted_blobs(store):
+    import sqlite3 as _sqlite3
+    import time
+
+    ctx = make_student_context("S002")
+    valid_session = SessionState(
+        session_id="valid-session-001",
+        student_id="S002",
+        session_name="Valid",
+        student_context=ctx,
+    )
+    store.save(valid_session)
+    time.sleep(0.02)
+
+    with _sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "INSERT INTO sessions (session_id, student_id, session_name, last_updated, session_blob) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("corrupted-session-002", "S002", "Corrupted", "2026-06-14T00:00:00+00:00", "{bad blob}"),
+        )
+
+    results = store.get_all_for_student("S002")
+    assert len(results) == 1, "Corrupted blob must be skipped, valid blob must be returned"
+    assert results[0].session_id == "valid-session-001"

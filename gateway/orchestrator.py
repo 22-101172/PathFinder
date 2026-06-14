@@ -60,7 +60,7 @@ class Orchestrator:
             "get_course_profile":             lambda: self._kg.call("get_course_profile", {"course_code": e.course_code or ""}),
             "get_prerequisites":              lambda: self._kg.call("get_prerequisites", {"course_code": e.course_code or "", "depth": "direct"}),
             "get_skills_taught":              lambda: self._kg.call("get_skills_taught", {"course_code": e.course_code or ""}),
-            "search_courses_by_skill":        lambda: self._kg.call("search_courses_by_skill", {"skills": [e.skill_id] if e.skill_id else []}),
+            "search_courses_by_skill":        lambda: self._kg.call("search_courses_by_skill", {"skill_ids": [e.skill_id] if e.skill_id else []}),
             "get_role_profile":               lambda: self._kg.call("get_role_profile", {"role_id": e.role_id or ""}),
             "get_roles_by_track":             lambda: self._kg.call("get_roles_by_track", {"track_id": e.track_id or ctx.track_id}),
             "compute_skill_gap":              lambda: self._kg.call("compute_skill_gap", {"role_id": e.role_id or "", "completed_courses": effective_completed}),

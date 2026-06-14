@@ -33,6 +33,21 @@ def _apply_overrides(
     existing: SessionOverrides,
     incoming: SessionOverrides,
 ) -> SessionOverrides:
+    """
+    Merge incoming override with existing session overrides.
+
+    Behavior:
+    - "clear": return fresh empty SessionOverrides()
+    - "replace": return incoming overrides only; override_action reset to "accumulate"
+      This is a one-time operation. Next call will accumulate, not replace.
+    - "accumulate" (default): union all course lists; incoming role/type win if non-None/non-none
+
+    Design note: course_override_type tracks only the most recent non-"none" type.
+    If a student "assumes passed C-AI321" then "plans C-SW222", the session's
+    course_override_type becomes "planned" but both assumed_passed_courses and
+    added_courses are accumulated. Orchestrator must call build_effective_context
+    with care to apply the correct override type to the correct list.
+    """
     action = incoming.override_action
 
     if action == "clear":
@@ -83,21 +98,42 @@ def build_effective_context(
     base_context: StudentContext,
     overrides: SessionOverrides,
 ) -> StudentContext:
+    """
+    Apply session overrides to StudentContext. Never mutates base_context.
+
+    Override types:
+    - "assumed_done": union added_courses into completed_courses; remove from failed/in_progress
+    - "planned": union added_courses into in_progress_courses
+    - "assumed_failed": union assumed_failed_courses into failed_courses; remove from completed/zero_credit
+    - "assumed_passed": union assumed_passed_courses into completed_courses; remove from failed/in_progress
+    - "gpa_scenario": NOT HANDLED — returns base_context unchanged (deferred to future)
+    - "none": returns base_context unchanged
+
+    Returns: new StudentContext via model_copy(). Always safe for ALE to consume.
+    """
     override_type = overrides.course_override_type
     courses = overrides.added_courses
 
     if override_type == "assumed_done" and courses:
-        merged = list(set(base_context.completed_courses) | set(courses))
-        return base_context.model_copy(update={"completed_courses": merged})
+        courses_set = set(courses)
+        merged = list(set(base_context.completed_courses) | courses_set)
+        failed_cleaned = [c for c in base_context.failed_courses if c not in courses_set]
+        in_progress_cleaned = [c for c in base_context.in_progress_courses if c not in courses_set]
+        return base_context.model_copy(update={
+            "completed_courses": merged,
+            "failed_courses": failed_cleaned,
+            "in_progress_courses": in_progress_cleaned,
+        })
 
     if override_type == "planned" and courses:
         merged = list(set(base_context.in_progress_courses) | set(courses))
         return base_context.model_copy(update={"in_progress_courses": merged})
 
     if override_type == "assumed_failed" and overrides.assumed_failed_courses:
-        merged = list(set(base_context.failed_courses) | set(overrides.assumed_failed_courses))
-        completed_cleaned = [c for c in base_context.completed_courses if c not in set(overrides.assumed_failed_courses)]
-        zero_credit_cleaned = [c for c in base_context.zero_credit_courses_passed if c not in set(overrides.assumed_failed_courses)]
+        assumed_set = set(overrides.assumed_failed_courses)
+        merged = list(set(base_context.failed_courses) | assumed_set)
+        completed_cleaned = [c for c in base_context.completed_courses if c not in assumed_set]
+        zero_credit_cleaned = [c for c in base_context.zero_credit_courses_passed if c not in assumed_set]
         return base_context.model_copy(update={
             "failed_courses": merged,
             "completed_courses": completed_cleaned,
@@ -105,11 +141,14 @@ def build_effective_context(
         })
 
     if override_type == "assumed_passed" and overrides.assumed_passed_courses:
-        merged = list(set(base_context.completed_courses) | set(overrides.assumed_passed_courses))
-        failed_cleaned = [c for c in base_context.failed_courses if c not in set(overrides.assumed_passed_courses)]
+        assumed_set = set(overrides.assumed_passed_courses)
+        merged = list(set(base_context.completed_courses) | assumed_set)
+        failed_cleaned = [c for c in base_context.failed_courses if c not in assumed_set]
+        in_progress_cleaned = [c for c in base_context.in_progress_courses if c not in assumed_set]
         return base_context.model_copy(update={
             "completed_courses": merged,
             "failed_courses": failed_cleaned,
+            "in_progress_courses": in_progress_cleaned,
         })
 
     return base_context

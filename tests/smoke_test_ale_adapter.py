@@ -419,7 +419,7 @@ def test_semester_plan_excludes_spring_only_course_in_fall(adapter, student_good
         student_good_standing,
         rule_bundles,
         kg_data={"available_courses": available_courses_fall_only},
-        params={"target_semester_type": "Fall", "specialization_credit_threshold": 60},
+        params={"target_semester_type": "Fall"},
     )
     assert result.get("status") != "error", f"Unexpected error: {result.get('message')}"
     all_planned_codes = set()
@@ -439,7 +439,7 @@ def test_semester_plan_includes_fall_course_in_fall(adapter, student_good_standi
         student_good_standing,
         rule_bundles,
         kg_data={"available_courses": available_courses_fall_only},
-        params={"target_semester_type": "Fall", "specialization_credit_threshold": 60},
+        params={"target_semester_type": "Fall"},
     )
     assert result.get("status") != "error", f"Unexpected error: {result.get('message')}"
     all_planned_codes = set()
@@ -467,7 +467,6 @@ def test_graduation_roadmap_has_labeled_semesters(adapter, student_good_standing
         params={
             "target_semester_type": "Fall",
             "starting_year": 2026,
-            "specialization_credit_threshold": 60,
         },
     )
     assert result.get("status") != "error", f"Unexpected error: {result.get('message')}"
@@ -491,7 +490,6 @@ def test_graduation_roadmap_spring_only_course_not_in_fall_semester(adapter, stu
         params={
             "target_semester_type": "Fall",
             "starting_year": 2026,
-            "specialization_credit_threshold": 60,
         },
     )
     assert result.get("status") != "error", f"Unexpected error: {result.get('message')}"

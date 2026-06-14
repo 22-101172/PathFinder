@@ -113,7 +113,7 @@ def main() -> None:
         ),
         (
             "search_courses_by_skill",
-            {"skills": [skill_name] if skill_name else ["Python"]},
+            {"skill_ids": [skill_id] if skill_id else ["S_UNKNOWN"]},
         ),
         (
             "get_role_profile",
@@ -206,10 +206,12 @@ def main() -> None:
     assert isinstance(result["skills_taught"], list), "skills_taught must be a list"
     passed_count += 1
 
-    ok, result = _run(adapter, "search_courses_by_skill", {"skills": [skill_name] if skill_name else ["Python"]})
+    ok, result = _run(adapter, "search_courses_by_skill", {"skill_ids": [skill_id] if skill_id else ["S_UNKNOWN"]})
     _print_result("search_courses_by_skill", ok, result)
     assert ok, "search_courses_by_skill must not return error"
     assert "results" in result, "Missing results key"
+    assert "queried_skill_ids" in result, "Missing queried_skill_ids key"
+    assert "unrecognized_skill_ids" in result, "Missing unrecognized_skill_ids key"
     passed_count += 1
 
     ok, result = _run(adapter, "get_role_profile", {"role_id": role_id or "UNKNOWN"})

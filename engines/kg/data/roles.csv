@@ -1,0 +1,19 @@
+role_id,name,domain
+RL_ML_Engineer,Machine Learning Engineer,AI
+RL_AI_Engineer,AI Engineer,AI
+RL_NLP_Engineer,NLP Engineer,AI
+RL_Computer_Vision_Engineer,Computer Vision Engineer,AI
+RL_Robotics_Engineer,Robotics Engineer,AI
+RL_Data_Scientist,Data Scientist,Data Science
+RL_Data_Analyst,Data Analyst,Data Science
+RL_Data_Engineer,Data Engineer,Data Science
+RL_BI_Developer,Business Intelligence Developer,Data Science
+RL_DB_Administrator,Database Administrator,Data Science
+RL_Software_Engineer,Software Engineer,Software Engineering
+RL_Backend_Developer,Backend Developer,Software Engineering
+RL_Full_Stack_Developer,Full Stack Developer,Software Engineering
+RL_DevOps_Engineer,DevOps Engineer,Software Engineering
+RL_IT_Manager,IT Manager,Software Engineering
+RL_Cybersecurity_Analyst,Cybersecurity Analyst,Cybersecurity
+RL_Penetration_Tester,Penetration Tester,Cybersecurity
+RL_Security_Engineer,Security Engineer,Cybersecurity

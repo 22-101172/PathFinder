@@ -1,6 +1,12 @@
 from __future__ import annotations
-from typing import Optional, Literal
+from typing import Any, Optional, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class Turn(TypedDict):
+    """One turn in conversation history: user query and system answer."""
+    user: str
+    answer: str
 
 
 class QueryRequest(BaseModel):
@@ -19,7 +25,7 @@ class QueryResponse(BaseModel):
     session_name: str
     answer_text: str
     citations: list[Citation] = []
-    status: str
+    status: Literal["ok", "error", "clarification_needed"] = "ok"
 
 
 class EntitySet(BaseModel):
@@ -51,14 +57,17 @@ class SessionOverrides(BaseModel):
 
 class StructuredQuery(BaseModel):
     intent: str
-    engine_pattern: str
-    query_type: str
     original_text: Optional[str] = None
-    entities: EntitySet = EntitySet()
+    entities: EntitySet = Field(default_factory=EntitySet)
     secondary_entities: Optional[EntitySet] = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    session_overrides: SessionOverrides = Field(default_factory=SessionOverrides)
+    student_referential_fallback: bool = False
+    # Legacy fields kept for backward compatibility with existing tests and orchestrator
+    engine_pattern: Optional[str] = None
+    query_type: Optional[str] = None
     needs_clarification: bool = False
     clarification_prompt: Optional[str] = None
-    session_overrides: SessionOverrides = SessionOverrides()
 
 
 class CourseRecord(BaseModel):
@@ -92,11 +101,12 @@ class StudentContext(BaseModel):
     consecutive_warnings: int = 0
     total_warnings: int = 0
     last_semester_warning: Optional[int] = None
-    course_history: list[CourseRecord] = []
-    completed_courses: list[str] = []
-    failed_courses: list[str] = []
-    in_progress_courses: list[str] = []
+    course_history: list[CourseRecord] = Field(default_factory=list)
+    completed_courses: list[str] = Field(default_factory=list)
+    failed_courses: list[str] = Field(default_factory=list)
+    in_progress_courses: list[str] = Field(default_factory=list)
     completed_regular_semesters: int = 0
+    current_semester: Optional[str] = None
     zero_credit_courses_passed: list[str] = Field(default_factory=list)
     retake_count: dict[str, int] = Field(default_factory=dict)
     total_improve_retakes_used: int = 0
@@ -110,7 +120,7 @@ class LastReferenced(BaseModel):
 
 class QUContext(BaseModel):
     user_text: str
-    recent_turns: list[dict]
+    recent_turns: list[Turn] = Field(default_factory=list)
     last_referenced: LastReferenced
     current_overrides: SessionOverrides
 
@@ -122,7 +132,7 @@ class SessionState(BaseModel):
     student_context: StudentContext
     last_referenced: LastReferenced = LastReferenced()
     overrides: SessionOverrides = SessionOverrides()
-    turn_history: list[dict] = []
+    turn_history: list[Turn] = Field(default_factory=list)
 
 
 class RAGResult(BaseModel):
@@ -149,8 +159,50 @@ class ResultPackage(BaseModel):
     rag_result: Optional[RAGResult] = None
     ale_result: Optional[dict] = None
     composer_context: Optional[ComposerContext] = None
-    status: str
+    status: Literal["ok", "error", "clarification_needed"] = "ok"
     error_detail: Optional[str] = None
+
+
+class PerSQResult(BaseModel):
+    sq_index: int
+    intent: str
+    status: Literal[
+        "success", "error", "clarification_needed",
+        "out_of_scope", "informational", "soft_no_evidence"
+    ]
+    data: Optional[dict] = None
+    error_code: Optional[str] = None
+    error_category: Optional[str] = None
+    error_detail: Optional[str] = None
+    clarification_prompt: Optional[str] = None
+    scope_explanation: Optional[str] = None
+    assumptions_active: Optional[bool] = None
+    assumptions_excluded: Optional[bool] = None
+    override_state_active: Optional[bool] = None
+    citations: Optional[list[dict]] = None
+
+
+class TurnWrapper(BaseModel):
+    turn_id: str
+    session_id: str
+    timestamp: str
+    results: list[PerSQResult]
+    result_count: int
+    turn_status: Literal[
+        "completed", "needs_clarification", "partial_success", "failed", "out_of_scope"
+    ]
+    has_error: bool
+    has_clarification: bool
+    has_informational: bool
+    has_soft_no_evidence: bool
+    turn_summary: Optional[str] = None
+
+
+class TurnResponse(BaseModel):
+    """Interim API response returned by /chat until the Response Composer is wired."""
+    session_id: str
+    session_name: str
+    turn: TurnWrapper
 
 
 class SessionSummary(BaseModel):

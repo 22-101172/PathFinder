@@ -83,6 +83,26 @@ def _apply_overrides(
     )
 
 
+def merge_turn_overrides(
+    sqs: list[StructuredQuery],
+) -> tuple[SessionOverrides, bool]:
+    """
+    Accumulate per-SQ session overrides across a single turn.
+
+    Returns (merged_overrides, had_clear).
+    had_clear=True means at least one SQ issued a clear action; the caller
+    must replace session.overrides directly rather than re-merging, so the
+    clear actually takes effect.
+    """
+    result = SessionOverrides()
+    had_clear = False
+    for sq in sqs:
+        if sq.session_overrides.override_action == "clear":
+            had_clear = True
+        result = _apply_overrides(result, sq.session_overrides)
+    return result, had_clear
+
+
 def _apply_last_referenced(
     existing: LastReferenced,
     entities: dict,
@@ -134,10 +154,12 @@ def build_effective_context(
         merged = list(set(base_context.failed_courses) | assumed_set)
         completed_cleaned = [c for c in base_context.completed_courses if c not in assumed_set]
         zero_credit_cleaned = [c for c in base_context.zero_credit_courses_passed if c not in assumed_set]
+        in_progress_cleaned = [c for c in base_context.in_progress_courses if c not in assumed_set]
         return base_context.model_copy(update={
             "failed_courses": merged,
             "completed_courses": completed_cleaned,
             "zero_credit_courses_passed": zero_credit_cleaned,
+            "in_progress_courses": in_progress_cleaned,
         })
 
     if override_type == "assumed_passed" and overrides.assumed_passed_courses:
@@ -229,7 +251,15 @@ def update_session_after_turn(
     answer_text: str,
     new_overrides: Optional[SessionOverrides] = None,
     new_last_referenced: Optional[LastReferenced] = None,
+    replace_overrides: bool = False,
 ) -> None:
+    """
+    Persist turn result to the session store.
+
+    replace_overrides=True: assign session.overrides = new_overrides directly.
+    Use this when a clear action was issued; re-merging would be a no-op.
+    replace_overrides=False (default): merge via _apply_overrides (existing behaviour).
+    """
     session = _store.load(session_id)
     if session is None:
         logger.warning("SessionManager: update called for unknown session %s", session_id)
@@ -238,7 +268,10 @@ def update_session_after_turn(
     session.turn_history.append({"user": user_text, "answer": answer_text})
 
     if new_overrides is not None:
-        session.overrides = _apply_overrides(session.overrides, new_overrides)
+        if replace_overrides:
+            session.overrides = new_overrides
+        else:
+            session.overrides = _apply_overrides(session.overrides, new_overrides)
 
     if new_last_referenced is not None:
         session.last_referenced = new_last_referenced

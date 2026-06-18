@@ -506,6 +506,31 @@ def get_context(student_id: str) -> Optional[StudentContext]:
 
     in_progress = sorted(list(in_progress_set))
 
+    # Determine current_semester: in-progress rows → latest registration → system clock
+    current_semester_val: Optional[str] = None
+    in_progress_semesters: list[str] = []
+    all_non_withdrawn_semesters: list[str] = []
+    for _, reg in student_regs.iterrows():
+        semester = str(reg.get("Semester", "")).strip()
+        if not semester or semester.lower() == "nan":
+            continue
+        reg_status_raw = str(reg.get("Registration Status", "")).strip()
+        grade_raw = _clean_grade(reg.get("Letter Grade"))
+        tags = {t.strip().lower() for t in reg_status_raw.split(",")}
+        if "withdrawn" in tags or "forced withdraw" in tags or grade_raw == "W":
+            continue
+        status_val = _map_status(reg_status_raw, grade_raw)
+        all_non_withdrawn_semesters.append(semester)
+        if status_val == "in_progress":
+            in_progress_semesters.append(semester)
+
+    if in_progress_semesters:
+        current_semester_val = in_progress_semesters[-1]
+    elif all_non_withdrawn_semesters:
+        current_semester_val = all_non_withdrawn_semesters[-1]
+    else:
+        current_semester_val = get_current_semester()
+
     # Note: course_history remains authoritative for all attempt-level details.
     # Downstream components needing exact attempt history should query
     # course_history, not rely only on derived completed/failed/in_progress lists.
@@ -537,6 +562,7 @@ def get_context(student_id: str) -> Optional[StudentContext]:
         failed_courses=failed,
         in_progress_courses=in_progress,
         completed_regular_semesters=completed_regular_semesters,
+        current_semester=current_semester_val,
         zero_credit_courses_passed=zero_credit_courses_passed,
         retake_count=retake_count,
         total_improve_retakes_used=total_improve_retakes_used,

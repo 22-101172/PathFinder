@@ -358,6 +358,139 @@ def test_delete_session(patched_sm):
 
 
 # ---------------------------------------------------------------------------
+# Group 4 — merge_turn_overrides
+# ---------------------------------------------------------------------------
+
+def _ovr(added=None, passed=None, failed=None, override_type="none", action="accumulate"):
+    return SessionOverrides(
+        added_courses=added or [],
+        assumed_passed_courses=passed or [],
+        assumed_failed_courses=failed or [],
+        course_override_type=override_type,
+        override_action=action,
+    )
+
+
+def _msq(intent="test", overrides=None):
+    return StructuredQuery(
+        intent=intent,
+        original_text=intent,
+        entities=EntitySet(),
+        session_overrides=overrides or _ovr(),
+    )
+
+
+def test_merge_turn_overrides_empty_list():
+    merged, had_clear = sm.merge_turn_overrides([])
+    assert merged.added_courses == []
+    assert merged.assumed_passed_courses == []
+    assert merged.assumed_failed_courses == []
+    assert had_clear is False
+
+
+def test_merge_turn_overrides_single_sq_accumulate():
+    sqs = [_msq(overrides=_ovr(added=["C-AI311"], override_type="planned"))]
+    merged, had_clear = sm.merge_turn_overrides(sqs)
+    assert "C-AI311" in merged.added_courses
+    assert merged.course_override_type == "planned"
+    assert had_clear is False
+
+
+def test_merge_turn_overrides_multiple_sqs_union():
+    sqs = [
+        _msq(overrides=_ovr(added=["C-AI311"], override_type="planned")),
+        _msq(overrides=_ovr(added=["C-CS301"], override_type="planned")),
+    ]
+    merged, had_clear = sm.merge_turn_overrides(sqs)
+    assert "C-AI311" in merged.added_courses
+    assert "C-CS301" in merged.added_courses
+    assert had_clear is False
+
+
+def test_merge_turn_overrides_clear_action_detected():
+    sqs = [
+        _msq(overrides=_ovr(added=["C-AI311"], override_type="planned")),
+        _msq(overrides=_ovr(action="clear")),
+    ]
+    merged, had_clear = sm.merge_turn_overrides(sqs)
+    assert had_clear is True
+    assert merged.added_courses == []
+    assert merged.course_override_type == "none"
+
+
+def test_merge_turn_overrides_mixed_override_types():
+    sqs = [
+        _msq(overrides=_ovr(passed=["C-AI101"], override_type="assumed_passed")),
+        _msq(overrides=_ovr(failed=["C-CS301"], override_type="assumed_failed")),
+    ]
+    merged, had_clear = sm.merge_turn_overrides(sqs)
+    assert "C-AI101" in merged.assumed_passed_courses
+    assert "C-CS301" in merged.assumed_failed_courses
+    assert had_clear is False
+
+
+# ---------------------------------------------------------------------------
+# Group 5 — update_session_after_turn with replace_overrides
+# ---------------------------------------------------------------------------
+
+def test_update_session_after_turn_default_merges(patched_sm):
+    ctx = make_student_context()
+    state, _ = sm.get_or_create_session(None, "S001", ctx, "start")
+    sid = state.session_id
+
+    # Seed existing overrides
+    session = patched_sm.load(sid)
+    session.overrides = _ovr(added=["C-AI101"], override_type="planned")
+    patched_sm.save(session)
+
+    # update with additional courses — should merge
+    sm.update_session_after_turn(
+        sid, "q", "a",
+        new_overrides=_ovr(added=["C-AI311"], override_type="planned"),
+        replace_overrides=False,
+    )
+
+    loaded = patched_sm.load(sid)
+    assert "C-AI101" in loaded.overrides.added_courses
+    assert "C-AI311" in loaded.overrides.added_courses
+
+
+def test_update_session_after_turn_replace_overrides_true(patched_sm):
+    ctx = make_student_context()
+    state, _ = sm.get_or_create_session(None, "S001", ctx, "start")
+    sid = state.session_id
+
+    # Seed existing overrides with planned courses
+    session = patched_sm.load(sid)
+    session.overrides = _ovr(added=["C-AI101", "C-AI201"], override_type="planned")
+    patched_sm.save(session)
+
+    # update with replace_overrides=True (clear action was issued)
+    sm.update_session_after_turn(
+        sid, "clear q", "a",
+        new_overrides=SessionOverrides(),
+        replace_overrides=True,
+    )
+
+    loaded = patched_sm.load(sid)
+    assert loaded.overrides.added_courses == []
+    assert loaded.overrides.course_override_type == "none"
+
+
+def test_update_session_after_turn_turn_history_appended(patched_sm):
+    ctx = make_student_context()
+    state, _ = sm.get_or_create_session(None, "S001", ctx, "start")
+    sid = state.session_id
+
+    sm.update_session_after_turn(sid, "my question", "my answer")
+
+    loaded = patched_sm.load(sid)
+    assert len(loaded.turn_history) == 1
+    assert loaded.turn_history[0]["user"] == "my question"
+    assert loaded.turn_history[0]["answer"] == "my answer"
+
+
+# ---------------------------------------------------------------------------
 # Group 4 — Schema compatibility
 # ---------------------------------------------------------------------------
 

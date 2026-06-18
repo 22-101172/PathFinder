@@ -1,0 +1,29 @@
+skill_id,name,category
+SK_Python,Python,Programming
+SK_Java,Java,Programming
+SK_SQL,SQL,Data
+SK_NoSQL,NoSQL Databases,Data
+SK_ML,Machine Learning,AI
+SK_DL,Deep Learning,AI
+SK_NLP,Natural Language Processing,AI
+SK_Computer_Vision,Computer Vision,AI
+SK_Reinforcement_Learning,Reinforcement Learning,AI
+SK_Data_Analysis,Data Analysis,Data
+SK_Data_Visualization,Data Visualization,Data
+SK_Big_Data,Big Data Engineering,Data
+SK_Data_Modeling,Data Modeling,Data
+SK_Statistics,Probability and Statistics,Math
+SK_Linear_Algebra,Linear Algebra and Calculus,Math
+SK_Algorithms,Algorithms and Data Structures,Computer Science
+SK_OS,Operating Systems,Computer Science
+SK_Software_Design,Software Design,Software Engineering
+SK_Software_Testing,Software Testing and QA,Software Engineering
+SK_Agile,Agile and Project Management,Software Engineering
+SK_Web_Dev,Web Development,Software Engineering
+SK_Network_Security,Network Security,Cybersecurity
+SK_Cryptography,Cryptography,Cybersecurity
+SK_Ethical_Hacking,Ethical Hacking and Penetration Testing,Cybersecurity
+SK_Secure_Software,Secure Software Development,Cybersecurity
+SK_Robotics,Robotics and Autonomous Systems,AI
+SK_DB_Architecture,Database Architecture and Optimization,Data
+SK_IT_Management,IT Management and Strategy,Software Engineering

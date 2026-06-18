@@ -1,172 +1,350 @@
-from __future__ import annotations
-import logging
-import re
-from typing import Optional
+"""
+Query Understanding — orchestration entry point.
 
-from gateway.llm_client import get_llm_client, parse_json_object, LLMError
+Converts a raw user message into an ordered list[StructuredQuery] for the Orchestrator.
+QU is a parser/classifier only: it does not call ALE, RAG, or KG business operations.
+Entity resolution via KG resolve_entity is the only KG call QU may make.
+
+Privacy: never sends student_id, name, grades, CGPA, transcript, or full
+StudentContext to any LLM.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable
+
+from gateway.llm_client import get_llm_client, LLMNotConfigured
 from gateway.models.schemas import EntitySet, LastReferenced, SessionOverrides, StructuredQuery
+from gateway.qu_intents import LOCKED_INTENTS
+from gateway.qu_llm_chain import QUModelChain, AllModelsFailedError
+from gateway.qu_preprocessing import (
+    COURSE_CODE_RE,
+    PreprocessResult,
+    detect_policy_signal,
+    detect_out_of_scope,
+    preprocess,
+)
+from gateway.qu_prompt import build_system_prompt, build_user_message
 
 logger = logging.getLogger(__name__)
 
-QU_SYSTEM_PROMPT = """You are the Query Understanding layer of PathFinder, an academic advising system for Egyptian University of Informatics (EUI).
+# Callable type alias for KG resolve_entity injection
+Resolver = Callable[[str, str], dict]
 
-Your ONLY job is to classify the student's query and output a JSON object. Output ONLY the JSON. No explanation.
-
-OUTPUT FORMAT:
-{
-  "intent": "<intent_name>",
-  "engine_pattern": "<kg|rag|ale|mixed|clarification>",
-  "query_type": "<student_aware|general>",
-  "entities": {
-    "course_code": "<CODE or null>",
-    "role_id": "<role_id or null>",
-    "track_id": "<track_id or null>",
-    "skill_id": "<skill_id or null>"
-  },
-  "secondary_entities": {
-    "course_code": null,
-    "role_id": null,
-    "track_id": "<second track for compare or null>",
-    "skill_id": null
-  },
-  "needs_clarification": false,
-  "clarification_prompt": null,
-  "session_overrides": {
-    "added_courses": [],
-    "target_role": null
-  }
-}
-
-INTENTS:
-
-KG INTENTS (engine_pattern="kg"):
-- get_course_profile: asks about a course's info, credits, description, level. e.g. "tell me about C-CS301", "what is Algorithms", "info on Machine Learning"
-- get_prerequisites: asks what is needed before a course. e.g. "prerequisites for C-CS301", "what do I need before taking OS"
-- get_skills_taught: asks what skills a course teaches. e.g. "what does C-AI311 teach", "skills in Deep Learning"
-- search_courses_by_skill: asks which courses teach a skill. e.g. "courses that teach Python", "what teaches NLP skills"
-- get_role_profile: asks about a career role. e.g. "tell me about Data Scientist", "what is a cybersecurity analyst"
-- get_roles_by_track: asks what careers a track leads to. e.g. "what jobs can I get with AI track", "careers in Cyber Security"
-- compute_skill_gap: asks what skills student is missing for a role (student_aware). e.g. "what am I missing to become a Data Scientist"
-- compute_alignment_score: asks student's match % with a role (student_aware). e.g. "how aligned am I with ML Engineer", "my match with Software Engineer"
-- recommend_courses_to_close_gap: asks which courses to take for a role (student_aware). e.g. "what courses should I take for Data Scientist"
-- estimate_alignment_improvement: asks how planned courses improve role alignment (student_aware). e.g. "if I take C-AI311 how does my Data Scientist alignment improve"
-- find_best_matching_roles: asks what careers match student best (student_aware). e.g. "what careers suit me", "best job matches for me", "what roles fit my profile"
-- get_track_overview: asks for track overview. e.g. "tell me about AI track", "overview of Cyber Security"
-- compare_tracks: compares two tracks. e.g. "compare AI and CS", "AI vs Cyber Security", "difference between Data Science and SW tracks"
-- recommend_track_for_role: asks which track fits a role. e.g. "which track for Data Scientist", "best track for ML Engineer"
-- recommend_track_for_skill: asks which track teaches a skill. e.g. "which track teaches most Python", "best track for deep learning skills"
-
-ALE INTENTS (engine_pattern="ale"):
-- check_eligibility: asks if student can take a course (student_aware). e.g. "can I take C-CS401", "am I eligible for Operating Systems", "can I register for C-AI421"
-- run_graduation_audit: asks about graduation status (student_aware). e.g. "can I graduate", "how many credits left", "am I on track to graduate", "graduation audit"
-- generate_semester_plan: asks for next semester plan (student_aware). e.g. "plan my semester", "what should I take next", "recommend courses for next term"
-- simulate_gpa: asks to simulate GPA impact (student_aware). e.g. "if I get A in C-CS301 what is my GPA", "GPA simulation", "what if I get all Bs next semester"
-
-RAG INTENTS (engine_pattern="rag"):
-- handbook_query: asks about university rules, policies, regulations, attendance, warning system, grading, academic calendar, probation. e.g. "what is the warning policy", "how many absences allowed", "grading system", "what happens if I fail twice"
-
-MIXED INTENTS (engine_pattern="mixed"):
-- mixed_course_policy: asks about a course AND a related policy together. e.g. "tell me about C-CS301 and what happens if I fail it"
-
-CLARIFICATION (engine_pattern="clarification"):
-- Only when query is completely ambiguous and no intent is determinable. Ask ONE specific clarifying question.
-
-ENTITY EXTRACTION:
-- course_code: Extract exact code if present (C-CS301, C-AI421, HUM011). If student uses name only (e.g. "Algorithms"), put null — orchestrator handles name lookup.
-- track_id: Normalize to one of: "AI", "CS", "Cyber", "Data Science", "SW", "General". Map: "artificial intelligence"→"AI", "cyber"/"cybersecurity"→"Cyber", "data science"→"Data Science", "software engineering"→"SW", "computer science"→"CS"
-- role_id: Extract as lowercase with underscores e.g. "data_scientist", "ml_engineer", "software_engineer", "cybersecurity_analyst"
-- skill_id: Extract skill name as given
-- secondary_entities: ONLY for compare_tracks — put second track_id here
-- query_type: "student_aware" for all ALE intents and KG intents that use student history; "general" for all others
-
-SESSION OVERRIDES:
-- "assume I took X" / "pretend I completed X" → add X to added_courses
-- Student mentions target career role → set target_role
-
-MULTI-TURN RESOLUTION:
-When student says "it", "that course", "this role", "the same track" — use the provided context references to resolve.
-"""
-
-_COURSE_CODE_RE = re.compile(r'\b([A-Z]+-?[A-Z]*\d{2,4}[A-Z]?)\b')
+_VALID_OVERRIDE_TYPES = frozenset({
+    "planned", "assumed_done", "assumed_failed", "assumed_passed", "gpa_scenario", "none",
+})
+_VALID_OVERRIDE_ACTIONS = frozenset({"accumulate", "replace", "clear"})
 
 
-def _pre_extract_code(text: str) -> Optional[str]:
-    matches = _COURSE_CODE_RE.findall(text.upper())
-    return matches[0] if matches else None
-
-
-def _build_user_msg(user_text: str, last_referenced: LastReferenced, recent_turns: list[dict]) -> str:
-    parts = []
-    if recent_turns:
-        conv = "\n".join(
-            f"Student: {t['user']}\nAdvisor: {t['answer'][:120]}..."
-            for t in recent_turns[-2:]
-        )
-        parts.append(f"Recent conversation:\n{conv}")
-
-    refs = []
-    if last_referenced.course_code:
-        refs.append(f"last course: {last_referenced.course_code}")
-    if last_referenced.role_id:
-        refs.append(f"last role: {last_referenced.role_id}")
-    if last_referenced.track_id:
-        refs.append(f"last track: {last_referenced.track_id}")
-    if refs:
-        parts.append("Reference context: " + ", ".join(refs))
-
-    parts.append(f"Student query: {user_text}")
-    return "\n\n".join(parts)
-
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def understand_query(
     user_text: str,
     last_referenced: LastReferenced,
     recent_turns: list[dict],
-) -> StructuredQuery:
-    logger.info("QU: classifying — %s", user_text[:100])
-    pre_code = _pre_extract_code(user_text)
+    resolver: Resolver | None = None,
+) -> list[StructuredQuery]:
+    """
+    Parse user_text into an ordered list[StructuredQuery].
 
+    Args:
+        user_text: raw student message
+        last_referenced: last referenced course/role/track from session
+        recent_turns: recent conversation history (compact, no PII sent to LLM)
+        resolver: optional KG entity resolver; (entity_type, entity_text) -> dict
+                  If None, entity resolution is skipped (LLM extraction is trusted).
+
+    Returns:
+        Non-empty list[StructuredQuery]. Never raises; always returns at least one SQ.
+    """
+    logger.info("QU: classifying [%d chars]", len(user_text))
+
+    pre = preprocess(user_text)
+    sq_list = _classify(user_text, last_referenced, recent_turns, pre)
+
+    if resolver is not None:
+        sq_list = _resolve_all(sq_list, resolver)
+
+    if not sq_list:
+        sq_list = [_clarification("Could you clarify your question?")]
+
+    logger.info("QU: %d SQ(s): %s", len(sq_list), [sq.intent for sq in sq_list])
+    return sq_list
+
+
+# ── Classification ────────────────────────────────────────────────────────────
+
+def _classify(
+    user_text: str,
+    last_referenced: LastReferenced,
+    recent_turns: list[dict],
+    pre: PreprocessResult,
+) -> list[StructuredQuery]:
     try:
-        raw = get_llm_client().chat(
-            system=QU_SYSTEM_PROMPT,
-            user=_build_user_msg(user_text, last_referenced, recent_turns),
-            json_mode=True,
-            temperature=0.0,
+        client = get_llm_client()
+        if not client.is_configured():
+            raise LLMNotConfigured("LLM not configured")
+
+        chain = QUModelChain(client)
+        raw_list = chain.call(
+            system=build_system_prompt(),
+            user_msg=build_user_message(user_text, last_referenced, recent_turns),
+            valid_intents=LOCKED_INTENTS,
         )
-        data = parse_json_object(raw)
-    except LLMError as exc:
-        logger.error("QU: LLM failed: %s — falling back to rag", exc)
-        return StructuredQuery(intent="handbook_query", engine_pattern="rag", query_type="general", original_text=user_text)
+        return [_parse_raw_sq(r, user_text) for r in raw_list if r]
 
-    e_raw = data.get("entities") or {}
+    except AllModelsFailedError:
+        logger.warning("QU: all LLMs failed — deterministic fallback")
+    except LLMNotConfigured:
+        logger.warning("QU: LLM not configured — deterministic fallback")
+    except Exception as exc:
+        logger.error("QU: unexpected error during LLM call: %s", type(exc).__name__)
+
+    return _deterministic_fallback(user_text, pre)
+
+
+# ── LLM Output Parsing ────────────────────────────────────────────────────────
+
+def _parse_raw_sq(raw: dict[str, Any], fallback_text: str) -> StructuredQuery:
+    """Convert one raw LLM-output dict to a StructuredQuery."""
+    intent = raw.get("intent", "clarification_needed")
+    if intent not in LOCKED_INTENTS:
+        intent = "clarification_needed"
+
+    original_text = raw.get("original_text") or fallback_text
+
+    entities_raw = raw.get("entities") or {}
     entities = EntitySet(
-        course_code=e_raw.get("course_code") or pre_code,
-        role_id=e_raw.get("role_id"),
-        track_id=e_raw.get("track_id"),
-        skill_id=e_raw.get("skill_id"),
+        course_code=_nonempty(entities_raw.get("course_code")),
+        role_id=_nonempty(entities_raw.get("role") or entities_raw.get("role_id")),
+        track_id=_nonempty(entities_raw.get("track") or entities_raw.get("track_id")),
+        skill_id=_nonempty(entities_raw.get("skill") or entities_raw.get("skill_id")),
     )
 
-    s_raw = data.get("secondary_entities") or {}
-    secondary = EntitySet(**{k: s_raw.get(k) for k in ["course_code", "role_id", "track_id", "skill_id"]})
-    secondary = secondary if any([secondary.course_code, secondary.role_id, secondary.track_id, secondary.skill_id]) else None
+    sec_raw = raw.get("secondary_entities")
+    secondary: EntitySet | None = None
+    if isinstance(sec_raw, dict):
+        sec = EntitySet(
+            course_code=_nonempty(sec_raw.get("course_code")),
+            role_id=_nonempty(sec_raw.get("role") or sec_raw.get("role_id")),
+            track_id=_nonempty(sec_raw.get("track") or sec_raw.get("track_id")),
+            skill_id=_nonempty(sec_raw.get("skill") or sec_raw.get("skill_id")),
+        )
+        if any([sec.course_code, sec.role_id, sec.track_id, sec.skill_id]):
+            secondary = sec
 
-    o_raw = data.get("session_overrides") or {}
-    overrides = SessionOverrides(
-        added_courses=o_raw.get("added_courses") or [],
-        target_role=o_raw.get("target_role"),
+    params: dict[str, Any] = raw.get("params") or {}
+
+    ov_raw = raw.get("session_overrides") or {}
+    session_overrides = SessionOverrides(
+        added_courses=_str_list(ov_raw.get("added_courses")),
+        assumed_passed_courses=_str_list(ov_raw.get("assumed_passed_courses")),
+        assumed_failed_courses=_str_list(ov_raw.get("assumed_failed_courses")),
+        target_role=_nonempty(ov_raw.get("target_role")),
+        course_override_type=_safe_lit(
+            ov_raw.get("course_override_type"), _VALID_OVERRIDE_TYPES, "none"
+        ),
+        override_action=_safe_lit(
+            ov_raw.get("override_action"), _VALID_OVERRIDE_ACTIONS, "accumulate"
+        ),
     )
 
-    sq = StructuredQuery(
-        intent=data.get("intent", "handbook_query"),
-        engine_pattern=data.get("engine_pattern", "rag"),
-        query_type=data.get("query_type", "general"),
-        original_text=user_text,
+    student_referential = bool(raw.get("student_referential_fallback", False))
+
+    return StructuredQuery(
+        intent=intent,
+        original_text=original_text,
         entities=entities,
         secondary_entities=secondary,
-        needs_clarification=bool(data.get("needs_clarification", False)),
-        clarification_prompt=data.get("clarification_prompt"),
-        session_overrides=overrides,
+        params=params,
+        session_overrides=session_overrides,
+        student_referential_fallback=student_referential,
     )
 
-    logger.info("QU: intent=%s engine=%s type=%s entities=%s", sq.intent, sq.engine_pattern, sq.query_type, sq.entities)
-    return sq
+
+# ── Deterministic Fallback ────────────────────────────────────────────────────
+
+def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[StructuredQuery]:
+    """Best-effort classification without LLM. Never crashes."""
+    lower = user_text.lower()
+
+    # Out-of-scope wins only when no policy signal overlaps
+    if pre.out_of_scope_signal and not pre.policy_signal:
+        return [StructuredQuery(intent="out_of_scope", original_text=user_text)]
+
+    if pre.policy_signal:
+        return [StructuredQuery(intent="policy_query", original_text=user_text)]
+
+    if pre.course_codes:
+        code = pre.course_codes[0]
+        if any(kw in lower for kw in ("can i take", "am i eligible", "eligible for", "can i register")):
+            return [StructuredQuery(
+                intent="check_course_eligibility",
+                original_text=user_text,
+                entities=EntitySet(course_code=code),
+                student_referential_fallback=True,
+            )]
+        if any(kw in lower for kw in ("prerequisite", "prereq", "what do i need before", "requirements for")):
+            return [StructuredQuery(
+                intent="get_course_prerequisites",
+                original_text=user_text,
+                entities=EntitySet(course_code=code),
+            )]
+        return [StructuredQuery(
+            intent="get_course_info",
+            original_text=user_text,
+            entities=EntitySet(course_code=code),
+        )]
+
+    if pre.student_referential:
+        if any(kw in lower for kw in ("graduate", "graduation", "how many credits")):
+            return [StructuredQuery(
+                intent="run_graduation_audit",
+                original_text=user_text,
+                student_referential_fallback=True,
+            )]
+        if any(kw in lower for kw in ("plan", "what should i take", "next semester", "recommend courses")):
+            return [StructuredQuery(
+                intent="plan_semester",
+                original_text=user_text,
+                student_referential_fallback=True,
+            )]
+        if any(kw in lower for kw in ("my record", "my progress", "my snapshot", "show my")):
+            return [StructuredQuery(
+                intent="get_student_record",
+                original_text=user_text,
+                student_referential_fallback=True,
+            )]
+
+    return [_clarification(
+        "I couldn't understand your question. Could you clarify? "
+        "I can help with courses, graduation planning, career guidance, or track information."
+    )]
+
+
+# ── Entity Resolution ─────────────────────────────────────────────────────────
+
+def _resolve_all(sq_list: list[StructuredQuery], resolver: Resolver) -> list[StructuredQuery]:
+    return [_resolve_sq(sq, resolver) for sq in sq_list]
+
+
+def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
+    """Resolve entities in one SQ. Returns clarification_needed if a critical entity fails."""
+    entities = sq.entities
+    failures: list[str] = []
+
+    course_code, fail = _resolve_course(entities.course_code, resolver)
+    if fail:
+        failures.append(fail)
+
+    role_id, fail = _resolve_entity("role", entities.role_id, resolver)
+    if fail:
+        failures.append(fail)
+
+    track_id, fail = _resolve_entity("track", entities.track_id, resolver)
+    if fail:
+        failures.append(fail)
+
+    skill_id, fail = _resolve_entity("skill", entities.skill_id, resolver)
+    if fail:
+        failures.append(fail)
+
+    if failures:
+        return _clarification(failures[0])
+
+    new_entities = EntitySet(
+        course_code=course_code,
+        role_id=role_id,
+        track_id=track_id,
+        skill_id=skill_id,
+    )
+
+    # Resolve secondary entities (track only for compare_tracks)
+    new_secondary: EntitySet | None = None
+    if sq.secondary_entities is not None:
+        sec = sq.secondary_entities
+        sec_track, fail = _resolve_entity("track", sec.track_id, resolver)
+        if fail:
+            return _clarification(fail)
+        new_secondary = EntitySet(
+            course_code=sec.course_code,
+            role_id=sec.role_id,
+            track_id=sec_track,
+            skill_id=sec.skill_id,
+        )
+
+    return sq.model_copy(update={
+        "entities": new_entities,
+        "secondary_entities": new_secondary,
+    })
+
+
+def _resolve_course(
+    mention: str | None,
+    resolver: Resolver,
+) -> tuple[str | None, str | None]:
+    if not mention:
+        return None, None
+    # Already a canonical course code — trust it
+    if COURSE_CODE_RE.fullmatch(mention.strip().upper()):
+        return mention.strip().upper(), None
+    # Name/alias — resolve via KG
+    return _resolve_entity("course", mention, resolver)
+
+
+def _resolve_entity(
+    entity_type: str,
+    mention: str | None,
+    resolver: Resolver,
+) -> tuple[str | None, str | None]:
+    """Returns (resolved_id_or_None, failure_message_or_None)."""
+    if not mention:
+        return None, None
+    try:
+        result = resolver(entity_type, mention)
+    except Exception as exc:
+        logger.warning("QU: resolver error %s=%r: %s", entity_type, mention, type(exc).__name__)
+        return mention, None  # degrade gracefully
+
+    status = result.get("status")
+    if status == "ok":
+        resolved_id = result.get("resolved_id") or result.get("id") or result.get("entity_id")
+        return resolved_id, None
+
+    if status == "ambiguous":
+        opts = [m.get("id") or m.get("name", "") for m in result.get("matches", [])[:5]]
+        return None, f"Which {entity_type} did you mean? Options: {', '.join(str(o) for o in opts)}"
+
+    if status in ("not_found", "error", "unsupported_entity_type", "empty_entity_text"):
+        return None, f"I couldn't find a {entity_type} matching '{mention}'. Could you provide the exact name or ID?"
+
+    # Unknown status — degrade gracefully
+    logger.warning("QU: resolver unknown status %r for %s=%r", status, entity_type, mention)
+    return mention, None
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _clarification(prompt: str) -> StructuredQuery:
+    return StructuredQuery(
+        intent="clarification_needed",
+        original_text=prompt,
+        params={"clarification_prompt": prompt},
+    )
+
+
+def _nonempty(val: Any) -> str | None:
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+def _str_list(val: Any) -> list[str]:
+    if isinstance(val, list):
+        return [str(x) for x in val if x]
+    return []
+
+
+def _safe_lit(val: Any, valid: frozenset[str], default: str) -> str:
+    return val if isinstance(val, str) and val in valid else default

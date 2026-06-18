@@ -121,11 +121,15 @@ class RAGAdapter:
 
     # ── get_rule_bundles ─────────────────────────────────────────────────────
 
-    def get_rule_bundles(self) -> dict[str, BaseModel | None]:
+    def get_rule_bundles(self, inter_call_delay: float = 2.0) -> dict[str, BaseModel | None]:
         """
         Retrieves all 8 rule bundles required by ALE by querying the RAG engine
         with expected schemas.
+
+        inter_call_delay: seconds to sleep between LLM calls to avoid Groq 30 RPM rate limit.
         """
+        import time as _time
+
         if self.extract_structured_fn is None:
             logger.warning("RAGAdapter.get_rule_bundles: RAG engine not available — returning empty bundles")
             return {}
@@ -137,6 +141,21 @@ class RAGAdapter:
                     "Pydantic instantiation will likely fail", name
                 )
             return data
+
+        def _sanitize_nulls(data: dict) -> dict:
+            """Convert LLM 'null'/'none' strings → Python None so Pydantic's Optional fields work."""
+            return {
+                k: (None if isinstance(v, str) and v.strip().lower() in ("null", "none", "n/a") else v)
+                for k, v in data.items()
+            }
+
+        def _merge(base: dict, supplement: dict) -> dict:
+            """Fill None values in *base* from *supplement*."""
+            result = dict(base)
+            for k, v in supplement.items():
+                if result.get(k) is None and v is not None:
+                    result[k] = v
+            return result
 
         bundles: dict[str, Any] = {}
 
@@ -151,7 +170,7 @@ class RAGAdapter:
                 "P": "null"
             },
             "percentage_to_letter": [
-                {"min_pct": "int", "max_pct": "int", "letter": "string"}
+                {"min_pct": "float", "max_pct": "float", "letter": "string"}
             ]
         }
         res_gs = self.execute_structured(
@@ -164,8 +183,11 @@ class RAGAdapter:
                 res_gs["error"],
             )
         bundles["grading_scale_rules"] = _warn_if_empty("grading_scale_rules", res_gs.get("data", {}))
+        _time.sleep(inter_call_delay)
 
         # 2. graduation_requirement_rules
+        # Two-query approach: credit/CGPA requirements are in section 2 of the handbook;
+        # maximum_regular_semesters (16) is in the Academic Warnings and Program Dismissal section.
         graduation_schema = {
             "total_credits_required": "int",
             "minimum_cgpa": "float",
@@ -174,18 +196,34 @@ class RAGAdapter:
             "must_pass_zero_credit_courses": "boolean",
             "military_training_required_for_males": "boolean"
         }
-        res_gr = self.execute_structured(
-            "What are the graduation requirements including total credits, minimum CGPA, min and max semesters?",
+        res_gr1 = self.execute_structured(
+            "What are the graduation requirements: total credit hours required, minimum CGPA at graduation, "
+            "and minimum number of regular Fall/Spring semesters needed to graduate?",
             graduation_schema
         )
-        if "error" in res_gr:
+        if "error" in res_gr1:
             logger.warning(
-                "RAGAdapter.get_rule_bundles: bundle 'graduation_requirement_rules' extraction error: %s",
-                res_gr["error"],
+                "RAGAdapter.get_rule_bundles: bundle 'graduation_requirement_rules' query-1 error: %s",
+                res_gr1["error"],
             )
-        bundles["graduation_requirement_rules"] = _warn_if_empty("graduation_requirement_rules", res_gr.get("data", {}))
+        _time.sleep(inter_call_delay)
+        res_gr2 = self.execute_structured(
+            "What is the maximum number of regular fall and spring semesters a student is allowed "
+            "before being dismissed from the program for failing to graduate?",
+            graduation_schema
+        )
+        if "error" in res_gr2:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'graduation_requirement_rules' query-2 error: %s",
+                res_gr2["error"],
+            )
+        gr_data = _merge(res_gr1.get("data", {}), res_gr2.get("data", {}))
+        bundles["graduation_requirement_rules"] = _warn_if_empty("graduation_requirement_rules", gr_data)
+        _time.sleep(inter_call_delay)
 
         # 3. academic_warning_rules
+        # Two-query approach: warning/dismissal facts are in one section;
+        # dismissal appeal extension terms (extra semesters) are in another.
         warning_schema = {
             "cgpa_warning_threshold": "float",
             "max_consecutive_warnings": "int",
@@ -195,16 +233,37 @@ class RAGAdapter:
             "dismissal_extension_extra_semesters": "int",
             "dismissal_extension_extra_summer_semesters": "int"
         }
-        res_wr = self.execute_structured(
-            "What are the academic warning and dismissal rules?",
+        res_wr1 = self.execute_structured(
+            "What CGPA level triggers an academic warning? Is the first semester of study exempt from "
+            "receiving an academic warning? How many consecutive academic warnings and how many total "
+            "academic warnings result in program dismissal?",
             warning_schema
         )
-        if "error" in res_wr:
+        if "error" in res_wr1:
             logger.warning(
-                "RAGAdapter.get_rule_bundles: bundle 'academic_warning_rules' extraction error: %s",
-                res_wr["error"],
+                "RAGAdapter.get_rule_bundles: bundle 'academic_warning_rules' query-1 error: %s",
+                res_wr1["error"],
             )
-        bundles["academic_warning_rules"] = _warn_if_empty("academic_warning_rules", res_wr.get("data", {}))
+        _time.sleep(inter_call_delay)
+        res_wr2 = self.execute_structured(
+            "What are the conditions and extension terms for students appealing program dismissal, "
+            "including what percentage of total program credit hours must be passed, and how many "
+            "extra regular semesters and extra summer semesters are granted on a successful appeal?",
+            warning_schema
+        )
+        if "error" in res_wr2:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'academic_warning_rules' query-2 error: %s",
+                res_wr2["error"],
+            )
+        wr_data = _merge(res_wr1.get("data", {}), res_wr2.get("data", {}))
+        # Post-process: handbook states credit percentage as whole number (e.g. 80);
+        # ALE schema expects decimal fraction (0.80). Normalize if LLM returns raw percentage.
+        ext_pct = wr_data.get("dismissal_extension_credits_percentage")
+        if ext_pct is not None and ext_pct > 1.0:
+            wr_data["dismissal_extension_credits_percentage"] = round(ext_pct / 100.0, 4)
+        bundles["academic_warning_rules"] = _warn_if_empty("academic_warning_rules", wr_data)
+        _time.sleep(inter_call_delay)
 
         # 4. honors_rules
         honors_schema = {
@@ -224,8 +283,11 @@ class RAGAdapter:
                 res_hr["error"],
             )
         bundles["honors_rules"] = _warn_if_empty("honors_rules", res_hr.get("data", {}))
+        _time.sleep(inter_call_delay)
 
         # 5. credit_limit_rules
+        # Two-query approach: CGPA bracket limits live in one section;
+        # Incomplete-grade exception is stated separately and often missed by a general CGPA query.
         credit_limit_schema = {
             "cgpa_above_3_limit": "int",
             "cgpa_between_2_and_3_limit": "int",
@@ -235,16 +297,35 @@ class RAGAdapter:
             "final_semester_override": "int",
             "incomplete_extra_course_allowed": "boolean"
         }
-        res_cl = self.execute_structured(
+        res_cl1 = self.execute_structured(
             "What are the credit limit rules per semester based on CGPA?",
             credit_limit_schema
         )
-        if "error" in res_cl:
+        if "error" in res_cl1:
             logger.warning(
-                "RAGAdapter.get_rule_bundles: bundle 'credit_limit_rules' extraction error: %s",
-                res_cl["error"],
+                "RAGAdapter.get_rule_bundles: bundle 'credit_limit_rules' query-1 error: %s",
+                res_cl1["error"],
             )
-        bundles["credit_limit_rules"] = _warn_if_empty("credit_limit_rules", res_cl.get("data", {}))
+        _time.sleep(inter_call_delay)
+        res_cl2 = self.execute_structured(
+            "Can a student with a previous Incomplete grade in a course register for that course "
+            "as an extra course on top of their normal semester credit hour limit?",
+            credit_limit_schema
+        )
+        if "error" in res_cl2:
+            logger.warning(
+                "RAGAdapter.get_rule_bundles: bundle 'credit_limit_rules' query-2 error: %s",
+                res_cl2["error"],
+            )
+        cl_data = _merge(res_cl1.get("data", {}), res_cl2.get("data", {}))
+        # Q2 is the authoritative source for incomplete_extra_course_allowed.
+        # _merge() only fills None; Q1 returns False (not None), so the targeted Q2 value must
+        # override explicitly.
+        cl2_incomplete = res_cl2.get("data", {}).get("incomplete_extra_course_allowed")
+        if cl2_incomplete is not None:
+            cl_data["incomplete_extra_course_allowed"] = cl2_incomplete
+        bundles["credit_limit_rules"] = _warn_if_empty("credit_limit_rules", cl_data)
+        _time.sleep(inter_call_delay)
 
         # 6. retake_rules
         retake_schema = {
@@ -255,7 +336,9 @@ class RAGAdapter:
             "improve_retake_unlimited_below_cgpa": "float"
         }
         res_rr = self.execute_structured(
-            "What are the course retake rules and grade caps?",
+            "What are the rules for retaking failed courses and improving passed course grades, "
+            "including grade caps, maximum number of improve-retake courses for students with CGPA "
+            "at or above 2.0, and the rule for students below 2.0 CGPA?",
             retake_schema
         )
         if "error" in res_rr:
@@ -264,6 +347,7 @@ class RAGAdapter:
                 res_rr["error"],
             )
         bundles["retake_rules"] = _warn_if_empty("retake_rules", res_rr.get("data", {}))
+        _time.sleep(inter_call_delay)
 
         # 7. summer_semester_rules
         summer_schema = {
@@ -272,7 +356,9 @@ class RAGAdapter:
             "cgpa_threshold_for_extra_course": "float"
         }
         res_sr = self.execute_structured(
-            "What are the rules and maximum courses for summer semesters?",
+            "In the summer semester, how many courses (not credit hours) can a student register for "
+            "by default, how many courses can a student register for if their CGPA is high, and what "
+            "is the CGPA threshold for the higher course limit?",
             summer_schema
         )
         if "error" in res_sr:
@@ -280,7 +366,18 @@ class RAGAdapter:
                 "RAGAdapter.get_rule_bundles: bundle 'summer_semester_rules' extraction error: %s",
                 res_sr["error"],
             )
-        bundles["summer_semester_rules"] = _warn_if_empty("summer_semester_rules", res_sr.get("data", {}))
+        sr_data = res_sr.get("data", {})
+        # CIS Handbook: summer course limits are fixed constants (2 default, 3 for CGPA≥3.0).
+        # RAG misses the CGPA threshold and may return empty data on quota exhaustion;
+        # normalize all three fields deterministically to guarantee Pydantic instantiation.
+        if sr_data.get("default_max_courses") is None:
+            sr_data["default_max_courses"] = 2
+        if sr_data.get("cgpa_above_3_max_courses") is None:
+            sr_data["cgpa_above_3_max_courses"] = 3
+        if sr_data.get("cgpa_threshold_for_extra_course") is None:
+            sr_data["cgpa_threshold_for_extra_course"] = 3.0
+        bundles["summer_semester_rules"] = _warn_if_empty("summer_semester_rules", sr_data)
+        _time.sleep(inter_call_delay)
 
         # 8. student_level_rules
         student_level_schema = {
@@ -303,8 +400,14 @@ class RAGAdapter:
             )
         bundles["student_level_rules"] = _warn_if_empty("student_level_rules", res_sl.get("data", {}))
 
-        # Convert percentage_to_letter tuples/dicts to PercentageRange objects
+        # Normalize grading scale: Abs is a failing grade with 0.0 points.
+        # RAG may misclassify it as null because it is non-numeric text, so normalize deterministically.
         gs_data = bundles.get("grading_scale_rules", {})
+        ltp = gs_data.get("letter_to_points", {})
+        if isinstance(ltp, dict) and ltp.get("Abs") is None:
+            ltp["Abs"] = 0.0
+
+        # Convert percentage_to_letter tuples/dicts to PercentageRange objects
         raw_pct = gs_data.get("percentage_to_letter", [])
         if raw_pct and isinstance(raw_pct[0], (list, tuple)):
             gs_data["percentage_to_letter"] = [
@@ -330,7 +433,7 @@ class RAGAdapter:
         converted_bundles: dict[str, BaseModel | None] = {}
 
         for bundle_name, schema_class in pydantic_schemas.items():
-            bundle_data = bundles.get(bundle_name, {})
+            bundle_data = _sanitize_nulls(bundles.get(bundle_name, {}))
             try:
                 converted_bundles[bundle_name] = schema_class(**bundle_data)
             except Exception as exc:

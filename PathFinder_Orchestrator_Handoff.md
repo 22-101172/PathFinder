@@ -1,3 +1,12 @@
+> ⚠️ ARCHIVED / SUPERSEDED DOCUMENT  
+> This file is historical reference only.  
+> Do not use it as Orchestrator design authority.  
+> The authoritative Orchestrator design is:
+> `PathFinder_Orchestrator_Phase1_Phase2_Locked_Design.md`
+> after replacement with the Phases 1–6 locked version.
+>
+> Use this handoff only for codebase inventory, historical audit notes, file structure, adapter notes, and old component status.
+> If this file conflicts with the locked Phases 1–6 MD, follow the locked MD.
 # PathFinder — Orchestrator Design Planning Handoff
 **Version:** 2.0 (Final Pre-Orchestrator) | **Date:** June 2026 | **Branch:** person-seif
 **Codebase:** `O:\Graduation Project\PathFinder_Integration\`
@@ -67,7 +76,8 @@ Greeting and GPA-based welcome behavior is NOT an Orchestrator responsibility. I
 | RAG Adapter | ✅ Done | 4/4 pass, 5 skip (rate limit) | _as_dict() fix applied; deep audit completed; execute_structured error propagation fixed; partial rule-bundle loading implemented; integration notes in Section 8A |
 | ALE Adapter | ✅ Done | 23/23 pass | grade_points mapping fixed; deep audit complete; ValidationError → cannot_compute fixed; course_credit_lookup support added; assumed_grade resolution added; unused bundle parsing removed; integration notes in Section 9A |
 | SCP | ✅ Done / Audited & Locked | 23/23 pass | Excel → StudentContext; validation and regression fixes complete |
-| Session Manager | ✅ Logic Audited & Fixed | 29/29 pass | Override cleanup and SQLite blob handling fixed; final schema compatibility pending Gateway Schemas audit |
+| Session Manager | ✅ Audited & Fixed | 29/29 pass | Override cleanup, schema compatibility, typed turn history, and SQLite blob handling fixed |
+| Gateway Schemas | ✅ Audited & Fixed | Covered by SCP + Session tests (52/52 combined) | Pydantic contracts cleaned for current scope; status enums and typed turn history added |
 | **Orchestrator** | **🔧 Planning now** | — | Stub exists but broken — design/planning now; implementation after QU is finalized |
 | Query Understanding | ⚠️ Exists, not final | — | Basic stub exists; does not reflect locked resolve_entity architecture; will be redesigned after Orchestrator contracts are clear |
 | Response Composer | ⚠️ Exists, not final | — | Basic stub exists; must align with ResultPackage and ComposerContext after Orchestrator is done |
@@ -80,13 +90,14 @@ Greeting and GPA-based welcome behavior is NOT an Orchestrator responsibility. I
 1. `main.py` imports `create_session`, `get_session`, `get_student_sessions`, `get_session_history`, `update_session_after_turn` — none of these exist. Correct names: `get_or_create_session`, `get_qu_context`, `apply_query_result`, `append_turn`, `build_effective_context`
 2. Orchestrator stub references `ctx.planned_courses`, `ctx.academic_standing`, `ctx.current_semester` — none of these fields exist on `StudentContext`
 3. Orchestrator stub uses wrong `ALEAdapter.call()` signature
-4. `SessionOverrides` schema does not define `assumed_failed_courses` / `assumed_passed_courses` explicitly, but `build_effective_context` checks them — schema cleanup needed before final integration
-5. Orchestrator stub calls "check_eligibility" — correct operation name is "check_course_eligibility". Fix during Orchestrator implementation.
-6. **Session Manager logic — all 5 critical bugs now fixed (29/29 tests passing):**
-   - `build_effective_context()` now cleans course lists when overrides mark courses done/passed (`failed_courses` and `in_progress_courses` cleaned for `"assumed_done"`; `in_progress_courses` cleaned for `"assumed_passed"`)
-   - `SQLiteSessionStore` now handles corrupted session blobs gracefully (returns `None`, logs warning; no crash)
-   - Session state remains stale after overrides (`cgpa`, `cumulative_chs` not recalculated) — acceptable for MVP
-   - ⚠️ **Flagged for Orchestrator Planning:** `course_override_type` history-loss design decision — see Section 11
+4. Orchestrator stub calls "check_eligibility" — correct operation name is "check_course_eligibility". Fix during Orchestrator implementation.
+5. **Session Manager critical logic bugs fixed (29/29 pass):**
+   - `assumed_done` cleans `failed_courses` and `in_progress_courses`
+   - `assumed_passed` cleans `failed_courses` and `in_progress_courses`
+   - `assumed_failed` cleans `completed_courses`, `in_progress_courses`, and `zero_credit_courses_passed`
+   - SQLite corrupted blobs handled gracefully
+   - Remaining MVP design note: session state does not recalculate GPA/credits after overrides
+   - Remaining design note: `course_override_type` stores latest type only; mixed override semantics must be handled carefully during QU/Orchestrator planning
 
 ---
 
@@ -130,7 +141,7 @@ PathFinder_Integration/
 │   ├── utils.py                    — get_current_semester() lives here (system-wide temporal utility, not student-derived)
 │   ├── llm_client.py
 │   └── models/
-│       └── schemas.py              — ALL gateway Pydantic models (StructuredQuery, ResultPackage, ComposerContext, etc.)
+│       └── schemas.py              — audited/fixed; status enums and typed turn history added; no dedicated schema test file yet
 ├── gateway/session_store/
 │   ├── base.py
 │   └── sqlite_store.py
@@ -145,6 +156,7 @@ PathFinder_Integration/
 │   ├── test_rag_adapter.py             — 4/4 pass, 5 skip (Groq rate limit)
 │   ├── rag_manual_test.py              — manual RAG test script
 │   └── conftest.py                     — shared pytest fixtures
+│   (Schema compatibility is currently covered by test_session_manager.py + test_student_context_provider.py; combined relevant validation: 52/52 pass)
 ├── ui/
 │   └── streamlit_app.py            — Streamlit demo, not final priority
 ├── main.py                         — FastAPI entry point (broken imports, fix after Orchestrator)
@@ -899,7 +911,7 @@ SCP still uses module-level loaded DataFrames for MVP simplicity. This is accept
 
 ## 11. SessionOverrides & Session Manager — Logic Audit Contract
 
-**Status:** Session Manager logic audited and fixed. Final schema compatibility will be locked during the Gateway Schemas audit.
+**Status:** Session Manager audit completed and schema compatibility resolved for current scope.
 
 ### SessionOverrides fields
 ```python
@@ -911,10 +923,6 @@ course_override_type: Literal["planned","assumed_done","assumed_failed","assumed
 override_action: Literal["accumulate","replace","clear"] = "accumulate"
 ```
 
-### Schema compatibility note
-
-Session Manager currently depends on SessionOverrides fields/types such as `assumed_failed_courses`, `assumed_passed_courses`, `"assumed_failed"`, and `"assumed_passed"`. These fields are already present and correct in `gateway/models/schemas.py`. Their definitions must be validated and locked during the Gateway Schemas audit before Orchestrator implementation.
-
 ### build_effective_context behavior
 
 ```python
@@ -923,14 +931,16 @@ build_effective_context(base_context: StudentContext, overrides: SessionOverride
 
 Applies overrides to produce hypothetical StudentContext. Never mutates base_context.
 
-- `"assumed_done"` → adds `added_courses` to `completed_courses`; removes from `failed_courses` and `in_progress_courses`
 - `"planned"` → adds `added_courses` to `in_progress_courses`
-- `"assumed_failed"` → adds `assumed_failed_courses` to `failed_courses`; removes from `completed_courses` and `zero_credit_courses_passed`
+- `"assumed_done"` → adds `added_courses` to `completed_courses`; removes from `failed_courses` and `in_progress_courses`
+- `"assumed_failed"` → adds `assumed_failed_courses` to `failed_courses`; removes from `completed_courses`, `in_progress_courses`, and `zero_credit_courses_passed`
 - `"assumed_passed"` → adds `assumed_passed_courses` to `completed_courses`; removes from `failed_courses` and `in_progress_courses`
-- `"gpa_scenario"` → NOT HANDLED → returns base_context unchanged (deferred)
-- `"none"` → returns base_context unchanged
+- `"gpa_scenario"` → does not mutate `StudentContext`; Orchestrator/ALE params handle GPA scenarios
+- `"none"` → no mutation
 
 **Does NOT recalculate:** `cgpa`, `cumulative_chs`, `cumulative_cps`, `total_credit_hours_earned`. These remain stale after overrides.
+
+**Design limitation:** `course_override_type` tracks only the latest non-`"none"` type, so mixed override sessions require careful QU/Orchestrator handling.
 
 ### Fixed Bugs (Session Manager Audit Pass)
 
@@ -939,6 +949,7 @@ Applies overrides to produce hypothetical StudentContext. Never mutates base_con
 | `"assumed_done"` didn't clean `failed_courses` | Now removes from `failed_courses` when course is assumed done |
 | `"assumed_done"` didn't clean `in_progress_courses` | Now removes from `in_progress_courses` when course is assumed done |
 | `"assumed_passed"` didn't clean `in_progress_courses` | Now removes from `in_progress_courses` when course is assumed passed |
+| `"assumed_failed"` didn't clean `in_progress_courses` | Now removes from `in_progress_courses` when course is assumed failed |
 | `SQLiteSessionStore.load()` crashed on corrupted blob | Now handles `ValidationError` gracefully; returns `None` with warning log |
 | `SQLiteSessionStore.get_all_for_student()` crashed on corrupted blob | Now skips and logs corrupted blobs instead of crashing |
 
@@ -992,7 +1003,7 @@ encrypt or sanitize session_blob before storage.
 
 ## 11A. Session Manager & SQLiteSessionStore — Integration Notes
 
-**Status:** Logic audited and fixed. Schema compatibility pending Gateway Schemas audit.
+**Status:** Logic audited and fixed. Schema compatibility resolved for current scope.
 
 ### SQLiteSessionStore Architecture
 
@@ -1074,7 +1085,7 @@ kg_result: Optional[dict]
 rag_result: Optional[RAGResult]
 ale_result: Optional[dict]
 composer_context: Optional[ComposerContext]
-status: str                  # "ok" | "error" | "clarification_needed"
+status: Literal["ok", "error", "clarification_needed"] = "ok"
 error_detail: Optional[str]
 ```
 
@@ -1089,6 +1100,81 @@ total_credit_hours_earned: int
 current_semester: str        # orchestrator gets from get_current_semester()
 consecutive_warnings: int
 ```
+
+---
+
+## 12A. Gateway Schemas Contract — Audited & Fixed
+
+### Status
+
+- Gateway schemas audited and fixed for current pre-Orchestrator scope.
+- Compatible with SCP, Session Manager, SQLite session persistence, and ALE Adapter expectations.
+- QU, Orchestrator, Composer, API, and UI-specific contracts are still allowed to evolve during their own design phases.
+
+### Locked Models for Current Scope
+
+**StudentContext**
+
+- Canonical student state produced by SCP and consumed by Session Manager/ALE Adapter.
+- Includes course history, GPA fields, warning fields, completed/failed/in-progress course lists, retake counts, zero-credit passed list.
+- `course_history`, `completed_courses`, `failed_courses`, and `in_progress_courses` now use safe `Field(default_factory=list)` defaults.
+- `credit_hours=0` sentinel in `CourseRecord` remains intentional; Orchestrator must patch real course credits from KG before ALE graduation audit/honors workflows.
+
+**CourseRecord**
+
+- Frozen Pydantic model.
+- `status` Literal values: `"passed"`, `"repeated"`, `"failed"`, `"in_progress"`, `"withdrawn"`, `"incomplete"`
+
+**SessionOverrides**
+
+- Fields: `added_courses`, `assumed_failed_courses`, `assumed_passed_courses`, `target_role`, `course_override_type`, `override_action`
+- `course_override_type` Literal values: `"planned"`, `"assumed_done"`, `"assumed_failed"`, `"assumed_passed"`, `"gpa_scenario"`, `"none"`
+- `override_action` Literal values: `"accumulate"`, `"replace"`, `"clear"`
+- Compatible with current Session Manager.
+
+**Turn**
+
+- Typed conversation turn: `user: str`, `answer: str`
+- Used by `QUContext.recent_turns` and `SessionState.turn_history`.
+
+**QueryResponse**
+
+- `status` Literal values: `"ok"`, `"error"`, `"clarification_needed"` (default `"ok"`)
+
+**ResultPackage**
+
+- `status` Literal values: `"ok"`, `"error"`, `"clarification_needed"` (default `"ok"`)
+
+### Deferred Until QU / Orchestrator / Composer Design
+
+Do not over-lock these yet:
+
+- `StructuredQuery.intent` remains `str`
+- `StructuredQuery.engine_pattern` remains `str`
+- `StructuredQuery.query_type` remains `str`
+- `ComposerContext.academic_standing` remains `str`
+- `LastReferenced` does not include `skill_id` yet
+
+These fields depend on the final QU intent taxonomy, Orchestrator routing map, and Composer presentation contract. They should be finalized during those component design phases.
+
+### Important Accuracy Note
+
+Not all list/dict fields in `schemas.py` use `Field(default_factory=...)`. Some mutable defaults may still exist in non-critical/simple response models (e.g., `SessionOverrides`, `RAGResult`). Tests currently pass and remaining cleanup can be done opportunistically if needed. Only the `StudentContext` list fields and `SessionState.turn_history` were corrected in this audit pass.
+
+---
+
+## Planning-Phase Sections (13–19)
+
+These sections represent planning guidance derived from engine/adapter audit work. 
+They are **subject to revision and adaptation** during Orchestrator/QU/Composer planning 
+if design work reveals different requirements.
+
+**Sections 13–17** are guidance (intent maps, patching strategy, caching, deferred issues). 
+They should inform planning but not constrain it if a better approach emerges.
+
+**Section 18 (Architecture Constraints)** is **non-negotiable** and must guide all planning decisions.
+
+**Section 19 (Where to Start)** is the planning process itself.
 
 ---
 

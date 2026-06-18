@@ -44,7 +44,7 @@ class HybridRetriever:
 
         print("Loading cross-encoder reranker...")
         self.reranker = CrossEncoder(RERANKER_MODEL)
-        print("✅ Retriever ready.")
+        print("Retriever ready.")
 
     # ── private helpers ──────────────────────────────────────────────────────
 

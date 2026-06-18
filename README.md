@@ -175,6 +175,7 @@ PathFinder_Integration/
 |- main.py                                          # FastAPI entrypoint; exposes /chat, /sessions, /session, /health
 |- requirements.txt                                 # Backend Python dependencies
 |- .env.example                                     # Environment variable template
+|- .env
 |- pytest.ini                                       # Pytest configuration
 |- .gitignore
 |- PathFinder_Orchestrator_Handoff.md               # Orchestrator design handoff doc
@@ -227,6 +228,8 @@ PathFinder_Integration/
 |     |- retriever.py                 # Retriever interface used by the RAG adapter
 |     |- CIS_Handbook.md              # Source handbook document
 |     |- chunks.pkl                   # Generated BM25/parent-chunk artifact (rebuilt by ingest.py)
+|     |- chroma_db/                   # The vector embeddings DB for the handbook
+|        |- chroma.sqlite3
 |
 |- gateway/                           # Routing, query understanding, session, and response composition
 |  |- llm_client.py                   # Shared OpenAI-compatible LLM client with model-chain fallback
@@ -246,6 +249,7 @@ PathFinder_Integration/
 |     |- __init__.py                  # Package init; exports SessionStore and SQLiteSessionStore
 |     |- base.py                      # SessionStore abstract base class (ABC)
 |     |- sqlite_store.py              # SQLiteSessionStore: persists sessions and history to SQLite
+|     |- pathfinder_sessions.db       # The SQLite DB that holds the sessions
 |
 |- ui/
 |  |- streamlit_app.py                # Streamlit student-facing chat frontend
@@ -341,10 +345,10 @@ Build the RAG index the first time, or whenever the handbook changes:
 python engines/rag/ingest.py
 ```
 
-Run the backend:
+Run the backend: (It also shows the loggings)
 
 ```bash
-uvicorn main:app --reload
+python -m uvicorn main:app --reload
 ```
 
 Run the UI from a separate terminal:

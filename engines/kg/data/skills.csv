@@ -1,29 +1,53 @@
 skill_id,name,category
-SK_Python,Python,Programming
-SK_Java,Java,Programming
-SK_SQL,SQL,Data
-SK_NoSQL,NoSQL Databases,Data
-SK_ML,Machine Learning,AI
-SK_DL,Deep Learning,AI
-SK_NLP,Natural Language Processing,AI
-SK_Computer_Vision,Computer Vision,AI
-SK_Reinforcement_Learning,Reinforcement Learning,AI
-SK_Data_Analysis,Data Analysis,Data
-SK_Data_Visualization,Data Visualization,Data
-SK_Big_Data,Big Data Engineering,Data
-SK_Data_Modeling,Data Modeling,Data
-SK_Statistics,Probability and Statistics,Math
-SK_Linear_Algebra,Linear Algebra and Calculus,Math
-SK_Algorithms,Algorithms and Data Structures,Computer Science
-SK_OS,Operating Systems,Computer Science
+SK_Python,Python Programming,Programming
+SK_Java,Java Programming,Programming
+SK_Algorithms,Algorithms,Programming
+SK_Linear_Algebra,Linear Algebra,Mathematics
+SK_Statistics,Statistics,Mathematics
+SK_OS,Operating Systems,Systems
+SK_Data_Analysis,Data Analysis,Data Science
+SK_Data_Visualization,Data Visualization,Data Science
+SK_SQL,SQL,Data Engineering
+SK_Data_Modeling,Data Modeling,Data Engineering
+SK_NoSQL,NoSQL Databases,Data Engineering
+SK_DB_Architecture,Database Architecture,Data Engineering
+SK_Big_Data,Big Data Engineering,Data Engineering
+SK_ML,Machine Learning,Artificial Intelligence
+SK_DL,Deep Learning,Artificial Intelligence
+SK_NLP,Natural Language Processing,Artificial Intelligence
+SK_Computer_Vision,Computer Vision,Artificial Intelligence
+SK_Robotics,Robotics,Artificial Intelligence
 SK_Software_Design,Software Design,Software Engineering
-SK_Software_Testing,Software Testing and QA,Software Engineering
-SK_Agile,Agile and Project Management,Software Engineering
-SK_Web_Dev,Web Development,Software Engineering
+SK_Software_Testing,Software Testing,Software Engineering
+SK_Agile,Agile Methodologies,Software Engineering
+SK_IT_Management,IT Management,Management
+SK_Web_Dev,Web Development,Programming
 SK_Network_Security,Network Security,Cybersecurity
+SK_Ethical_Hacking,Ethical Hacking,Cybersecurity
 SK_Cryptography,Cryptography,Cybersecurity
-SK_Ethical_Hacking,Ethical Hacking and Penetration Testing,Cybersecurity
 SK_Secure_Software,Secure Software Development,Cybersecurity
-SK_Robotics,Robotics and Autonomous Systems,AI
-SK_DB_Architecture,Database Architecture and Optimization,Data
-SK_IT_Management,IT Management and Strategy,Software Engineering
+SK_Technical_Writing,Technical Writing,Communication
+SK_Project_Management,Project Management,Management
+SK_Calculus,Calculus,Mathematics
+SK_Problem_Solving,Problem Solving & Algorithmic Thinking,Programming
+SK_CPP,C++ Programming,Programming
+SK_Digital_Logic,Digital Logic Design,Hardware
+SK_OOP,Object-Oriented Programming,Programming
+SK_Data_Structures,Data Structures,Programming
+SK_Computer_Architecture,Computer Architecture,Systems
+SK_MATLAB,MATLAB,Programming
+SK_Computer_Networks,Computer Networks,Systems
+SK_Version_Control,Version Control (Git),Development Tools
+SK_Distributed_Systems,Distributed Systems,Systems
+SK_Requirements_Engineering,Requirements Engineering,Software Engineering
+SK_Functional_Programming,Functional Programming,Programming
+SK_AI_Algorithms,AI Algorithms,Artificial Intelligence
+SK_Scala,Scala Programming,Programming
+SK_Data_Privacy,Data Privacy & Governance,Cybersecurity
+SK_Cloud_Computing,Cloud Computing,Systems
+SK_Containerization,Containerization (Docker/Kubernetes),Development Tools
+SK_Data_Pipelines,Data Pipelines & ETL,Data Engineering
+SK_BI_Tools,BI Tools (Power BI/Tableau),Data Science
+SK_API_Development,API Development,Programming
+SK_Frontend_Dev,Frontend Development,Programming
+SK_Threat_Analysis,Threat Analysis & Incident Response,Cybersecurity

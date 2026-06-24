@@ -68,6 +68,20 @@ def simulate_gpa_forward(input: SimulateGPAForwardInput) -> SimulateGPAForwardOu
     if input.current_quality_points is None:  # type: ignore[comparison-overlap]
         return _cannot_compute(["missing_current_quality_points"], [], input.current_cgpa)
 
+    # Step 4b — gpa_counted_credits guard (model_construct() bypass protection)
+    if input.gpa_counted_credits is None:  # type: ignore[comparison-overlap]
+        return _cannot_compute(["missing_gpa_counted_credits"], [], input.current_cgpa)
+
+    # Step 4c — attempt_type validity guard (belt-and-suspenders against model_construct() bypass)
+    _VALID_ATTEMPT_TYPES = frozenset({"first_attempt", "failed_retake", "improve_retake"})
+    for course in input.planned_courses:
+        if course.attempt_type not in _VALID_ATTEMPT_TYPES:
+            return _cannot_compute(
+                [f"invalid_attempt_type_{course.course_code}"],
+                [],
+                input.current_cgpa,
+            )
+
     # -----------------------------------------------------------------------
     # Phase 2 — Grade Resolution  +  Phase 3 — Retake Grade Cap
     # (interleaved per course to avoid a second pass)

@@ -44,6 +44,12 @@ def check_course_eligibility(
     if required_data_missing:
         return _cannot_compute(["required_data_missing"], required_data_missing, input)
 
+    # Step 1b — attempt_type validity guard (belt-and-suspenders: Pydantic Literal
+    # enforces this at construction time, but model_construct() can bypass it)
+    _VALID_ATTEMPT_TYPES = frozenset({"first_attempt", "failed_retake", "improve_retake"})
+    if input.attempt_type not in _VALID_ATTEMPT_TYPES:
+        return _cannot_compute(["invalid_attempt_type"], [], input)
+
     # Step 2 — contradiction checks
     if (
         input.attempt_type == "improve_retake"
@@ -120,7 +126,11 @@ def check_course_eligibility(
 
             return CheckCourseEligibilityOutput(
                 status=status,
-                reason_codes=[],
+                reason_codes=(
+                    ["improve_retake_cap_exceeded"]
+                    if status == "retake_cap_exceeded"
+                    else []
+                ),
                 warnings=warnings,
                 required_data_missing=[],
                 target_course_code=input.target_course_code,

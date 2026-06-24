@@ -1,16 +1,21 @@
 """
-Tests for main.py / FastAPI /chat endpoint wiring.
+Tests for main.py / FastAPI endpoint wiring.
 
 All external services (KG, RAG, ALE, SCP, QU, session manager) are mocked
 so tests run without any real infrastructure.
 
 Verifies:
-- /chat returns TurnResponse (not QueryResponse)
+- /chat returns QueryResponse
 - execute_turn is called with list[StructuredQuery]
 - answer_text stored in turn history is a structured summary, not empty string
 - student-not-found → 404
 - /health returns {"status": "ok"}
 - /sessions and /session history endpoints still work
+- DELETE /students/{student_id}/sessions/{session_id} — ownership-safe delete
+- DELETE /dev/students/{student_id}/sessions — dev-only bulk delete
+- DELETE /dev/sessions — dev-only global delete
+- Dev endpoints return 403 when not in dev mode
+- GET /students/{student_id}/sessions/{session_id}/history — ownership-safe history
 """
 from __future__ import annotations
 
@@ -369,18 +374,9 @@ def test_list_sessions(api):
     assert "sessions" in data
 
 
-def test_session_history(api):
+def test_session_history_deprecated(api):
     resp = api["client"].get(f"/session/{api['session_id']}/history")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["session_id"] == api["session_id"]
-    assert "turns" in data
-
-
-def test_session_history_not_found(api):
-    with patch("main.get_session_history", return_value=None):
-        resp = api["client"].get("/session/no-such-session/history")
-    assert resp.status_code == 404
+    assert resp.status_code == 410
 
 
 # ── _make_turn_history_summary helper ─────────────────────────────────────────
@@ -412,3 +408,136 @@ def test_make_turn_history_summary_multi_sq():
     assert "run_graduation_audit" in summary
     assert "generate_graduation_roadmap" in summary
     assert "completed" in summary
+
+
+# ── DELETE /students/{student_id}/sessions/{session_id} ───────────────────────
+
+def test_delete_session_success(api):
+    """DELETE /students/.../sessions/... returns 200 when manager says deleted."""
+    with patch("main.delete_session_for_student", return_value=True) as p:
+        resp = api["client"].delete("/students/S001/sessions/ses-abc")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["deleted"] is True
+    assert data["session_id"] == "ses-abc"
+    p.assert_called_once_with("S001", "ses-abc")
+
+
+def test_delete_session_not_found(api):
+    """DELETE returns 404 when session does not exist or does not belong to student."""
+    with patch("main.delete_session_for_student", return_value=False):
+        resp = api["client"].delete("/students/S001/sessions/ses-abc")
+    assert resp.status_code == 404
+
+
+def test_delete_session_cross_student_returns_404(api):
+    """Ownership mismatch causes delete_session_for_student to return False → 404."""
+    with patch("main.delete_session_for_student", return_value=False):
+        resp = api["client"].delete("/students/SB/sessions/ses-owned-by-SA")
+    assert resp.status_code == 404
+
+
+# ── DELETE /dev/students/{student_id}/sessions ────────────────────────────────
+
+def test_dev_delete_student_sessions_in_dev_mode(api):
+    """DEV endpoint deletes all sessions for student when in dev mode."""
+    with patch("main._is_dev_mode", return_value=True), \
+         patch("main.delete_all_sessions_for_student", return_value=3) as p:
+        resp = api["client"].delete("/dev/students/S001/sessions")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["deleted"] is True
+    assert data["student_id"] == "S001"
+    assert data["count"] == 3
+    p.assert_called_once_with("S001")
+
+
+def test_dev_delete_student_sessions_blocked_when_not_dev(api):
+    """DEV endpoint returns 403 when not in dev mode."""
+    with patch("main._is_dev_mode", return_value=False):
+        resp = api["client"].delete("/dev/students/S001/sessions")
+    assert resp.status_code == 403
+
+
+# ── DELETE /dev/sessions ──────────────────────────────────────────────────────
+
+def test_dev_delete_all_sessions_in_dev_mode(api):
+    """Global DEV delete endpoint removes all sessions when in dev mode."""
+    with patch("main._is_dev_mode", return_value=True), \
+         patch("main.delete_all_sessions_global", return_value=7) as p:
+        resp = api["client"].delete("/dev/sessions")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["deleted"] is True
+    assert data["count"] == 7
+    p.assert_called_once()
+
+
+def test_dev_delete_all_sessions_blocked_when_not_dev(api):
+    """Global DEV delete returns 403 when not in dev mode."""
+    with patch("main._is_dev_mode", return_value=False):
+        resp = api["client"].delete("/dev/sessions")
+    assert resp.status_code == 403
+
+
+# ── GET /students/{student_id}/sessions/{session_id}/history ──────────────────
+
+def test_student_session_history_ownership_safe(api):
+    """Ownership-safe history endpoint returns session history for the right student."""
+    expected = SessionHistoryResponse(
+        session_id="ses-001", session_name="Test", turns=[{"user": "q", "answer": "a"}]
+    )
+    with patch("main.get_session_history_for_student", return_value=expected) as p:
+        resp = api["client"].get("/students/S001/sessions/ses-001/history")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["session_id"] == "ses-001"
+    assert len(data["turns"]) == 1
+    p.assert_called_once_with("S001", "ses-001")
+
+
+def test_student_session_history_not_found_or_wrong_owner(api):
+    """Returns 404 when session not found or belongs to a different student."""
+    with patch("main.get_session_history_for_student", return_value=None):
+        resp = api["client"].get("/students/SB/sessions/ses-owned-by-SA/history")
+    assert resp.status_code == 404
+
+
+# ── Service readiness guards ───────────────────────────────────────────────────
+
+def test_chat_returns_503_when_orchestrator_none(api):
+    """If orchestrator is None (startup failure), /chat returns 503."""
+    import main as m
+    with patch.object(m, "_orchestrator", None):
+        resp = api["client"].post("/chat", json={"student_id": "S001", "user_text": "hello"})
+    assert resp.status_code == 503
+
+
+def test_chat_returns_503_when_composer_none(api):
+    """If composer is None (startup failure), /chat returns 503."""
+    import main as m
+    with patch.object(m, "_composer", None):
+        resp = api["client"].post("/chat", json={"student_id": "S001", "user_text": "hello"})
+    assert resp.status_code == 503
+
+
+# ── Pipeline exception handling ───────────────────────────────────────────────
+
+def test_chat_returns_500_on_pipeline_error(api):
+    """Unexpected exception in QU/Orchestrator/Composer returns safe 500."""
+    with patch("main.understand_query", side_effect=RuntimeError("model timeout")):
+        resp = api["client"].post("/chat", json={"student_id": "S001", "user_text": "hello"})
+    assert resp.status_code == 500
+    # Stack trace must not leak into the response body
+    assert "Traceback" not in resp.text
+    assert "RuntimeError" not in resp.text
+
+
+# ── QU recent_turns ───────────────────────────────────────────────────────────
+
+def test_chat_passes_recent_turns_to_qu(api):
+    """understand_query must receive recent_turns from session turn history."""
+    api["client"].post("/chat", json={"student_id": "S001", "user_text": "hello"})
+    kwargs = api["p_uq"].call_args.kwargs
+    assert "recent_turns" in kwargs
+    assert isinstance(kwargs["recent_turns"], list)

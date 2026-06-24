@@ -20,6 +20,7 @@ Does NOT:
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ from gateway.models.schemas import (
     SessionState, StudentContext, StructuredQuery, TurnWrapper,
 )
 from gateway.session_manager import _apply_overrides, build_effective_context
-from gateway.utils import get_next_semester
+from gateway.utils import get_next_semester, resolve_relative_semester_text
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,19 @@ _STUDENT_REQUIRED_INTENTS = (
 )
 
 _KG_ADAPTER_ERRORS = frozenset({"kg_unavailable", "unknown_operation", "bad_params", "kg_error"})
+
+_FORBIDDEN_INTENTS = frozenset({
+    "plan_next_semester", "get_prerequisites", "handbook_query",
+    "check_eligibility", "simulate_gpa", "generate_semester_plan",
+    "mixed_course_policy", "get_courses_in_track", "get_track_courses_for_role",
+    "get_roles_by_skill", "graduation_audit_with_roadmap",
+    "compare_courses", "rank_courses", "get_course_profile",
+})
+
+# Intents that only need student context when the query is student-referential
+_CONDITIONAL_STUDENT_INTENTS = frozenset({
+    "get_roles_by_track", "get_track_overview", "compare_tracks",
+})
 
 
 # ── Turn-level cache ──────────────────────────────────────────────────────────
@@ -135,6 +149,20 @@ def _missing_ctx_fields(ctx: StudentContext, *fields: str) -> list[str]:
 
 def _is_kg_adapter_error(result: dict) -> bool:
     return "error" in result and result["error"] in _KG_ADAPTER_ERRORS
+
+
+def _is_unsupported_track(ctx: Optional[StudentContext]) -> bool:
+    return ctx is not None and getattr(ctx, "track_status", "supported") == "unsupported"
+
+
+def _unsupported_track_result(sq_index: int, intent: str, ctx: StudentContext) -> PerSQResult:
+    return _info(sq_index, intent, {
+        "status": "not_applicable",
+        "reason_code": "unsupported_track",
+        "track_status": getattr(ctx, "track_status", "unsupported"),
+        "track_error_code": getattr(ctx, "track_error_code", None),
+        "message": "Your academic track is not currently supported for this planning operation.",
+    })
 
 
 def _collect_turn_overrides(sqs: list[StructuredQuery]) -> tuple[SessionOverrides, bool]:
@@ -217,6 +245,7 @@ class Orchestrator:
         """
         turn_id = str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).isoformat()
+        _turn_t0 = time.monotonic()
 
         # Build execution-time overrides: previous session + current turn
         turn_overrides, had_clear = _collect_turn_overrides(sqs)
@@ -235,17 +264,29 @@ class Orchestrator:
         has_active = _has_assumptions(execution_overrides)
         caches = _TurnCaches()
 
+        _session_short = session.session_id[:8] if session.session_id else "unknown"
+        logger.info(
+            "Orchestrator.turn_start session=%s sq_count=%d assumptions_active=%s "
+            "had_clear=%s base_context=%s effective_context=%s",
+            _session_short, len(sqs), has_active, had_clear,
+            base_context is not None, effective_context is not None,
+        )
+
         results: list[PerSQResult] = []
         for idx, sq in enumerate(sqs):
-            logger.info("Orchestrator: SQ[%d] intent=%s entity=%s",
-                        idx, sq.intent,
-                        sq.entities.course_code or sq.entities.role_id or sq.entities.track_id or "-")
+            logger.info(
+                "Orchestrator.sq_start index=%d intent=%s entity=%s",
+                idx, sq.intent,
+                sq.entities.course_code or sq.entities.role_id or sq.entities.track_id or "-",
+            )
+            _sq_t0 = time.monotonic()
             try:
                 result = self._execute_sq(
                     idx, sq,
                     base_context=base_context,
                     effective_context=effective_context,
                     has_active_assumptions=has_active,
+                    had_clear=had_clear,
                     rule_bundles=rule_bundles,
                     caches=caches,
                 )
@@ -253,21 +294,37 @@ class Orchestrator:
                 logger.exception("Orchestrator: unhandled error SQ[%d] intent=%s", idx, sq.intent)
                 result = _err(idx, sq.intent, "engine_error", None,
                               f"Unexpected error: {type(exc).__name__}")
-            logger.info("Orchestrator: SQ[%d] intent=%s → status=%s",
-                        idx, sq.intent, result.status)
+            _sq_ms = int((time.monotonic() - _sq_t0) * 1000)
+            logger.info(
+                "Orchestrator.sq_result index=%d intent=%s status=%s "
+                "error_code=%s error_category=%s has_data=%s citations=%d duration_ms=%d",
+                idx, sq.intent, result.status,
+                result.error_code, result.error_category,
+                result.data is not None, len(result.citations or []),
+                _sq_ms,
+            )
             results.append(result)
 
-        return _build_turn_wrapper(turn_id, session.session_id, timestamp, results)
+        wrapper = _build_turn_wrapper(turn_id, session.session_id, timestamp, results)
+        _turn_ms = int((time.monotonic() - _turn_t0) * 1000)
+        logger.info(
+            "Orchestrator.turn_result status=%s results=%d error=%s clarification=%s soft=%s duration_ms=%d",
+            wrapper.turn_status, wrapper.result_count,
+            wrapper.has_error, wrapper.has_clarification, wrapper.has_soft_no_evidence,
+            _turn_ms,
+        )
+        return wrapper
 
     def extract_last_referenced(self, sqs: list[StructuredQuery]) -> Optional[LastReferenced]:
         """Return LastReferenced from the first SQ with resolved entities, or None to preserve existing."""
         for sq in sqs:
             e = sq.entities
-            if e.course_code or e.role_id or e.track_id:
+            if e.course_code or e.role_id or e.track_id or e.skill_id:
                 return LastReferenced(
                     course_code=e.course_code,
                     role_id=e.role_id,
                     track_id=e.track_id,
+                    skill_id=e.skill_id,
                 )
         return None
 
@@ -280,6 +337,7 @@ class Orchestrator:
         base_context: Optional[StudentContext],
         effective_context: Optional[StudentContext],
         has_active_assumptions: bool,
+        had_clear: bool,
         rule_bundles: dict,
         caches: _TurnCaches,
     ) -> PerSQResult:
@@ -291,14 +349,32 @@ class Orchestrator:
         if intent == "out_of_scope":
             return _oos(sq_index, intent)
 
+        # Reject forbidden/stale intents before routing
+        if intent in _FORBIDDEN_INTENTS:
+            return _err(sq_index, intent, "validation_failed", "intent",
+                        f"Stale or unsupported intent: {intent!r}. Use the active equivalent.")
+
         # Student-context check for student-aware intents
         if intent in _STUDENT_REQUIRED_INTENTS:
             if base_context is None:
                 return _err(sq_index, intent, "student_not_found", None,
                             "Student context is unavailable for this query.")
             ctx = effective_context if effective_context is not None else base_context
+            _ctx_mode = "base_context" if intent == "run_graduation_audit" else "effective_context"
+        elif (intent in _CONDITIONAL_STUDENT_INTENTS
+              and sq.student_referential_fallback
+              and base_context is not None):
+            ctx = effective_context if effective_context is not None else base_context
+            _ctx_mode = "conditional_effective_context"
         else:
             ctx = None
+            _ctx_mode = "none"
+
+        logger.debug(
+            "Orchestrator.sq_context index=%d intent=%s context_mode=%s "
+            "referential_fallback=%s assumptions_active=%s",
+            sq_index, intent, _ctx_mode, sq.student_referential_fallback, has_active_assumptions,
+        )
 
         # Dispatch
         if intent == "plan_semester":
@@ -322,7 +398,7 @@ class Orchestrator:
         if intent == "policy_query":
             return self._exec_policy(sq_index, sq)
         if intent == "get_student_record":
-            return self._exec_student_record(sq_index, sq, ctx, rule_bundles, has_active_assumptions)
+            return self._exec_student_record(sq_index, sq, ctx, rule_bundles, has_active_assumptions, had_clear)
 
         return _err(sq_index, intent, "validation_failed", "result_shape",
                     f"Unrecognised intent: {intent!r}")
@@ -338,6 +414,10 @@ class Orchestrator:
                 "message": "You have already graduated. Semester planning is not applicable.",
             })
 
+        # Early unsupported-track gate: block before field validation when no explicit track provided
+        if not sq.params.get("target_track") and not sq.entities.track_id and _is_unsupported_track(ctx):
+            return _unsupported_track_result(sq_index, intent, ctx)
+
         missing = _missing_ctx_fields(ctx, "cgpa", "cumulative_chs")
         if missing:
             return _err(sq_index, intent, "validation_failed", "field_value",
@@ -345,11 +425,39 @@ class Orchestrator:
 
         target_semester_type = sq.params.get("target_semester_type")
         if not target_semester_type:
-            if ctx.current_semester:
+            raw = sq.params.get("target_semester") or sq.params.get("target_semester_text")
+            if raw:
+                parts = str(raw).strip().split()
+                if parts and parts[0] in ("Fall", "Spring", "Summer"):
+                    target_semester_type = parts[0]
+                    logger.debug(
+                        "Orchestrator.semester_resolved intent=%s method=explicit raw=%.80s resolved=%s",
+                        intent, repr(raw), target_semester_type,
+                    )
+                else:
+                    resolved = resolve_relative_semester_text(str(raw), ctx.current_semester or "")
+                    if resolved:
+                        target_semester_type = resolved[0]
+                        logger.debug(
+                            "Orchestrator.semester_resolved intent=%s method=relative raw=%.80s resolved=%s",
+                            intent, repr(raw), target_semester_type,
+                        )
+                    else:
+                        logger.warning(
+                            "Orchestrator.semester_resolution_failed intent=%s raw=%.80s",
+                            intent, repr(raw),
+                        )
+                        return _err(sq_index, intent, "validation_failed", "field_value",
+                                    f"Cannot parse target semester: {raw!r}. "
+                                    f"Expected 'Fall YYYY' or a relative phrase like '3 Falls from now'.")
+            elif ctx.current_semester:
                 nxt = get_next_semester(ctx.current_semester)
                 target_semester_type = nxt.split()[0]
             else:
                 target_semester_type = "Fall"
+        if target_semester_type not in ("Fall", "Spring", "Summer"):
+            return _err(sq_index, intent, "validation_failed", "field_value",
+                        f"Invalid target_semester_type: {target_semester_type!r}. Expected Fall, Spring, or Summer.")
 
         required_bundles = ["credit_limit_rules", "graduation_requirement_rules"]
         if target_semester_type.lower() == "summer":
@@ -359,7 +467,15 @@ class Orchestrator:
             return _err(sq_index, intent, "engine_error", "ale_adapter",
                         f"Missing rule bundles: {missing_b}")
 
-        track_id = sq.params.get("target_track") or ctx.track_id
+        # Track resolution priority: explicit param → explicit entity → student track
+        track_id = sq.params.get("target_track") or sq.entities.track_id or ctx.track_id
+        if not track_id:
+            if _is_unsupported_track(ctx):
+                return _unsupported_track_result(sq_index, intent, ctx)
+            return _err(sq_index, intent, "validation_failed", "field_value",
+                        "No academic track available for semester planning.")
+        if not sq.params.get("target_track") and not sq.entities.track_id and _is_unsupported_track(ctx):
+            return _unsupported_track_result(sq_index, intent, ctx)
         kg_data, kg_err = self._get_courses_by_track(track_id, caches)
         if kg_err:
             return kg_err._replace(sq_index=sq_index, intent=intent) if hasattr(kg_err, '_replace') else _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
@@ -368,7 +484,7 @@ class Orchestrator:
 
         params = {
             "target_semester_type": target_semester_type,
-            "target_track": sq.params.get("target_track"),
+            "target_track": track_id,  # resolved: params → entities.track_id → ctx.track_id
             "target_credit_load": sq.params.get("target_credit_load"),
             "max_credits_mode": sq.params.get("max_credits_mode", False),
         }
@@ -392,6 +508,10 @@ class Orchestrator:
                 "status": "already_graduated",
                 "message": "You have already graduated. There is no remaining roadmap to generate.",
             })
+
+        # Early unsupported-track gate: block before field validation when no explicit track provided
+        if not sq.params.get("target_track") and not sq.entities.track_id and _is_unsupported_track(ctx):
+            return _unsupported_track_result(sq_index, intent, ctx)
 
         missing = _missing_ctx_fields(ctx, "cgpa", "cumulative_chs", "cumulative_cps")
         if missing:
@@ -418,25 +538,79 @@ class Orchestrator:
             target_semester_type = nxt.split()[0]
             starting_year = int(nxt.split()[1])
 
-        track_id = sq.params.get("target_track") or ctx.track_id
+        # Track resolution priority: explicit param → explicit entity → student track
+        track_id = sq.params.get("target_track") or sq.entities.track_id or ctx.track_id
+        if not track_id:
+            if _is_unsupported_track(ctx):
+                return _unsupported_track_result(sq_index, intent, ctx)
+            return _err(sq_index, intent, "validation_failed", "field_value",
+                        "No academic track available for roadmap generation.")
+        if not sq.params.get("target_track") and not sq.entities.track_id and _is_unsupported_track(ctx):
+            return _unsupported_track_result(sq_index, intent, ctx)
         kg_data, kg_err = self._get_courses_by_track(track_id, caches)
         if kg_err:
             return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
         if "error" in kg_data:
             return _info(sq_index, intent, kg_data)
 
+        required_zero_credit_courses = [
+            c["course_code"]
+            for c in kg_data.get("courses", [])
+            if c.get("credits") == 0
+        ]
+
+        # Target-semester mode: parse explicit target like "Fall 2027" or "3 Falls from now"
+        target_end_semester_type: Optional[str] = None
+        target_end_year: Optional[int] = None
+        raw_target_semester = sq.params.get("target_semester") or sq.params.get("target_semester_text")
+        if raw_target_semester:
+            parts = str(raw_target_semester).strip().split()
+            if len(parts) == 2 and parts[0] in ("Fall", "Spring", "Summer"):
+                try:
+                    target_end_semester_type = parts[0]
+                    target_end_year = int(parts[1])
+                    logger.debug(
+                        "Orchestrator.semester_resolved intent=%s method=explicit raw=%.80s resolved=%s %d",
+                        intent, repr(raw_target_semester), target_end_semester_type, target_end_year,
+                    )
+                except (ValueError, IndexError):
+                    return _err(sq_index, intent, "validation_failed", "field_value",
+                                f"Cannot parse target semester: {raw_target_semester!r}")
+            else:
+                resolved = resolve_relative_semester_text(
+                    str(raw_target_semester), ctx.current_semester or ""
+                )
+                if resolved:
+                    target_end_semester_type, target_end_year = resolved
+                    logger.debug(
+                        "Orchestrator.semester_resolved intent=%s method=relative raw=%.80s resolved=%s %d",
+                        intent, repr(raw_target_semester), target_end_semester_type, target_end_year,
+                    )
+                else:
+                    logger.warning(
+                        "Orchestrator.semester_resolution_failed intent=%s raw=%.80s",
+                        intent, repr(raw_target_semester),
+                    )
+                    return _err(sq_index, intent, "validation_failed", "field_value",
+                                f"Cannot parse target semester: {raw_target_semester!r}")
+
         params = {
             "target_semester_type": target_semester_type,
             "starting_year": starting_year,
-            "target_track": sq.params.get("target_track"),
+            "target_track": track_id,  # resolved: params → entities.track_id → ctx.track_id
             "accelerated_mode": sq.params.get("accelerated_mode", False),
             "max_credits_mode": sq.params.get("max_credits_mode", False),
             "target_credit_load": sq.params.get("target_credit_load"),
             "assumed_grade_per_pass": sq.params.get("assumed_grade_per_pass"),
+            "target_end_semester_type": target_end_semester_type,
+            "target_end_year": target_end_year,
         }
 
         ale_result = self._ale.call("generate_graduation_roadmap", ctx, bundles,
-                                    {"available_courses": kg_data.get("courses", [])}, params)
+                                    {
+                                        "available_courses": kg_data.get("courses", []),
+                                        "required_zero_credit_courses": required_zero_credit_courses,
+                                    }, params)
         if ale_result.get("status") == "error":
             return _err(sq_index, intent, "engine_error", "ale_adapter",
                         ale_result.get("message", "ALE error."))
@@ -461,6 +635,26 @@ class Orchestrator:
             return _err(sq_index, intent, "engine_error", "ale_adapter",
                         f"Missing rule bundles: {missing_b}")
 
+        # Gate: audit requires a known track to determine required zero-credit courses
+        if not base_ctx.track_id or _is_unsupported_track(base_ctx):
+            return _unsupported_track_result(sq_index, intent, base_ctx)
+
+        # Fetch required zero-credit courses for the student's official track
+        zc_kg_data, zc_kg_err = self._get_courses_by_track(base_ctx.track_id, caches)
+        if zc_kg_err:
+            return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
+        if "error" in zc_kg_data:
+            return _info(sq_index, intent, {
+                "status": "not_applicable",
+                "reason_code": "track_curriculum_unavailable",
+                "message": "Cannot obtain required zero-credit courses for graduation audit.",
+            })
+        required_zero_credit_courses = [
+            c["course_code"]
+            for c in zc_kg_data.get("courses", [])
+            if c.get("credits") == 0
+        ]
+
         # Build course_credit_lookup from KG for transcript codes
         course_credit_lookup: dict[str, int] = {}
         unique_codes = list({r.course_code for r in base_ctx.course_history})
@@ -475,7 +669,10 @@ class Orchestrator:
 
         ale_result = self._ale.call(
             "run_graduation_audit", base_ctx, bundles,
-            {"course_credit_lookup": course_credit_lookup}, {},
+            {
+                "course_credit_lookup": course_credit_lookup,
+                "required_zero_credit_courses": required_zero_credit_courses,
+            }, {},
         )
         if ale_result.get("status") == "error":
             return _err(sq_index, intent, "engine_error", "ale_adapter",
@@ -597,8 +794,20 @@ class Orchestrator:
             profile = caches.course_profile_cache.get(code, {})
             if _is_kg_adapter_error(profile):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
-
-            credits = profile.get("credits") or 3
+            if "error" in profile:
+                return _info(sq_index, intent, {
+                    "status": "cannot_compute",
+                    "reason_codes": ["course_not_found"],
+                    "message": f"Course {code!r} was not found in the catalogue. Cannot simulate GPA.",
+                })
+            credits_raw = profile.get("credits")
+            if credits_raw is None:
+                return _info(sq_index, intent, {
+                    "status": "cannot_compute",
+                    "reason_codes": ["missing_course_credits"],
+                    "message": f"Credit hours for course {code!r} are unavailable. Cannot simulate GPA.",
+                })
+            credits = credits_raw
             expected_grade = expected_grades.get(code)
             # footprint = course already affected CGPA (graded); in-progress (no terminal grade) is NOT a footprint
             has_footprint = (code in ctx.failed_courses or code in ctx.completed_courses)
@@ -616,7 +825,10 @@ class Orchestrator:
                 elif code in ctx.completed_courses:
                     retake_type = "improve_retake"
                     is_retake = True
-                    improve_retake_number = ctx.retake_count.get(code, 1)
+                    # SCP retake_count tracks total non-withdrawn attempts, not the
+                    # improve-retake sequence. MVP-safe: treat as first improve retake;
+                    # precise count requires a future SCP per-course improve-retake field.
+                    improve_retake_number = 1
                     for r in reversed(ctx.course_history):
                         if r.course_code == code and r.grade:
                             old_grade = r.grade
@@ -688,15 +900,20 @@ class Orchestrator:
                 profile = caches.course_profile_cache.get(code, {})
                 if _is_kg_adapter_error(profile):
                     return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
-                credits = profile.get("credits") or 3
-                related_completed = None
-                historical_grade = None
-                if code in ctx.completed_courses or code in ctx.failed_courses:
-                    for r in reversed(ctx.course_history):
-                        if r.course_code == code and r.grade:
-                            related_completed = code
-                            historical_grade = r.grade
-                            break
+                if "error" in profile:
+                    return _info(sq_index, intent, {
+                        "status": "cannot_compute",
+                        "reason_codes": ["course_not_found"],
+                        "message": f"Course {code!r} was not found in the catalogue. Cannot solve target GPA.",
+                    })
+                credits_raw = profile.get("credits")
+                if credits_raw is None:
+                    return _info(sq_index, intent, {
+                        "status": "cannot_compute",
+                        "reason_codes": ["missing_course_credits"],
+                        "message": f"Credit hours for course {code!r} are unavailable. Cannot solve target GPA.",
+                    })
+                credits = credits_raw
                 # footprint = course already affected CGPA; in-progress (no terminal grade) is NOT a footprint
                 has_footprint = (code in ctx.failed_courses or code in ctx.completed_courses)
                 if code in ctx.failed_courses:
@@ -705,14 +922,26 @@ class Orchestrator:
                     attempt_type = "improve_retake"
                 else:
                     attempt_type = "first_attempt"
+                old_grade = None
+                if has_footprint:
+                    for r in reversed(ctx.course_history):
+                        if r.course_code == code and r.grade:
+                            old_grade = r.grade
+                            break
+                # SCP retake_count tracks total non-withdrawn attempts, not the
+                # improve-retake sequence. MVP-safe: treat as first improve retake;
+                # precise count requires a future SCP per-course improve-retake field.
+                improve_retake_number = 1 if attempt_type == "improve_retake" else None
                 planned_courses_target.append(PlannedCourseTarget(
                     course_code=code,
                     course_name=profile.get("name", code),
                     credits=credits,
                     attempt_type=attempt_type,
                     has_cgpa_footprint=has_footprint,
-                    related_completed_course=related_completed,
-                    historical_grade=historical_grade,
+                    old_grade=old_grade,
+                    improve_retake_number=improve_retake_number,
+                    related_completed_course=None,
+                    historical_grade=None,
                 ))
         else:
             planned_course_source = "already_met"
@@ -822,7 +1051,11 @@ class Orchestrator:
         if intent == "get_roles_by_track":
             track = e.track_id or (ctx.track_id if ctx else None)
             if not track:
+                if ctx and _is_unsupported_track(ctx):
+                    return _unsupported_track_result(sq_index, intent, ctx)
                 return _clarif(sq_index, intent, "Which track would you like to see roles for?")
+            if not e.track_id and ctx and _is_unsupported_track(ctx):
+                return _unsupported_track_result(sq_index, intent, ctx)
             result = self._kg.call("get_roles_by_track", {"track_id": track})
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
@@ -902,14 +1135,18 @@ class Orchestrator:
             target_id = e.role_id or e.track_id
             target_type = "role" if e.role_id else "track"
             if not target_id:
+                if ctx and _is_unsupported_track(ctx):
+                    return _unsupported_track_result(sq_index, intent, ctx)
                 target_id = ctx.track_id if ctx else None
                 target_type = "track"
             if not target_id:
                 return _clarif(sq_index, intent, "Which role or track are you focusing on?")
+            # Only pass completed courses for personalised (student-referential) queries
+            focus_completed = completed if sq.student_referential_fallback else []
             result = self._kg.call("get_focus_courses_for_target", {
                 "target_id": target_id,
                 "target_type": target_type,
-                "completed_courses": completed,
+                "completed_courses": focus_completed,
             })
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
@@ -933,7 +1170,11 @@ class Orchestrator:
         if intent == "get_track_overview":
             track = e.track_id or (ctx.track_id if ctx else None)
             if not track:
+                if ctx and _is_unsupported_track(ctx):
+                    return _unsupported_track_result(sq_index, intent, ctx)
                 return _clarif(sq_index, intent, "Which track would you like an overview of?")
+            if not e.track_id and ctx and _is_unsupported_track(ctx):
+                return _unsupported_track_result(sq_index, intent, ctx)
             result = self._kg.call("get_track_overview", {"track_id": track})
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
@@ -944,8 +1185,13 @@ class Orchestrator:
         if intent == "compare_tracks":
             track1 = e.track_id or (ctx.track_id if ctx else None)
             track2 = (sq.secondary_entities.track_id if sq.secondary_entities else None)
+            if not track1:
+                if ctx and _is_unsupported_track(ctx):
+                    return _unsupported_track_result(sq_index, intent, ctx)
             if not track1 or not track2:
                 return _clarif(sq_index, intent, "Which two tracks would you like to compare?")
+            if not e.track_id and ctx and _is_unsupported_track(ctx):
+                return _unsupported_track_result(sq_index, intent, ctx)
             if track1 == track2:
                 return _info(sq_index, intent, {
                     "error": "identical_tracks_provided",
@@ -992,17 +1238,16 @@ class Orchestrator:
             return _clarif(sq_index, intent, "Which policy are you asking about?")
 
         result = self._rag.execute(original_text)
+        result_error = result.get("error")
+        if result_error:
+            if result_error == "empty_query":
+                return _clarif(sq_index, intent, "Which policy are you asking about?")
+            return _err(sq_index, intent, "engine_error", "rag_adapter",
+                        f"RAG engine error: {result_error}")
+
         answer = result.get("answer", "")
         facts = result.get("extracted_facts", [])
         citations = result.get("citations", [])
-
-        # Detect adapter-level failure
-        if not facts and any(
-            kw in answer.lower()
-            for kw in ("unavailable", "error occurred", "cannot")
-        ):
-            return _err(sq_index, intent, "engine_error", "rag_adapter",
-                        "RAG engine unavailable.")
 
         if not facts:
             return _soft(sq_index, intent,
@@ -1019,6 +1264,7 @@ class Orchestrator:
         self, sq_index: int, sq: StructuredQuery,
         ctx: StudentContext, rule_bundles: dict,
         assumptions_active: bool,
+        had_clear: bool = False,
     ) -> PerSQResult:
         intent = "get_student_record"
 
@@ -1054,6 +1300,13 @@ class Orchestrator:
             "failed_courses": ctx.failed_courses,
             "first_semester": ctx.first_semester,
         }
+
+        if had_clear:
+            snapshot["assumptions_cleared"] = True
+            snapshot["message"] = (
+                "I cleared your what-if assumptions. "
+                "You are back to your official academic record."
+            )
 
         return _ok(sq_index, intent, snapshot,
                    override_state_active=True if assumptions_active else None)

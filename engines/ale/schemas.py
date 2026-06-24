@@ -18,7 +18,29 @@ Step 5 additions (fields not in Step 4 contract, added during algorithm design):
     - GenerateGraduationRoadmapInput.military_status
     - GenerateGraduationRoadmapInput.completed_regular_semesters
     - GenerateGraduationRoadmapInput.starting_year
+
+Audit additions (Phase 1 ALE audit — added during function-by-function audit):
+    - PlannedCourseGPA.attempt_type: str → Literal["first_attempt","failed_retake","improve_retake"]
+    - PlannedCourseTarget.attempt_type: str → same Literal
+    - CheckCourseEligibilityInput.attempt_type: str → same Literal
+    - GenerateSemesterPlanInput.target_semester_type: str → Literal["Fall","Spring","Summer"]
+    - GenerateSemesterPlanInput.student_level: str → Literal["Freshman","Sophomore","Junior","Senior"]
+    - GenerateGraduationRoadmapInput.student_level: str → same student-level Literal
+    - GenerateGraduationRoadmapInput.target_semester_type: str → same semester-type Literal
+    - GenerateGraduationRoadmapInput.target_end_semester_type: target-semester mode stop
+    - GenerateGraduationRoadmapInput.target_end_year: target-semester mode stop
+    - GenerateGraduationRoadmapInput.consecutive_warnings: warning projection input
+    - GenerateGraduationRoadmapInput.total_warnings: warning projection input
+    - GenerateGraduationRoadmapInput.warning_rules: warning projection rule bundle
+    - GenerateGraduationRoadmapInput.failed_retake_grade_cap_points: pre-resolved by adapter
+    - SolveTargetGPAInput.completed_regular_semesters: multi-semester remaining-sems calculation
+    - GenerateGraduationRoadmapOutput.target_reached_without_graduation: target-semester mode result
+    - GenerateGraduationRoadmapOutput.projected_consecutive_warnings: warning projection output
+    - GenerateGraduationRoadmapOutput.projected_total_warnings: warning projection output
+    - GenerateGraduationRoadmapOutput.warning_limit_reached_in_semester: warning projection output
 """
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -31,8 +53,9 @@ from pydantic import BaseModel, Field
 class RetakeRules(BaseModel):
     """
     Governs rules for retaking failed or passed courses.
-    Used by: check_course_eligibility, generate_semester_plan,
-             generate_graduation_roadmap, simulate_gpa_forward, solve_target_gpa
+    Used by: check_course_eligibility, simulate_gpa_forward, solve_target_gpa,
+             generate_semester_plan, generate_graduation_roadmap (failed-retake cap
+             pre-resolved from failed_first_retake_grade_cap + GradingScaleRules by ALEAdapter)
     """
     failed_first_retake_grade_cap: str = Field(
         description="Max letter grade on first retake after failure. Handbook: B"
@@ -126,7 +149,7 @@ class GraduationRequirementRules(BaseModel):
 class AcademicWarningRules(BaseModel):
     """
     Governs academic warning issuance and dismissal conditions.
-    Used by: run_graduation_audit
+    Used by: run_graduation_audit, generate_graduation_roadmap
     """
     cgpa_warning_threshold: float = Field(
         description="CGPA below this triggers academic warning (except first semester). Handbook: 2.0"
@@ -183,8 +206,9 @@ class PercentageRange(BaseModel):
 class GradingScaleRules(BaseModel):
     """
     Maps between letter grades, percentages, and grade points.
-    Used by: simulate_gpa_forward, solve_target_gpa
-    letter_to_points: maps letter grade -> grade points (None for P-grade)
+    Used by: simulate_gpa_forward, solve_target_gpa, grade_resolver (shared utility),
+             ALEAdapter (pre-resolves failed_retake_grade_cap_points for roadmap)
+    letter_to_points: maps letter grade -> grade points (None for P-grade, 0.0 for Abs)
     percentage_to_letter: ordered list of ranges, highest to lowest
     """
     letter_to_points: dict[str, float | None] = Field(
@@ -316,7 +340,7 @@ class PlannedCourseGPA(BaseModel):
     expected_grade: str | float = Field(
         description="Letter grade, percentage (>4.0), or grade points (0.0-4.0)"
     )
-    attempt_type: str = Field(
+    attempt_type: Literal["first_attempt", "failed_retake", "improve_retake"] = Field(
         description="first_attempt | failed_retake | improve_retake"
     )
     has_cgpa_footprint: bool = Field(
@@ -364,7 +388,9 @@ class PlannedCourseTarget(BaseModel):
     course_code: str
     course_name: str
     credits: int = Field(description="0 is valid — treated as gpa_neutral")
-    attempt_type: str = Field(description="first_attempt | failed_retake | improve_retake")
+    attempt_type: Literal["first_attempt", "failed_retake", "improve_retake"] = Field(
+        description="first_attempt | failed_retake | improve_retake"
+    )
     has_cgpa_footprint: bool
     old_grade: str | float | None = Field(
         default=None,
@@ -406,6 +432,11 @@ class SolveTargetGPAInput(BaseModel):
         default=18,
         description="Credits assumed per semester in projection. Orchestrator provides default of 18."
     )
+    completed_regular_semesters: int | None = Field(
+        default=None,
+        description="Count of completed Fall/Spring semesters. When provided, multi-semester projection uses "
+                    "remaining semesters: max(0, maximum_regular_semesters - completed_regular_semesters)."
+    )
     # Step 5 addition
     planned_course_source: str = Field(
         default="explicit_user_courses",
@@ -435,7 +466,9 @@ class CheckCourseEligibilityInput(BaseModel):
     )
     cumulative_passed_hours: int = Field(description="Maps from Cumulative PHs")
     current_cgpa: float = Field(description="Needed to determine which improve retake ruleset applies")
-    attempt_type: str = Field(description="first_attempt | failed_retake | improve_retake")
+    attempt_type: Literal["first_attempt", "failed_retake", "improve_retake"] = Field(
+        description="first_attempt | failed_retake | improve_retake"
+    )
     retake_rules: RetakeRules
 
 
@@ -480,7 +513,9 @@ class GenerateSemesterPlanInput(BaseModel):
     total_improve_retakes_used: int
     current_cgpa: float
     cumulative_passed_hours: int
-    student_level: str = Field(description="Freshman | Sophomore | Junior | Senior")
+    student_level: Literal["Freshman", "Sophomore", "Junior", "Senior"] = Field(
+        description="Freshman | Sophomore | Junior | Senior"
+    )
     official_track: str | None = Field(description="Assigned track or None if General track")
     incomplete_grade_flag: bool = Field(description="Whether student has unresolved Incomplete grade")
     available_courses: list[AvailableCourse] = Field(
@@ -492,7 +527,9 @@ class GenerateSemesterPlanInput(BaseModel):
         default=None,
         description="Only provided when target_semester_type = Summer"
     )
-    target_semester_type: str = Field(description="Fall | Spring | Summer")
+    target_semester_type: Literal["Fall", "Spring", "Summer"] = Field(
+        description="Fall | Spring | Summer"
+    )
     target_track: str | None = Field(
         default=None,
         description="Stated target track for unofficial track students"
@@ -514,6 +551,12 @@ class GenerateGraduationRoadmapInput(BaseModel):
         - military_status: needed for non-course blocker detection
         - completed_regular_semesters: needed for loop termination condition
         - starting_year: needed to generate semester labels e.g. 'Fall 2026'
+    Audit additions (Phase 1 ALE audit):
+        - student_level: Literal — enforces valid values at construction
+        - target_semester_type: Literal — same
+        - target_end_semester_type / target_end_year: target-semester mode
+        - consecutive_warnings / total_warnings / warning_rules: warning projection
+        - failed_retake_grade_cap_points: pre-resolved by adapter from retake_rules+grading scale
     """
     study_status: str
     completed_courses: list[str]
@@ -525,7 +568,9 @@ class GenerateGraduationRoadmapInput(BaseModel):
     gpa_counted_credits: int = Field(description="Maps from Cumulative CHs — starting GPA denominator")
     current_quality_points: float = Field(description="Maps from Cumulative CPs — starting GPA numerator")
     cumulative_passed_hours: int
-    student_level: str = Field(description="Freshman | Sophomore | Junior | Senior")
+    student_level: Literal["Freshman", "Sophomore", "Junior", "Senior"] = Field(
+        description="Freshman | Sophomore | Junior | Senior"
+    )
     official_track: str | None
     incomplete_grade_flag: bool
     zero_credit_courses_passed: bool
@@ -544,9 +589,11 @@ class GenerateGraduationRoadmapInput(BaseModel):
     graduation_rules: GraduationRequirementRules
     summer_semester_rules: SummerSemesterRules | None = Field(
         default=None,
-        description="Only provided when accelerated_mode=True"
+        description="Only provided when accelerated_mode=True or starting semester is Summer"
     )
-    target_semester_type: str = Field(description="Starting semester for first pass: Fall | Spring | Summer")
+    target_semester_type: Literal["Fall", "Spring", "Summer"] = Field(
+        description="Starting semester for first pass: Fall | Spring | Summer"
+    )
     # Step 5 addition
     starting_year: int = Field(
         description="Calendar year of first pass e.g. 2026. Orchestrator derives from academic calendar."
@@ -563,6 +610,33 @@ class GenerateGraduationRoadmapInput(BaseModel):
         description="Pre-resolved to grade points by orchestrator. Defaults to 2.6 (C+) if None."
     )
     student_level_rules: StudentLevelRules
+    # Target-semester mode — both must be provided together or both None
+    target_end_semester_type: Literal["Fall", "Spring", "Summer"] | None = Field(
+        default=None,
+        description="If provided with target_end_year, ALE stops simulation at this semester."
+    )
+    target_end_year: int | None = Field(
+        default=None,
+        description="Calendar year of the target-end semester. Must accompany target_end_semester_type."
+    )
+    # Warning projection — only active when warning_rules is provided
+    consecutive_warnings: int = Field(
+        default=0,
+        description="Current consecutive academic warning count from student record."
+    )
+    total_warnings: int = Field(
+        default=0,
+        description="Lifetime total academic warning count from student record."
+    )
+    warning_rules: AcademicWarningRules | None = Field(
+        default=None,
+        description="When provided, ALE simulates warning progression and stops at warning limit."
+    )
+    # Failed-retake grade cap — pre-resolved from retake_rules+grading_scale by adapter
+    failed_retake_grade_cap_points: float | None = Field(
+        default=None,
+        description="Max grade points for first retake after failure. Adapter resolves from RetakeRules."
+    )
 
 
 # =============================================================================
@@ -619,7 +693,7 @@ class MultiSemesterProjection(BaseModel):
 class AuditCheck(BaseModel):
     """Result of a single graduation requirement check."""
     name: str = Field(
-        description="cgpa_check | credits_check | semesters_check | military_check | zero_credit_check | warning_dismissal_check"
+        description="cgpa_check | credits_check | semesters_check | maximum_semesters_check | military_check | zero_credit_check | warning_dismissal_check"
     )
     passed: bool
     actual_value: str | float | int = Field(description="What the student currently has")
@@ -856,3 +930,21 @@ class GenerateGraduationRoadmapOutput(BaseModel):
         description="Grade points assumed per pass e.g. 2.6 for C+"
     )
     semester_plans: list[RoadmapSemester] = Field(default_factory=list)
+    # Target-semester mode result
+    target_reached_without_graduation: bool = Field(
+        default=False,
+        description="True when target-end semester was reached but graduation requirements are not met."
+    )
+    # Warning projection output — only populated when warning_rules was provided
+    projected_consecutive_warnings: int | None = Field(
+        default=None,
+        description="Projected consecutive warnings at simulation end. None when warning simulation inactive."
+    )
+    projected_total_warnings: int | None = Field(
+        default=None,
+        description="Projected total warnings at simulation end. None when warning simulation inactive."
+    )
+    warning_limit_reached_in_semester: str | None = Field(
+        default=None,
+        description="Semester label where warning limit was reached, e.g. 'Fall 2028'. None if not triggered."
+    )

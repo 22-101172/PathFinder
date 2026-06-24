@@ -106,3 +106,13 @@ class SQLiteSessionStore(SessionStore):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("DELETE FROM sessions")
         return cursor.rowcount
+
+    def delete_all_for_student(self, student_id: str) -> int:
+        """Delete all sessions belonging to student_id. Return count deleted."""
+        logger.debug("SQLiteSessionStore: deleting all sessions for student %s", student_id)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM sessions WHERE student_id = ?",
+                (student_id,),
+            )
+        return cursor.rowcount

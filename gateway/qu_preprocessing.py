@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 # ── Course Code ───────────────────────────────────────────────────────────────
 
 COURSE_CODE_RE = re.compile(r'\b([A-Z]+-?[A-Z]*\d{2,4}[A-Z]?)\b', re.IGNORECASE)
+STRICT_COURSE_CODE_RE = re.compile(r'\b(C-[A-Z]+\d{2,4}[A-Z]?)\b', re.IGNORECASE)
 
 # ── Policy Keywords ───────────────────────────────────────────────────────────
 
@@ -47,6 +48,14 @@ _OVERRIDE_KEYWORDS: frozenset[str] = frozenset({
     "hypothetically", "hypothetical", "let's say", "say i",
     "if i had", "if i had taken", "if i pass", "if i passed",
     "if i fail", "if i failed",
+})
+
+# ── Reset Keywords ────────────────────────────────────────────────────────────
+
+_RESET_KEYWORDS: frozenset[str] = frozenset({
+    "reset assumptions", "clear assumptions", "cancel what-if",
+    "back to official record", "remove what we assumed",
+    "forget the what-if scenario",
 })
 
 # ── Student-Referential Pattern ───────────────────────────────────────────────
@@ -103,6 +112,7 @@ class PreprocessResult:
     semester: str | None = None
     target_cgpa: float | None = None
     override_signal: bool = False
+    reset_signal: bool = False
     expected_grades: dict[str, str] = field(default_factory=dict)
 
 
@@ -118,6 +128,7 @@ def preprocess(user_text: str) -> PreprocessResult:
         semester=parse_semester(user_text),
         target_cgpa=parse_target_cgpa(user_text),
         override_signal=detect_override_signal(user_text),
+        reset_signal=detect_reset_signal(user_text),
         expected_grades=extract_expected_grades(user_text),
     )
 
@@ -144,6 +155,11 @@ def detect_student_referential(text: str) -> bool:
 def detect_override_signal(text: str) -> bool:
     lower = text.lower()
     return any(kw in lower for kw in _OVERRIDE_KEYWORDS)
+
+
+def detect_reset_signal(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in lower for kw in _RESET_KEYWORDS)
 
 
 def parse_semester(text: str) -> str | None:

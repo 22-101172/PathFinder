@@ -1,15 +1,25 @@
 import os
 import re
 import pickle
-from langchain_community.vectorstores import Chroma
+import logging
+from pathlib import Path
+from langchain_community.vectorstores import Chroma  # carry-forward; migrate to langchain_chroma once confirmed installed
 from langchain_huggingface import HuggingFaceEmbeddings
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
+logger = logging.getLogger(__name__)
+
+_RAG_DIR = Path(__file__).resolve().parent
 
 # ── config ──────────────────────────────────────────────────────────────────
-_HERE          = os.path.dirname(os.path.abspath(__file__))
-PERSIST_DIR    = os.path.join(_HERE, "chroma_db")
-CHUNKS_FILE    = os.path.join(_HERE, "chunks.pkl")
+# HF_TOKEN is picked up automatically by Hugging Face libraries if set in .env.
+# First startup may be slow while models are downloaded and cached locally.
+PERSIST_DIR    = os.environ.get("RAG_CHROMA_DIR",  str(_RAG_DIR / "chroma_db"))
+CHUNKS_FILE    = os.environ.get("RAG_CHUNKS_FILE", str(_RAG_DIR / "chunks.pkl"))
 EMBED_MODEL    = "BAAI/bge-small-en-v1.5"
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -25,16 +35,26 @@ class HybridRetriever:
     """
 
     def __init__(self):
-        print("Loading embedding model...")
+        logger.info("Loading embedding model (%s)...", EMBED_MODEL)
         self.embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
 
-        print("Loading ChromaDB (child chunks)...")
+        if not os.path.exists(PERSIST_DIR):
+            raise FileNotFoundError(
+                f"ChromaDB directory not found: {PERSIST_DIR!r}. "
+                "Run engines/rag/ingest.py first."
+            )
+        logger.info("Loading ChromaDB (child chunks) from %s...", PERSIST_DIR)
         self.child_db = Chroma(
             persist_directory=PERSIST_DIR,
             embedding_function=self.embeddings,
         )
 
-        print("Loading parent chunks + building BM25 index...")
+        if not os.path.exists(CHUNKS_FILE):
+            raise FileNotFoundError(
+                f"Parent chunks file not found: {CHUNKS_FILE!r}. "
+                "Run engines/rag/ingest.py first."
+            )
+        logger.info("Loading parent chunks + building BM25 index from %s...", CHUNKS_FILE)
         with open(CHUNKS_FILE, "rb") as f:
             self.parent_dict = pickle.load(f)
 
@@ -42,9 +62,9 @@ class HybridRetriever:
         bm25_corpus = [self._tokenize(d.page_content) for d in self.parent_docs_list]
         self.bm25   = BM25Okapi(bm25_corpus)
 
-        print("Loading cross-encoder reranker...")
+        logger.info("Loading cross-encoder reranker (%s)...", RERANKER_MODEL)
         self.reranker = CrossEncoder(RERANKER_MODEL)
-        print("Retriever ready.")
+        logger.info("Retriever ready.")
 
     # ── private helpers ──────────────────────────────────────────────────────
 
@@ -68,6 +88,9 @@ class HybridRetriever:
 
     def retrieve(self, query: str, k_vec: int = 20, k_bm25: int = 15,
                  k_final: int = 6, filter: dict = None) -> list:
+
+        if not query or not query.strip():
+            return []
 
         # 1. Vector search on children
         chroma_filter = None

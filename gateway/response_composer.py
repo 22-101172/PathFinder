@@ -20,13 +20,14 @@ Hard boundaries:
 LLM model chain env vars:
     COMPOSER_USE_LLM         (default: true)
     COMPOSER_PRIMARY_MODEL   (default: qwen/qwen3-32b)
-    COMPOSER_FALLBACK_MODELS (default: llama-3.1-8b-instant,llama-3.3-70b-versatile)
+    COMPOSER_FALLBACK_MODELS (default: llama-3.1-8b-instant,openai/gpt-oss-20b)
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 from gateway.llm_client import LLMClient, LLMError, LLMNotConfigured, get_llm_client
@@ -37,7 +38,89 @@ logger = logging.getLogger(__name__)
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 _DEFAULT_PRIMARY = "qwen/qwen3-32b"
-_DEFAULT_FALLBACKS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
+_DEFAULT_FALLBACKS = ["llama-3.1-8b-instant", "openai/gpt-oss-20b"]
+
+# ── Track display names ───────────────────────────────────────────────────────
+
+_TRACK_DISPLAY_MAP: dict[str, str] = {
+    "AI": "Artificial Intelligence (AI)",
+    "CYS": "Cyber Security (CYS)",
+    "DSE": "Data Science and Engineering (DSE)",
+    "SWE": "Software Engineering (SWE)",
+    "GEN": "General Program (GEN)",
+}
+
+# ── Display formatting helpers ────────────────────────────────────────────────
+
+def _fmt_course_label(code: str, name: str, credits=None) -> str:
+    """Format a course as 'Course Name (COURSE_CODE)' with optional credits."""
+    if name and code:
+        label = f"{name} ({code})"
+    else:
+        label = name or code or ""
+    if credits is not None:
+        label += f" — {credits} credits"
+    return label
+
+
+def _fmt_role_label(role_id: str, name: str = "") -> str:
+    """Prefer role name; convert RL_Foo_Bar → Foo Bar if no name available."""
+    if name:
+        return name
+    if role_id:
+        if role_id.startswith("RL_"):
+            return role_id[3:].replace("_", " ")
+        return role_id
+    return ""
+
+
+def _fmt_skill_label(skill_id: str, name: str = "") -> str:
+    """Prefer skill name; convert SK_Foo_Bar → Foo Bar if no name available."""
+    if name:
+        return name
+    if skill_id:
+        if skill_id.startswith("SK_"):
+            return skill_id[3:].replace("_", " ")
+        return skill_id
+    return ""
+
+
+def _fmt_track_label(track_id: str, name: str = "") -> str:
+    """Format track with friendly name; use map if no name available."""
+    if name:
+        return f"{name} ({track_id})" if track_id and track_id not in name else name
+    return _TRACK_DISPLAY_MAP.get(track_id, track_id or "")
+
+
+def _load_composer_timeout() -> float:
+    """Read COMPOSER_TIMEOUT_SECONDS from env; return 30.0 if missing or invalid."""
+    try:
+        return float(os.getenv("COMPOSER_TIMEOUT_SECONDS", "30"))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _duration_ms(start: float) -> int:
+    """Elapsed milliseconds since start (from time.monotonic())."""
+    return int((time.monotonic() - start) * 1000)
+
+
+def _safe_session_id(session_id: str) -> str:
+    """Return first 8 chars of session_id, or 'unknown' if empty."""
+    return (session_id or "")[:8] or "unknown"
+
+
+def _summarize_packets(packets: list[dict]) -> dict:
+    """Safe packet summary for logging — counts and intent/status labels only."""
+    return {
+        "packet_count": len(packets),
+        "intents": [p.get("intent") for p in packets],
+        "statuses": [p.get("status") for p in packets],
+        "citations_count": sum(len(p.get("citations") or []) for p in packets),
+        "assumptions_active_count": sum(1 for p in packets if p.get("notice_assumptions_active")),
+        "assumptions_excluded_count": sum(1 for p in packets if p.get("notice_assumptions_excluded")),
+        "override_active_count": sum(1 for p in packets if p.get("notice_override_active")),
+    }
 
 # ── LLM system prompt ─────────────────────────────────────────────────────────
 
@@ -79,9 +162,11 @@ according to our records. Do NOT say "you are eligible to graduate this semester
 that would be misleading since they already completed their degree.
 21. If the packet contains not_auditable=True, explain that a graduation audit cannot be run \
 because of their current study status (e.g. Transferred Out, Suspended). Be factual, not alarming.
-22. For eligibility results: if eligible=True say clearly "you are eligible"; \
-if eligible=False list the missing_prerequisites and reason clearly. \
-Show course codes and names exactly as given — do not paraphrase or shorten them.
+22. For eligibility results: check eligibility_status before the eligible boolean. \
+"in_progress" → the student is already enrolled/currently taking this course. \
+"already_completed" → the student has already passed/completed this course. \
+"retake_cap_exceeded" → the retake cap has been reached. \
+Only then use eligible=True ("you are eligible") or eligible=False (list missing prerequisites).
 23. NEVER ask the student for information. You already have everything you need in the narration \
 packet. NEVER write phrases like "please share your courses", "I'll need more details", \
 "could you provide your GPA", "please tell me your completed courses", or any similar request. \
@@ -93,15 +178,28 @@ Never make the student infer their standing from a raw number or generic policy 
 policy excerpt, apply the policy to their specific CGPA and state a single concrete number \
 (e.g. "With your CGPA of 1.91 you can register up to 15 credit hours"). \
 Do not just restate the full policy table.
+26. Display courses as "Course Name (COURSE_CODE)", never "COURSE_CODE — Course Name". \
+For example: "Advanced Programming (C-CS219)", not "C-CS219 — Advanced Programming".
+27. Never expose raw role IDs (RL_*) or skill IDs (SK_*) in your answer. \
+Convert them: RL_Data_Scientist → "Data Scientist", SK_Machine_Learning → "Machine Learning". \
+Display tracks as "Artificial Intelligence (AI)", "Cyber Security (CYS)", \
+"Data Science and Engineering (DSE)", "Software Engineering (SWE)", or "General Program (GEN)". \
+Phrase alignment scores as curriculum-skill alignment, not employability guarantees. \
+Phrase roles by track as related/connected roles, not guaranteed jobs. \
+Do not narrate focus/gap courses as registration plans.
+28. When what-if assumptions are cleared, say exactly: \
+"I cleared your what-if assumptions. You are back to your official academic record." \
+Never write "Your academic record has been updated" or anything implying registrar data changed.
 """
 
 # ── Narration packet — per-PerSQResult extraction ─────────────────────────────
 
 def _safe_code_name(data: dict, code_key: str, name_key: str) -> str:
+    """Format as 'Name (Code)' — name-first display."""
     code = data.get(code_key)
     name = data.get(name_key)
     if code and name:
-        return f"{code} — {name}"
+        return f"{name} ({code})"
     return str(code or name or "")
 
 
@@ -208,6 +306,11 @@ def _extract_packet(result: PerSQResult) -> dict:
 
 # ── Intent-specific extractors ────────────────────────────────────────────────
 
+_ELIGIBILITY_STATUSES = frozenset({
+    "eligible", "not_eligible", "already_completed", "in_progress", "retake_cap_exceeded",
+})
+
+
 def _extract_eligibility(packet: dict, data: dict) -> None:
     for k in (
         "eligible", "eligibility_status", "reason", "reason_code",
@@ -216,16 +319,18 @@ def _extract_eligibility(packet: dict, data: dict) -> None:
         "warnings", "cannot_compute",
         "completed_prerequisites", "retake_count_for_course", "max_retake_cap",
         "credit_threshold_required", "credit_threshold_met",
+        # course name fields for display
+        "target_course_name", "course_name", "name",
     ):
         if k in data:
             packet[k] = data[k]
-    # ALE returns status: "eligible"/"not_eligible" instead of eligible: bool
+    # Map ALE "status" field to eligibility_status whenever it's a recognized value
     ale_status = data.get("status")
-    if "eligible" not in packet and ale_status in ("eligible", "not_eligible",
-                                                     "already_completed", "in_progress",
-                                                     "retake_cap_exceeded"):
-        packet["eligible"] = (ale_status == "eligible")
-        packet["eligibility_status"] = ale_status
+    if ale_status in _ELIGIBILITY_STATUSES:
+        if "eligibility_status" not in packet:
+            packet["eligibility_status"] = ale_status
+        if "eligible" not in packet:
+            packet["eligible"] = (ale_status == "eligible")
 
 
 def _extract_gpa(packet: dict, data: dict) -> None:
@@ -326,9 +431,10 @@ def _extract_plan(packet: dict, data: dict) -> None:
                 name = c.get("course_name", "")
                 cred = c.get("credits")
                 retake = c.get("is_retake", False)
-                label = f"{code} — {name}" if code and name else (code or name)
+                # Name-first: "Course Name (COURSE_CODE) — N credits"
+                label = _fmt_course_label(code, name)
                 if cred:
-                    label += f" ({cred} cr)"
+                    label += f" — {cred} credits"
                 if retake:
                     label += " [retake]"
                 flat_courses.append(label)
@@ -371,7 +477,7 @@ def _extract_skills_taught(packet: dict, data: dict) -> None:
 
 
 def _extract_courses_by_skill(packet: dict, data: dict) -> None:
-    for k in ("skill_id", "courses", "error"):
+    for k in ("skill_id", "skill_name", "courses", "error"):
         if k in data:
             val = data[k]
             if isinstance(val, list):
@@ -389,7 +495,7 @@ def _extract_role_profile(packet: dict, data: dict) -> None:
 
 
 def _extract_roles_by_track(packet: dict, data: dict) -> None:
-    for k in ("track_id", "roles", "error"):
+    for k in ("track_id", "track_name", "roles", "error"):
         if k in data:
             val = data[k]
             if isinstance(val, list):
@@ -443,6 +549,7 @@ def _extract_student_record(packet: dict, data: dict) -> None:
         "study_status", "total_credit_hours_earned",
         "current_semester", "consecutive_warnings", "total_warnings",
         "completed_courses", "in_progress_courses", "failed_courses",
+        "assumptions_cleared", "message",
     ):
         if k in data:
             val = data[k]
@@ -452,6 +559,39 @@ def _extract_student_record(packet: dict, data: dict) -> None:
 
 
 # ── Deterministic fallback narration ─────────────────────────────────────────
+
+def _personalize_credit_limit(packets: list[dict]) -> Optional[str]:
+    """
+    If packets include a student CGPA (from get_student_record) and a policy
+    packet clearly about credit limits, return a single personalized sentence.
+    """
+    cgpa: Optional[float] = None
+    is_credit_limit_query = False
+    for p in packets:
+        if p.get("intent") == "get_student_record" and p.get("cgpa") is not None:
+            cgpa = p["cgpa"]
+        if p.get("intent") == "policy_query":
+            answer = (p.get("answer") or "").lower()
+            facts_text = " ".join(str(f) for f in (p.get("extracted_facts") or [])).lower()
+            combined = answer + " " + facts_text
+            credit_terms = ("credit hour", "credit limit", "maximum credit", "max credit", "credit cap")
+            if any(t in combined for t in credit_terms):
+                is_credit_limit_query = True
+    if cgpa is None or not is_credit_limit_query:
+        return None
+    if cgpa > 3.0:
+        max_ch = 21
+    elif cgpa >= 2.0:
+        max_ch = 18
+    elif cgpa >= 1.0:
+        max_ch = 15
+    else:
+        max_ch = 12
+    return (
+        f"Based on your CGPA of {cgpa:.2f}, "
+        f"you can register up to {max_ch} credit hours this semester."
+    )
+
 
 def _deterministic_answer(packets: list[dict]) -> str:
     """Build a plain-text answer from narration packets without any LLM call."""
@@ -499,6 +639,11 @@ def _deterministic_answer(packets: list[dict]) -> str:
         if lines:
             parts.append("\n".join(lines))
 
+    # Credit-limit personalisation: only when student record + credit policy are both present
+    credit_note = _personalize_credit_limit(packets)
+    if credit_note:
+        parts.append(credit_note)
+
     citations_block = _citations_text_from_packets(packets)
     if citations_block:
         parts.append(citations_block)
@@ -513,15 +658,31 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
 
     if intent == "check_course_eligibility":
         code = p.get("target_course_code", "the course")
+        # Prefer an explicit course name field; fall back to bare code
+        course_name = (
+            p.get("target_course_name") or p.get("course_name") or p.get("name", "")
+        )
+        course_label = _fmt_course_label(code, course_name) if course_name else code
+        eligibility_status = p.get("eligibility_status", "")
         eligible = p.get("eligible")
         reason = p.get("reason") or p.get("reason_code", "")
         missing = p.get("missing_prerequisites") or []
         attempt = p.get("attempt_type", "")
-        if eligible is True:
+
+        if eligibility_status == "in_progress":
+            lines.append(f"You are already enrolled in / currently taking {course_label}.")
+        elif eligibility_status == "already_completed":
+            lines.append(f"You have already completed and passed {course_label}.")
+        elif eligibility_status == "retake_cap_exceeded":
+            retake_msg = p.get("message") or p.get("reason") or ""
+            lines.append(f"You have reached the retake cap for {course_label}.")
+            if retake_msg and retake_msg not in lines[-1]:
+                lines.append(retake_msg)
+        elif eligible is True:
             suffix = f" ({attempt.replace('_', ' ')})" if attempt else ""
-            lines.append(f"You are eligible to take {code}{suffix}.")
+            lines.append(f"You are eligible to take {course_label}{suffix}.")
         elif eligible is False:
-            lines.append(f"You are not currently eligible to take {code}.")
+            lines.append(f"You are not currently eligible to take {course_label}.")
             if reason:
                 lines.append(f"Reason: {reason}")
             if missing:
@@ -529,12 +690,12 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                 for m in missing:
                     if isinstance(m, dict):
                         c, n = m.get("course_code", ""), m.get("name", "")
-                        label = f"{c} — {n}" if c and n and n != c else (c or str(m))
+                        label = _fmt_course_label(c, n) if n else (c or str(m))
                     else:
                         label = str(m)
                     lines.append(f"  • {label}")
         else:
-            lines.append(p.get("message") or f"Eligibility result for {code} is available.")
+            lines.append(p.get("message") or f"Eligibility result for {course_label} is available.")
         for w in (p.get("warnings") or []):
             lines.append(f"Warning: {w}")
 
@@ -561,7 +722,6 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                 lines.append(f"Projected CGPA: {proj:.2f}{change}")
             if target is not None:
                 lines.append(f"Target CGPA: {target:.2f}")
-            # solve_target_gpa fields
             req_letter = p.get("required_average_letter")
             if req_letter:
                 lines.append(f"Required average grade: {req_letter}")
@@ -569,7 +729,6 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                 lines.append(f"Estimated credits needed: {p['credits_needed']}")
             if "semesters_needed" in p:
                 lines.append(f"Estimated semesters needed: {p['semesters_needed']}")
-            # per-course breakdown for simulate_gpa_forward
             breakdown = p.get("per_course_breakdown") or []
             if breakdown:
                 lines.append("Per-course breakdown:")
@@ -589,7 +748,6 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             lines.append(f"Warning: {w}")
 
     elif intent == "run_graduation_audit":
-        # Already graduated — short-circuit, no gaps to show
         if p.get("already_graduated"):
             lines.append("Our records show you have already graduated.")
             cgpa = p.get("cgpa")
@@ -599,7 +757,6 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             if honors and honors not in ("not_eligible", ""):
                 lines.append(f"Honors: {honors}")
             return
-        # Not auditable (Transferred Out, Suspended, Frozen)
         if p.get("not_auditable"):
             reason = (p.get("not_auditable_reason") or "")
             reason = reason.replace("study_status_", "").replace("_", " ").title()
@@ -607,7 +764,6 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             if reason:
                 lines.append(f"Study status: {reason}.")
             return
-        # Normal audit
         can_grad = p.get("can_graduate")
         if can_grad is True:
             lines.append("You are eligible to graduate.")
@@ -649,7 +805,6 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             proj_grad = p.get("projected_graduation_semester")
             if proj_grad:
                 lines.append(f"Projected graduation: {proj_grad}")
-            # Graduation roadmap: semester_plans (list of RoadmapSemester dicts)
             semester_plans = p.get("semester_plans") or []
             roadmap = p.get("roadmap") or p.get("semesters") or []
             planned = p.get("planned_courses") or p.get("recommended_courses") or []
@@ -668,9 +823,10 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                                 cc = c.get("course_code", "")
                                 cn = c.get("course_name", "")
                                 cr = c.get("credits")
-                                cl = f"{cc} — {cn}" if cc and cn else (cc or cn)
+                                # Name-first: "Course Name (CODE) — N credits"
+                                cl = _fmt_course_label(cc, cn)
                                 if cr:
-                                    cl += f" ({cr} cr)"
+                                    cl += f" — {cr} credits"
                                 course_labels.append(cl)
                             else:
                                 course_labels.append(str(c))
@@ -707,7 +863,8 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
     elif intent == "get_course_info":
         code = p.get("course_code", "")
         name = p.get("name", "")
-        label = f"{code} — {name}" if code and name else (code or name)
+        # Name-first: "Course Name (CODE)"
+        label = _fmt_course_label(code, name) if (code and name) else (name or code)
         if label:
             lines.append(label)
         credits = p.get("credits")
@@ -738,26 +895,35 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
         if skills:
             lines.append(f"Skills taught in {code}:")
             for s in skills[:15]:
-                skill_name = s.get("name", s) if isinstance(s, dict) else s
+                if isinstance(s, dict):
+                    skill_name = _fmt_skill_label(s.get("skill_id", ""), s.get("name", ""))
+                else:
+                    skill_name = _fmt_skill_label(str(s))
                 lines.append(f"  • {skill_name}")
         else:
             lines.append(f"No skill data found for {code}.")
 
     elif intent == "search_courses_by_skill":
-        skill = p.get("skill_id", "that skill")
+        raw_skill_id = p.get("skill_id", "")
+        skill_name = p.get("skill_name", "")
+        # Prefer explicit name; fall back to cleaned-up ID
+        skill_display = _fmt_skill_label(raw_skill_id, skill_name) if raw_skill_id else skill_name
+        if not skill_display:
+            skill_display = "that skill"
         courses = p.get("courses") or []
         if courses:
-            lines.append(f"Courses covering {skill}:")
+            lines.append(f"Courses covering {skill_display}:")
             for c in courses[:15]:
                 label = _safe_code_name(c, "course_code", "name") if isinstance(c, dict) else str(c)
                 lines.append(f"  • {label}")
         else:
-            lines.append(f"No courses found for skill: {skill}.")
+            lines.append(f"No courses found for skill: {skill_display}.")
 
     elif intent == "get_role_profile":
         role_id = p.get("role_id", "")
         name = p.get("name", "")
-        label = f"{role_id} — {name}" if role_id and name else (name or role_id)
+        # Prefer name; clean up raw RL_* ID
+        label = _fmt_role_label(role_id, name)
         if label:
             lines.append(label)
         desc = p.get("description", "")
@@ -767,46 +933,63 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
         if skills:
             lines.append("Required skills:")
             for s in skills[:15]:
-                skill_name = s.get("name", s) if isinstance(s, dict) else s
-                lines.append(f"  • {skill_name}")
+                if isinstance(s, dict):
+                    skill_label = _fmt_skill_label(s.get("skill_id", ""), s.get("name", ""))
+                else:
+                    skill_label = _fmt_skill_label(str(s))
+                lines.append(f"  • {skill_label}")
 
     elif intent == "get_roles_by_track":
-        track = p.get("track_id", "your track")
+        track_id = p.get("track_id", "")
+        track_name = p.get("track_name", "")
+        track_display = _fmt_track_label(track_id, track_name) if track_id else (track_name or "your track")
         roles = p.get("roles") or []
         if roles:
-            lines.append(f"Roles associated with {track}:")
+            lines.append(f"Roles connected to the {track_display} track:")
             for r in roles[:15]:
-                label = _safe_code_name(r, "role_id", "name") if isinstance(r, dict) else str(r)
+                if isinstance(r, dict):
+                    label = _fmt_role_label(r.get("role_id", ""), r.get("name", ""))
+                else:
+                    label = _fmt_role_label(str(r))
                 lines.append(f"  • {label}")
         else:
-            lines.append(f"No roles found for track: {track}.")
+            lines.append(f"No roles found for track: {track_display}.")
 
     elif intent == "compute_skill_gap":
-        role = p.get("role_id") or p.get("role_name") or "the target role"
+        role_name = p.get("role_name", "")
+        role_id = p.get("role_id", "")
+        role_display = _fmt_role_label(role_id, role_name) or "the target role"
         missing = p.get("missing_skills") or []
         covered = p.get("covered_skills") or []
         gap_count = p.get("skill_gap_count")
-        lines.append(f"Skill gap analysis for {role}:")
+        lines.append(f"Curriculum-skill gap analysis for {role_display}:")
         if gap_count is not None:
             lines.append(f"  Missing skills: {gap_count}")
         elif missing:
             lines.append(f"  Missing skills ({len(missing)}):")
             for s in missing[:10]:
-                skill_name = s.get("name", s) if isinstance(s, dict) else s
-                lines.append(f"    • {skill_name}")
+                if isinstance(s, dict):
+                    skill_label = _fmt_skill_label(s.get("skill_id", ""), s.get("name", ""))
+                else:
+                    skill_label = _fmt_skill_label(str(s))
+                lines.append(f"    • {skill_label}")
         if covered:
             lines.append(f"  Skills already covered: {len(covered)}")
 
     elif intent == "compute_alignment_score":
-        role = p.get("role_id") or p.get("role_name") or "the target role"
+        role_name = p.get("role_name", "")
+        role_id = p.get("role_id", "")
+        role_display = _fmt_role_label(role_id, role_name) or "the target role"
         score = p.get("alignment_score")
         score_str = f"{score:.0%}" if isinstance(score, (int, float)) else "N/A"
-        lines.append(f"Your alignment with {role}: {score_str}")
+        lines.append(f"Your curriculum alignment with {role_display}: {score_str}")
 
     elif intent == "recommend_courses_to_close_gap":
-        role = p.get("role_id") or p.get("role_name") or "the target role"
+        role_name = p.get("role_name", "")
+        role_id = p.get("role_id", "")
+        role_display = _fmt_role_label(role_id, role_name) or "the target role"
         courses = p.get("recommended_courses") or []
-        lines.append(f"Courses to close the skill gap for {role}:")
+        lines.append(f"Courses to strengthen your skill coverage for {role_display}:")
         for c in courses[:15]:
             label = _safe_code_name(c, "course_code", "name") if isinstance(c, dict) else str(c)
             lines.append(f"  • {label}")
@@ -817,9 +1000,9 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             lines.append("Best matching roles based on your completed courses:")
             for i, r in enumerate(roles[:10], 1):
                 if isinstance(r, dict):
-                    label = _safe_code_name(r, "role_id", "name")
+                    label = _fmt_role_label(r.get("role_id", ""), r.get("name", ""))
                     score = r.get("alignment_score")
-                    suffix = f" ({score:.0%})" if isinstance(score, (int, float)) else ""
+                    suffix = f" ({score:.0%} curriculum alignment)" if isinstance(score, (int, float)) else ""
                     lines.append(f"  {i}. {label}{suffix}")
                 else:
                     lines.append(f"  {i}. {r}")
@@ -827,19 +1010,29 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             lines.append("No matching roles found for your completed courses.")
 
     elif intent == "estimate_alignment_improvement":
-        role = p.get("role_id") or p.get("role_name") or "the target role"
+        role_name = p.get("role_name", "")
+        role_id = p.get("role_id", "")
+        role_display = _fmt_role_label(role_id, role_name) or "the target role"
         curr = p.get("current_alignment")
         new = p.get("new_alignment") or p.get("projected_improvement")
         if isinstance(curr, (int, float)) and isinstance(new, (int, float)):
-            lines.append(f"Alignment with {role}: {curr:.0%} → {new:.0%}")
+            lines.append(f"Curriculum alignment with {role_display}: {curr:.0%} → {new:.0%}")
         else:
-            lines.append(p.get("message") or f"Alignment improvement estimate for {role} is ready.")
+            lines.append(p.get("message") or f"Alignment improvement estimate for {role_display} is ready.")
 
     elif intent == "get_focus_courses_for_target":
-        target = p.get("role_id") or p.get("track_id") or "your target"
+        role_name = p.get("role_name", "")
+        role_id = p.get("role_id", "")
+        track_id = p.get("track_id", "")
+        if role_id or role_name:
+            target = _fmt_role_label(role_id, role_name)
+        elif track_id:
+            target = _fmt_track_label(track_id)
+        else:
+            target = "your target"
         courses = p.get("focus_courses") or p.get("recommended_courses") or []
         if courses:
-            lines.append(f"Focus courses for {target}:")
+            lines.append(f"Courses to focus on for {target}:")
             for c in courses[:15]:
                 label = _safe_code_name(c, "course_code", "name") if isinstance(c, dict) else str(c)
                 lines.append(f"  • {label}")
@@ -847,9 +1040,9 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             lines.append(f"No focus courses found for {target}.")
 
     elif intent == "get_track_overview":
-        track = p.get("track_id", "")
+        track_id = p.get("track_id", "")
         name = p.get("name", "")
-        label = f"{track} — {name}" if track and name else (name or track)
+        label = _fmt_track_label(track_id, name) if (track_id or name) else ""
         if label:
             lines.append(label)
         desc = p.get("description", "")
@@ -863,8 +1056,12 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                 lines.append(f"  • {cl}")
 
     elif intent == "compare_tracks":
-        t1 = p.get("track_id_1") or p.get("track_1_name") or "Track 1"
-        t2 = p.get("track_id_2") or p.get("track_2_name") or "Track 2"
+        t1_id = p.get("track_id_1", "")
+        t1_name = p.get("track_1_name", "")
+        t2_id = p.get("track_id_2", "")
+        t2_name = p.get("track_2_name", "")
+        t1 = _fmt_track_label(t1_id, t1_name) if (t1_id or t1_name) else "Track 1"
+        t2 = _fmt_track_label(t2_id, t2_name) if (t2_id or t2_name) else "Track 2"
         shared = p.get("shared_courses") or []
         diff = p.get("different_courses") or {}
         lines.append(f"Comparing {t1} and {t2}:")
@@ -873,7 +1070,8 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
         if isinstance(diff, dict):
             for tk, courses in diff.items():
                 if isinstance(courses, list) and courses:
-                    lines.append(f"  Unique to {tk}: {len(courses)} course(s)")
+                    tk_display = _fmt_track_label(tk)
+                    lines.append(f"  Unique to {tk_display}: {len(courses)} course(s)")
         elif isinstance(diff, list) and diff:
             lines.append(f"  Different courses: {len(diff)}")
 
@@ -882,10 +1080,15 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
         if isinstance(rec, list):
             lines.append("Recommended tracks (ranked):")
             for t in rec[:5]:
-                label = _safe_code_name(t, "track_id", "name") if isinstance(t, dict) else str(t)
+                if isinstance(t, dict):
+                    tid = t.get("track_id", "")
+                    tname = t.get("name", "")
+                    label = _fmt_track_label(tid, tname)
+                else:
+                    label = _fmt_track_label(str(t))
                 lines.append(f"  • {label}")
         elif rec:
-            lines.append(f"Recommended track: {rec}")
+            lines.append(f"Recommended track: {_fmt_track_label(str(rec))}")
         else:
             lines.append("No track recommendation available.")
 
@@ -903,27 +1106,34 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             lines.append("No policy information found for your question.")
 
     elif intent == "get_student_record":
+        if p.get("assumptions_cleared"):
+            lines.append(
+                p.get("message")
+                or "I cleared your what-if assumptions. You are back to your official academic record."
+            )
+            # fall through to show the refreshed record below
+
         cgpa = p.get("cgpa")
-        track = p.get("track_id", "")
+        track_id = p.get("track_id", "")
         level = p.get("level")
         standing = p.get("academic_standing", "")
         chs = p.get("total_credit_hours_earned")
         completed = p.get("completed_courses") or []
         in_progress = p.get("in_progress_courses") or []
         failed = p.get("failed_courses") or []
-        parts: list[str] = []
-        if track:
-            parts.append(f"Track: {track}")
+        record_parts: list[str] = []
+        if track_id:
+            record_parts.append(f"Track: {_fmt_track_label(track_id)}")
         if level is not None:
-            parts.append(f"Level: {level}")
+            record_parts.append(f"Level: {level}")
         if cgpa is not None:
-            parts.append(f"CGPA: {cgpa:.2f}")
+            record_parts.append(f"CGPA: {cgpa:.2f}")
         if standing:
-            parts.append(f"Standing: {standing}")
+            record_parts.append(f"Standing: {standing}")
         if chs is not None:
-            parts.append(f"Credit hours earned: {chs}")
-        if parts:
-            lines.append(" | ".join(parts))
+            record_parts.append(f"Credit hours earned: {chs}")
+        if record_parts:
+            lines.append(" | ".join(record_parts))
         if completed:
             lines.append(f"Completed: {len(completed)} course(s)")
         if in_progress:
@@ -992,8 +1202,6 @@ def _is_off_script(answer: str) -> bool:
 def _strip_fabricated_sources(text: str) -> str:
     """Remove trailing Sources/References section when LLM adds it without real citations."""
     import re
-    # Matches 'Sources:', '**Sources:**', 'References:', etc. as a trailing section
-    # \n+ handles 1 or 2+ blank lines; [ \t]* handles indent; .* with DOTALL eats to end
     text = re.sub(
         r"\n+[ \t]*\*{0,2}(?:Sources?|References?)\*{0,2}:.*",
         "",
@@ -1008,8 +1216,11 @@ def _try_llm_chain(
     user_msg: str,
     primary: str,
     fallbacks: list[str],
-) -> Optional[str]:
-    """Try primary then fallback models. Return answer text or None on all failures."""
+    timeout_seconds: float,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Try primary then fallback models. Returns (answer, model_used, failure_reason)."""
+    had_error = False
+    had_empty = False
     for model in [primary] + fallbacks:
         try:
             answer = llm.chat(
@@ -1017,19 +1228,31 @@ def _try_llm_chain(
                 user=user_msg,
                 temperature=0.25,
                 model=model,
+                timeout_seconds=timeout_seconds,
             )
             answer = _strip_think_tags(answer or "")
             if answer:
-                logger.info("Composer LLM: model=%s answered (%d chars)", model, len(answer))
-                return answer
-            logger.warning("Composer LLM: model=%s returned empty, trying next.", model)
+                logger.info(
+                    "Composer LLM: model=%s result=success answer_len=%d",
+                    model, len(answer),
+                )
+                return answer, model, None
+            logger.warning("Composer LLM: model=%s result=empty trying_next", model)
+            had_empty = True
         except LLMNotConfigured:
-            logger.info("Composer LLM: not configured — skipping LLM path.")
-            return None
+            logger.info("Composer LLM: result=not_configured — skipping LLM path.")
+            return None, None, "llm_not_configured"
         except LLMError as exc:
-            logger.warning("Composer LLM: model=%s failed (%s) — trying next.", model, exc)
-    logger.warning("Composer LLM: all models failed — using deterministic fallback.")
-    return None
+            logger.warning(
+                "Composer LLM: model=%s result=failed error=%s trying_next",
+                model, type(exc).__name__,
+            )
+            had_error = True
+    failure_reason = "all_models_failed" if had_error else "empty_response"
+    logger.warning(
+        "Composer LLM: failure_reason=%s — using deterministic fallback.", failure_reason,
+    )
+    return None, None, failure_reason
 
 
 # ── Citation collection ───────────────────────────────────────────────────────
@@ -1081,9 +1304,10 @@ class ResponseComposer:
             os.getenv("COMPOSER_USE_LLM", "true").lower() not in ("false", "0", "no")
         )
         self._primary, self._fallbacks = _composer_models()
+        self._timeout: float = _load_composer_timeout()
         logger.info(
-            "Composer: initialised use_llm=%s primary=%s fallbacks=%s",
-            self._use_llm, self._primary, self._fallbacks,
+            "Composer: initialised use_llm=%s primary=%s fallbacks=%s timeout=%ss",
+            self._use_llm, self._primary, self._fallbacks, self._timeout,
         )
 
     def compose(
@@ -1094,9 +1318,11 @@ class ResponseComposer:
         session_name: str,
     ) -> QueryResponse:
         """Narrate a TurnWrapper into a student-facing QueryResponse."""
+        start = time.monotonic()
+        safe_sid = _safe_session_id(session_id)
         logger.info(
-            "Composer.compose: session=%s turn_status=%s results=%d",
-            session_id, turn.turn_status, turn.result_count,
+            "Composer.compose start session=%s turn_status=%s results=%d",
+            safe_sid, turn.turn_status, turn.result_count,
         )
 
         # Ordered by sq_index so multi-SQ answers follow the original query order
@@ -1112,7 +1338,21 @@ class ResponseComposer:
         qr_status = _map_turn_status(turn)
 
         # LLM NLG (primary) → deterministic fallback
-        answer_text = self._generate(user_text, packets, qr_status)
+        answer_text, gen_meta = self._generate(user_text, packets, qr_status)
+
+        logger.info(
+            "Composer.compose result session=%s qr_status=%s llm_used=%s model=%s "
+            "fallback_reason=%s answer_len=%d citations=%d duration_ms=%d packet_summary=%s",
+            safe_sid,
+            qr_status,
+            gen_meta["llm_used"],
+            gen_meta["model_used"],
+            gen_meta["fallback_reason"],
+            len(answer_text),
+            len(citations),
+            _duration_ms(start),
+            _summarize_packets(packets),
+        )
 
         return QueryResponse(
             session_id=session_id,
@@ -1124,15 +1364,19 @@ class ResponseComposer:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _generate(self, user_text: str, packets: list[dict], qr_status: str = "ok") -> str:
+    def _generate(
+        self, user_text: str, packets: list[dict], qr_status: str = "ok"
+    ) -> tuple[str, dict]:
+        """Returns (answer_text, gen_meta). gen_meta: llm_used, model_used, fallback_reason."""
+        gen_meta: dict = {"llm_used": False, "model_used": None, "fallback_reason": None}
         if self._use_llm:
             user_msg = (
                 f"Student query: {user_text}\n\n"
                 f"Narration packet:\n"
                 f"{json.dumps(packets, indent=2, default=str)}"
             )
-            answer = _try_llm_chain(
-                self._llm, user_msg, self._primary, self._fallbacks,
+            answer, model_used, failure_reason = _try_llm_chain(
+                self._llm, user_msg, self._primary, self._fallbacks, self._timeout,
             )
             if answer:
                 has_real_citations = any(p.get("citations") for p in packets)
@@ -1143,6 +1387,13 @@ class ResponseComposer:
                         "Composer: LLM went off-script (asked student for info) — "
                         "falling back to deterministic narration."
                     )
-                    return _deterministic_answer(packets)
-                return answer
-        return _deterministic_answer(packets)
+                    gen_meta["model_used"] = model_used
+                    gen_meta["fallback_reason"] = "off_script"
+                    return _deterministic_answer(packets), gen_meta
+                gen_meta["llm_used"] = True
+                gen_meta["model_used"] = model_used
+                return answer, gen_meta
+            gen_meta["fallback_reason"] = failure_reason
+        else:
+            gen_meta["fallback_reason"] = "llm_disabled"
+        return _deterministic_answer(packets), gen_meta

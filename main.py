@@ -21,8 +21,12 @@ from gateway.session_manager import (
     get_or_create_session,
     get_student_sessions,
     get_session_history,
+    get_session_history_for_student,
     update_session_after_turn,
     merge_turn_overrides,
+    delete_session_for_student,
+    delete_all_sessions_for_student,
+    delete_all_sessions_global,
     QU_CONTEXT_TURNS,
 )
 from gateway.query_understanding import understand_query
@@ -57,11 +61,27 @@ def _make_resolver(kg: KGAdapter) -> Optional[Callable]:
     return _resolve
 
 
+def _mask_student_id(sid: str) -> str:
+    """Truncate student ID for logs — shows first 3 chars only."""
+    return (sid[:3] + "***") if len(sid) > 3 else "***"
+
+
 def _make_turn_history_summary(turn) -> str:
     """Compact structured summary stored as answer_text until Composer is wired."""
     intents = [r.intent for r in turn.results]
     statuses = [r.status for r in turn.results]
     return f"Executed intents: {intents}. Statuses: {statuses}. Turn status: {turn.turn_status}."
+
+
+def _is_dev_mode() -> bool:
+    """
+    Return True only when APP_ENV=dev or DEV_MODE=true.
+    Developer-only endpoints must call this before executing any state-mutating action.
+    """
+    return (
+        os.getenv("APP_ENV", "").lower() == "dev"
+        or os.getenv("DEV_MODE", "").lower() == "true"
+    )
 
 
 @asynccontextmanager
@@ -102,10 +122,22 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.post("/chat", response_model=QueryResponse)
 async def chat(request: QueryRequest):
-    logger.info("POST /chat | student=%s session=%s query=%s",
-                request.student_id, request.session_id, request.user_text[:60])
+    # Service readiness guard — startup may have failed silently
+    if _orchestrator is None or _composer is None:
+        logger.error(
+            "POST /chat | service not ready: orchestrator=%s composer=%s",
+            _orchestrator is not None, _composer is not None,
+        )
+        raise HTTPException(status_code=503, detail="Service not ready — startup may have failed")
 
-    # 1. Load student context and get/create session
+    logger.info(
+        "POST /chat | student=%s session=%s query_len=%d",
+        _mask_student_id(request.student_id),
+        (request.session_id or "")[:8] or "new",
+        len(request.user_text or ""),
+    )
+
+    # 1. Load student context
     ctx = get_context(request.student_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=f"Student {request.student_id!r} not found")
@@ -114,24 +146,31 @@ async def chat(request: QueryRequest):
         request.session_id, request.student_id, ctx, request.user_text,
     )
 
-    # 2. Query Understanding — returns list[StructuredQuery]
-    sqs = understand_query(
-        user_text=request.user_text,
-        last_referenced=session.last_referenced,
-        recent_turns=list(session.turn_history[-QU_CONTEXT_TURNS:]),
-        resolver=_resolver,
-    )
-
-    # 3. Orchestrator execution
-    tw = _orchestrator.execute_turn(sqs, session, _rule_bundles)
-
-    # 4. Response Composer — LLM narration with deterministic fallback
-    qr = _composer.compose(
-        user_text=request.user_text,
-        turn=tw,
-        session_id=session.session_id,
-        session_name=session.session_name,
-    )
+    # 2–4. QU → Orchestrator → Composer pipeline
+    try:
+        sqs = understand_query(
+            user_text=request.user_text,
+            last_referenced=session.last_referenced,
+            recent_turns=list(session.turn_history[-QU_CONTEXT_TURNS:]),
+            resolver=_resolver,
+        )
+        tw = _orchestrator.execute_turn(sqs, session, _rule_bundles)
+        qr = _composer.compose(
+            user_text=request.user_text,
+            turn=tw,
+            session_id=session.session_id,
+            session_name=session.session_name,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "POST /chat pipeline error | student=%s session=%s error=%s",
+            _mask_student_id(request.student_id),
+            session.session_id[:8],
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=500, detail="Internal pipeline error")
 
     # 5. Persist session state (store composed answer for QU context in future turns)
     turn_overrides, had_clear = merge_turn_overrides(sqs)
@@ -149,7 +188,7 @@ async def chat(request: QueryRequest):
     intent_statuses = {r.intent: r.status for r in tw.results}
     logger.info(
         "POST /chat done | student=%s session=%s qr_status=%s intent_statuses=%s answer_len=%d",
-        request.student_id,
+        _mask_student_id(request.student_id),
         session.session_id[:8],
         qr.status,
         intent_statuses,
@@ -165,13 +204,77 @@ async def list_sessions(student_id: str):
     return get_student_sessions(student_id)
 
 
-@app.get("/session/{session_id}/history", response_model=SessionHistoryResponse)
+@app.get("/session/{session_id}/history")
 async def session_history(session_id: str):
-    logger.info("GET /session/%s/history", session_id)
-    result = get_session_history(session_id)
+    """
+    [DEPRECATED] Unsafe endpoint.
+    Returns 410 Gone. Clients must use GET /students/{student_id}/sessions/{session_id}/history instead.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint is deprecated for security reasons. Use /students/{student_id}/sessions/{session_id}/history instead."
+    )
+
+
+@app.get(
+    "/students/{student_id}/sessions/{session_id}/history",
+    response_model=SessionHistoryResponse,
+)
+async def student_session_history(student_id: str, session_id: str):
+    """
+    Return the turn history for a session, with ownership verification.
+
+    Returns 404 if the session does not exist OR belongs to a different student.
+    """
+    logger.info("GET /students/%s/sessions/%s/history", student_id, session_id)
+    result = get_session_history_for_student(student_id, session_id)
     if not result:
         raise HTTPException(status_code=404, detail="Session not found")
     return result
+
+
+@app.delete("/students/{student_id}/sessions/{session_id}")
+async def delete_student_session(student_id: str, session_id: str):
+    """
+    Delete a specific session owned by the given student.
+
+    Returns 404 if the session does not exist or does not belong to this student.
+    Ownership is verified before deletion.
+    """
+    logger.info("DELETE /students/%s/sessions/%s", student_id, session_id)
+    deleted = delete_session_for_student(student_id, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found or not owned by student")
+    return {"deleted": True, "session_id": session_id}
+
+
+@app.delete("/dev/students/{student_id}/sessions")
+async def dev_delete_student_sessions(student_id: str):
+    """
+    [DEV ONLY] Delete all sessions for a specific student.
+
+    Requires APP_ENV=dev or DEV_MODE=true. Returns 403 otherwise.
+    """
+    if not _is_dev_mode():
+        raise HTTPException(status_code=403, detail="This endpoint is only available in dev mode.")
+    logger.warning("DELETE /dev/students/%s/sessions (dev mode)", student_id)
+    count = delete_all_sessions_for_student(student_id)
+    return {"deleted": True, "student_id": student_id, "count": count}
+
+
+@app.delete("/dev/sessions")
+async def dev_delete_all_sessions():
+    """
+    [DEV ONLY] Delete ALL sessions globally.
+
+    Requires APP_ENV=dev or DEV_MODE=true. Returns 403 otherwise.
+    Use with caution — this clears every session in the store.
+    """
+    if not _is_dev_mode():
+        raise HTTPException(status_code=403, detail="This endpoint is only available in dev mode.")
+    logger.warning("DELETE /dev/sessions (dev mode) — clearing all sessions")
+    count = delete_all_sessions_global()
+    return {"deleted": True, "count": count}
 
 
 @app.get("/health")

@@ -93,6 +93,14 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
     if required_data_missing:
         return _cannot_compute(["required_data_missing"], required_data_missing)
 
+    # Belt-and-suspenders guards — protect against model_construct() bypass of Literal
+    _VALID_SEMESTER_TYPES = frozenset({"Fall", "Spring", "Summer"})
+    if input.target_semester_type not in _VALID_SEMESTER_TYPES:  # type: ignore[comparison-overlap]
+        return _cannot_compute(["invalid_target_semester_type"], [])
+
+    if input.student_level not in _LEVEL_MAP:  # type: ignore[comparison-overlap]
+        return _cannot_compute(["invalid_student_level"], [])
+
     if input.target_semester_type == "Summer" and input.summer_semester_rules is None:
         return _cannot_compute(["missing_summer_rules"], [])
 
@@ -155,11 +163,20 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
             else:
                 active_credit_cap = credit_limit_rules.cgpa_below_1_limit
 
+    # Minimum credit warning — only for regular semesters (Summer uses course-count cap)
+    if not is_summer and input.target_credit_load is not None:
+        if input.target_credit_load < credit_limit_rules.minimum_per_semester:
+            warnings.append(
+                f"Requested credit load ({input.target_credit_load} cr) is below the "
+                f"minimum of {credit_limit_rules.minimum_per_semester} cr per semester — "
+                "consult your academic advisor."
+            )
+
     # -----------------------------------------------------------------------
     # Phase 4 — Eligibility Filtering + Phase 5 scoring (interleaved)
     # -----------------------------------------------------------------------
 
-    student_level_int = _LEVEL_MAP.get(input.student_level, 1)
+    student_level_int = _LEVEL_MAP[input.student_level]
     completed_set   = set(input.completed_courses)
     failed_set      = set(input.failed_courses)
     in_progress_set = set(input.in_progress_courses)
@@ -289,12 +306,13 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
     # Phase 7 — Warnings
     # -----------------------------------------------------------------------
 
-    # 1. Eligible credits below semester minimum
-    eligible_total_credits = sum(ec.course.credits for ec in eligible_pool)
-    if eligible_total_credits < credit_limit_rules.minimum_per_semester:
-        warnings.append(
-            "Total eligible credits below minimum — consult your academic advisor."
-        )
+    # 1. Eligible credits below semester minimum (non-summer only — summer uses course-count cap)
+    if not is_summer:
+        eligible_total_credits = sum(ec.course.credits for ec in eligible_pool)
+        if eligible_total_credits < credit_limit_rules.minimum_per_semester:
+            warnings.append(
+                "Total eligible credits below minimum — consult your academic advisor."
+            )
 
     # 2. Unresolved Incomplete grade
     if input.incomplete_grade_flag:

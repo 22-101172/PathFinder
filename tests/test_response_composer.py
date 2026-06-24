@@ -18,6 +18,7 @@ Tests cover:
 """
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -31,6 +32,10 @@ from gateway.response_composer import (
     _collect_citations,
     _deterministic_answer,
     _extract_packet,
+    _fmt_course_label,
+    _fmt_role_label,
+    _fmt_skill_label,
+    _fmt_track_label,
     _map_turn_status,
 )
 
@@ -628,7 +633,7 @@ class TestCompose:
         mock_llm = MagicMock()
         call_count = {"n": 0}
 
-        def side_effect(system, user, *, temperature, model):
+        def side_effect(system, user, *, temperature, model, timeout_seconds=None, **kw):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise LLMError("primary failed")
@@ -728,3 +733,628 @@ class TestSampleOutputs:
         sources = {c.source for c in qr.citations}
         assert "EUI Student Handbook 2024" in sources
         assert "Student Handbook 2024" in qr.answer_text or "p.34" in qr.answer_text
+
+
+# ── Step 8 audit fixes: display formatting helpers ────────────────────────────
+
+class TestDisplayFormatHelpers:
+
+    def test_fmt_course_label_name_first(self):
+        assert _fmt_course_label("C-CS219", "Advanced Programming") == "Advanced Programming (C-CS219)"
+
+    def test_fmt_course_label_with_credits(self):
+        label = _fmt_course_label("C-CS219", "Advanced Programming", credits=3)
+        assert label == "Advanced Programming (C-CS219) — 3 credits"
+
+    def test_fmt_course_label_code_only(self):
+        assert _fmt_course_label("C-CS219", "") == "C-CS219"
+
+    def test_fmt_course_label_name_only(self):
+        assert _fmt_course_label("", "Advanced Programming") == "Advanced Programming"
+
+    def test_fmt_role_label_prefers_name(self):
+        assert _fmt_role_label("RL_Data_Scientist", "Data Scientist") == "Data Scientist"
+
+    def test_fmt_role_label_converts_rl_prefix(self):
+        assert _fmt_role_label("RL_Data_Scientist") == "Data Scientist"
+
+    def test_fmt_role_label_converts_rl_multi_word(self):
+        assert _fmt_role_label("RL_Machine_Learning_Engineer") == "Machine Learning Engineer"
+
+    def test_fmt_role_label_plain_id_unchanged(self):
+        assert _fmt_role_label("ML-ENG", "ML Engineer") == "ML Engineer"
+
+    def test_fmt_skill_label_prefers_name(self):
+        assert _fmt_skill_label("SK_Machine_Learning", "Machine Learning") == "Machine Learning"
+
+    def test_fmt_skill_label_converts_sk_prefix(self):
+        assert _fmt_skill_label("SK_Machine_Learning") == "Machine Learning"
+
+    def test_fmt_skill_label_converts_sk_multi_word(self):
+        assert _fmt_skill_label("SK_Deep_Neural_Networks") == "Deep Neural Networks"
+
+    def test_fmt_track_label_ai(self):
+        assert _fmt_track_label("AI") == "Artificial Intelligence (AI)"
+
+    def test_fmt_track_label_cys(self):
+        assert _fmt_track_label("CYS") == "Cyber Security (CYS)"
+
+    def test_fmt_track_label_dse(self):
+        assert _fmt_track_label("DSE") == "Data Science and Engineering (DSE)"
+
+    def test_fmt_track_label_swe(self):
+        assert _fmt_track_label("SWE") == "Software Engineering (SWE)"
+
+    def test_fmt_track_label_gen(self):
+        assert _fmt_track_label("GEN") == "General Program (GEN)"
+
+    def test_fmt_track_label_with_name(self):
+        label = _fmt_track_label("AI", "Artificial Intelligence")
+        assert "Artificial Intelligence" in label
+        assert "AI" in label
+
+    def test_fmt_track_label_unknown_id_passthrough(self):
+        assert _fmt_track_label("XYZ") == "XYZ"
+
+
+# ── Step 8 audit fixes: eligibility status handling ──────────────────────────
+
+class TestEligibilityStatusHandling:
+
+    def _packets(self, data: dict) -> list[dict]:
+        r = PerSQResult(sq_index=0, intent="check_course_eligibility",
+                        status="success", data=data)
+        return [_extract_packet(r)]
+
+    def test_in_progress_says_already_enrolled(self):
+        packets = self._packets({
+            "status": "in_progress",
+            "target_course_code": "C-AI321",
+        })
+        answer = _deterministic_answer(packets)
+        assert "already enrolled" in answer.lower() or "in progress" in answer.lower() or "currently taking" in answer.lower()
+        assert "not" not in answer.lower().split("eligible")[0] if "eligible" in answer.lower() else True
+
+    def test_in_progress_does_not_say_not_eligible(self):
+        packets = self._packets({
+            "eligibility_status": "in_progress",
+            "eligible": False,
+            "target_course_code": "C-AI321",
+        })
+        answer = _deterministic_answer(packets)
+        assert "not currently eligible" not in answer.lower()
+        assert "not eligible" not in answer.lower()
+
+    def test_already_completed_says_completed(self):
+        packets = self._packets({
+            "status": "already_completed",
+            "target_course_code": "C-CS201",
+        })
+        answer = _deterministic_answer(packets)
+        assert "already completed" in answer.lower() or "already passed" in answer.lower()
+
+    def test_already_completed_does_not_say_not_eligible(self):
+        packets = self._packets({
+            "eligibility_status": "already_completed",
+            "eligible": False,
+            "target_course_code": "C-CS201",
+        })
+        answer = _deterministic_answer(packets)
+        assert "not currently eligible" not in answer.lower()
+        assert "not eligible" not in answer.lower()
+
+    def test_retake_cap_exceeded_says_cap_reached(self):
+        packets = self._packets({
+            "eligibility_status": "retake_cap_exceeded",
+            "target_course_code": "C-CS101",
+            "reason": "Maximum retakes reached.",
+        })
+        answer = _deterministic_answer(packets)
+        assert "retake cap" in answer.lower() or "retake" in answer.lower()
+
+    def test_eligible_true_still_works(self):
+        packets = self._packets({
+            "eligible": True,
+            "target_course_code": "C-CS301",
+        })
+        answer = _deterministic_answer(packets)
+        assert "eligible" in answer.lower()
+        assert "C-CS301" in answer
+
+    def test_eligibility_status_set_from_ale_status(self):
+        """_extract_packet must map ALE 'status' field to eligibility_status."""
+        r = PerSQResult(sq_index=0, intent="check_course_eligibility",
+                        status="success",
+                        data={"status": "in_progress", "target_course_code": "C-AI321"})
+        p = _extract_packet(r)
+        assert p.get("eligibility_status") == "in_progress"
+
+    def test_course_name_extracted_from_target_course_name(self):
+        r = PerSQResult(sq_index=0, intent="check_course_eligibility",
+                        status="success",
+                        data={"eligible": True, "target_course_code": "C-CS219",
+                              "target_course_name": "Advanced Programming"})
+        p = _extract_packet(r)
+        assert p.get("target_course_name") == "Advanced Programming"
+        answer = _deterministic_answer([p])
+        assert "Advanced Programming" in answer
+        assert "C-CS219" in answer
+
+
+# ── Step 8 audit fixes: plan/roadmap name-first formatting ───────────────────
+
+class TestPlanFormattingNameFirst:
+
+    def test_plan_recommended_courses_name_first(self):
+        """_extract_plan must produce 'Course Name (CODE)' not 'CODE — Course Name'."""
+        r = PerSQResult(sq_index=0, intent="plan_semester", status="success",
+                        data={
+                            "plans": [{
+                                "plan_label": "Recommended",
+                                "total_credits": 15,
+                                "courses": [
+                                    {"course_code": "C-CS219",
+                                     "course_name": "Advanced Programming",
+                                     "credits": 3},
+                                ],
+                            }]
+                        })
+        p = _extract_packet(r)
+        courses = p.get("recommended_courses", [])
+        assert len(courses) == 1
+        assert "Advanced Programming (C-CS219)" in courses[0]
+        assert "C-CS219 — Advanced Programming" not in courses[0]
+
+    def test_plan_credits_dash_not_parens(self):
+        """Credits must appear as '— N credits', not '(N cr)'."""
+        r = PerSQResult(sq_index=0, intent="plan_semester", status="success",
+                        data={
+                            "plans": [{
+                                "plan_label": "Recommended",
+                                "total_credits": 15,
+                                "courses": [
+                                    {"course_code": "C-AI321", "course_name": "Machine Learning",
+                                     "credits": 4},
+                                ],
+                            }]
+                        })
+        p = _extract_packet(r)
+        label = p["recommended_courses"][0]
+        assert "— 4 credits" in label
+        assert "(4 cr)" not in label
+
+    def test_roadmap_semester_plans_name_first(self):
+        """Semester plan courses must also use name-first in the narration."""
+        r = PerSQResult(sq_index=0, intent="generate_graduation_roadmap", status="success",
+                        data={
+                            "semester_plans": [{
+                                "semester_label": "Fall 2025",
+                                "total_credits": 15,
+                                "courses": [
+                                    {"course_code": "C-CS219",
+                                     "course_name": "Advanced Programming",
+                                     "credits": 3},
+                                ],
+                            }]
+                        })
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "Advanced Programming (C-CS219)" in answer
+        assert "C-CS219 — Advanced Programming" not in answer
+
+
+# ── Step 8 audit fixes: role/skill/track display ─────────────────────────────
+
+class TestRoleSkillTrackDisplay:
+
+    def _packets(self, intent: str, data: dict) -> list[dict]:
+        r = PerSQResult(sq_index=0, intent=intent, status="success", data=data)
+        return [_extract_packet(r)]
+
+    def test_role_profile_no_raw_rl_id(self):
+        """get_role_profile must not expose RL_* in the answer."""
+        packets = self._packets("get_role_profile", {
+            "role_id": "RL_Data_Scientist",
+            "name": "Data Scientist",
+            "description": "Analyses data.",
+            "required_skills": [{"name": "Python"}, {"name": "Statistics"}],
+        })
+        answer = _deterministic_answer(packets)
+        assert "RL_Data_Scientist" not in answer
+        assert "Data Scientist" in answer
+
+    def test_role_profile_rl_id_without_name_converted(self):
+        """If only role_id is available, RL_ prefix must be stripped."""
+        packets = self._packets("get_role_profile", {
+            "role_id": "RL_Data_Scientist",
+        })
+        answer = _deterministic_answer(packets)
+        assert "RL_Data_Scientist" not in answer
+        assert "Data Scientist" in answer
+
+    def test_search_courses_by_skill_no_raw_sk_id(self):
+        """search_courses_by_skill header must not expose SK_* if name available."""
+        packets = self._packets("search_courses_by_skill", {
+            "skill_id": "SK_Machine_Learning",
+            "skill_name": "Machine Learning",
+            "courses": [{"course_code": "C-AI321", "name": "Machine Learning Fundamentals"}],
+        })
+        answer = _deterministic_answer(packets)
+        assert "SK_Machine_Learning" not in answer
+        assert "Machine Learning" in answer
+
+    def test_search_courses_by_skill_sk_id_cleaned_when_no_name(self):
+        """SK_ prefix must be stripped in the header when no skill_name provided."""
+        packets = self._packets("search_courses_by_skill", {
+            "skill_id": "SK_Machine_Learning",
+            "courses": [],
+        })
+        answer = _deterministic_answer(packets)
+        assert "SK_Machine_Learning" not in answer
+        assert "Machine Learning" in answer
+
+    def test_roles_by_track_friendly_track_name(self):
+        packets = self._packets("get_roles_by_track", {
+            "track_id": "AI",
+            "roles": [{"role_id": "RL_ML_Engineer", "name": "ML Engineer"}],
+        })
+        answer = _deterministic_answer(packets)
+        assert "Artificial Intelligence" in answer
+        assert "ML Engineer" in answer
+        assert "RL_ML_Engineer" not in answer
+
+    def test_find_best_matching_roles_no_raw_id(self):
+        packets = self._packets("find_best_matching_roles", {
+            "ranked_roles": [
+                {"role_id": "RL_Data_Scientist", "name": "Data Scientist",
+                 "alignment_score": 0.90},
+            ],
+        })
+        answer = _deterministic_answer(packets)
+        assert "RL_Data_Scientist" not in answer
+        assert "Data Scientist" in answer
+        assert "90%" in answer
+
+    def test_compute_skill_gap_no_raw_sk_skills(self):
+        packets = self._packets("compute_skill_gap", {
+            "role_id": "RL_Data_Scientist",
+            "role_name": "Data Scientist",
+            "missing_skills": [
+                {"skill_id": "SK_Deep_Learning", "name": "Deep Learning"},
+                {"skill_id": "SK_Statistics", "name": "Statistics"},
+            ],
+        })
+        answer = _deterministic_answer(packets)
+        assert "SK_Deep_Learning" not in answer
+        assert "SK_Statistics" not in answer
+        assert "Deep Learning" in answer
+        assert "Statistics" in answer
+
+    def test_track_overview_friendly_name(self):
+        packets = self._packets("get_track_overview", {
+            "track_id": "DSE",
+            "name": "Data Science and Engineering",
+            "description": "Focus on data.",
+            "courses": [],
+        })
+        answer = _deterministic_answer(packets)
+        assert "Data Science and Engineering" in answer
+
+    def test_compare_tracks_friendly_names(self):
+        packets = self._packets("compare_tracks", {
+            "track_id_1": "AI",
+            "track_id_2": "CYS",
+            "shared_courses": ["C-CS101"],
+            "different_courses": {},
+        })
+        answer = _deterministic_answer(packets)
+        assert "Artificial Intelligence" in answer
+        assert "Cyber Security" in answer
+
+
+# ── Step 8 audit fixes: combined credit-limit personalisation ─────────────────
+
+class TestCreditLimitPersonalisation:
+
+    def _make_tw_combined(self, cgpa: float, policy_answer: str) -> list[dict]:
+        r_student = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"track_id": "AI", "cgpa": cgpa, "level": 4}
+        )
+        r_policy = PerSQResult(
+            sq_index=1, intent="policy_query", status="success",
+            data={"answer": policy_answer, "extracted_facts": [policy_answer]}
+        )
+        from gateway.response_composer import _extract_packet
+        return [_extract_packet(r_student), _extract_packet(r_policy)]
+
+    def test_cgpa_above_3_gets_21_hours(self):
+        packets = self._make_tw_combined(3.5, "The maximum credit hour limit depends on CGPA.")
+        answer = _deterministic_answer(packets)
+        assert "21" in answer
+
+    def test_cgpa_2_to_3_gets_18_hours(self):
+        packets = self._make_tw_combined(2.63,
+            "Students have a credit hour limit based on CGPA. Maximum credit hours allowed per semester.")
+        answer = _deterministic_answer(packets)
+        assert "18" in answer
+
+    def test_cgpa_1_to_2_gets_15_hours(self):
+        packets = self._make_tw_combined(1.85,
+            "The maximum credit hour limit is set by the university policy.")
+        answer = _deterministic_answer(packets)
+        assert "15" in answer
+
+    def test_cgpa_below_1_gets_12_hours(self):
+        packets = self._make_tw_combined(0.80,
+            "Credit limit rules: maximum credit hours per semester.")
+        answer = _deterministic_answer(packets)
+        assert "12" in answer
+
+    def test_non_credit_limit_policy_no_personalisation(self):
+        """A non-credit-limit policy packet must not trigger personalisation."""
+        packets = self._make_tw_combined(3.5,
+            "Students may retake a failed course once.")
+        answer = _deterministic_answer(packets)
+        # 21 should NOT appear as a personalised credit limit
+        # (it may appear in other contexts but the personalisation sentence should not be there)
+        assert "can register up to" not in answer
+
+    def test_no_student_record_no_personalisation(self):
+        """Without a student record packet, no personalisation occurs."""
+        r = PerSQResult(sq_index=0, intent="policy_query", status="success",
+                        data={"answer": "Credit hour limit policy.", "extracted_facts": []})
+        packets = [_extract_packet(r)]
+        answer = _deterministic_answer(packets)
+        assert "can register up to" not in answer
+
+
+# ── Step 8 audit fixes: citation safety ───────────────────────────────────────
+
+class TestCitationSafety:
+
+    def test_no_fabricated_sources_when_citations_empty(self):
+        """Deterministic path must not add a Sources section when no citations exist."""
+        composer = _make_composer(use_llm=False)
+        tw = _make_tw([PerSQResult(
+            sq_index=0, intent="policy_query", status="success",
+            data={"answer": "Max 21 CH per semester.", "extracted_facts": ["21 CH"]},
+        )])
+        qr = composer.compose("Credit limit?", tw, "s", "n")
+        assert "Sources:" not in qr.answer_text
+        assert len(qr.citations) == 0
+
+    def test_citations_preserved_when_present(self):
+        composer = _make_composer(use_llm=False)
+        tw = _make_tw([PerSQResult(
+            sq_index=0, intent="policy_query", status="success",
+            data={"answer": "Policy info.", "extracted_facts": []},
+            citations=[{"source": "EUI Handbook 2024", "page": 12}],
+        )])
+        qr = composer.compose("Policy?", tw, "s", "n")
+        assert "EUI Handbook 2024" in qr.answer_text
+        assert len(qr.citations) == 1
+
+    def test_citations_deduplicated(self):
+        composer = _make_composer(use_llm=False)
+        tw = _make_tw([
+            PerSQResult(sq_index=0, intent="policy_query", status="success",
+                        data={"answer": "A.", "extracted_facts": []},
+                        citations=[{"source": "Handbook", "page": 5}]),
+            PerSQResult(sq_index=1, intent="policy_query", status="success",
+                        data={"answer": "B.", "extracted_facts": []},
+                        citations=[{"source": "Handbook", "page": 5}]),
+        ])
+        qr = composer.compose("Policy?", tw, "s", "n")
+        assert len(qr.citations) == 1
+
+    def test_llm_fabricated_sources_stripped(self):
+        """LLM-generated sources section is stripped when no real citations exist."""
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = (
+            "You are not eligible.\n\n**Sources:** EUI Handbook 2024, PathFinder analysis."
+        )
+        composer = _make_composer(use_llm=True)
+        composer._llm = mock_llm
+        tw = _make_tw([PerSQResult(
+            sq_index=0, intent="check_course_eligibility", status="success",
+            data={"eligible": False, "target_course_code": "C-CS301"},
+        )])
+        qr = composer.compose("Am I eligible?", tw, "s", "n")
+        assert "Sources:" not in qr.answer_text
+        assert "PathFinder analysis" not in qr.answer_text
+
+
+# ── Step 8 audit fixes: reset assumptions wording (known limitation) ──────────
+
+class TestResetAssumptionsWording:
+    """
+    The Orchestrator does not propagate a structured 'had_clear' flag to
+    PerSQResult.data, so the Composer has no reliable signal that assumptions
+    were just cleared. This class documents the limitation and the safe system
+    prompt rule that is in place for the LLM path.
+
+    The deterministic path will produce a normal get_student_record answer
+    (no special "I cleared your assumptions" message) until the Orchestrator
+    propagates such a flag. The LLM path follows rule 28 in the system prompt.
+    """
+
+    def test_no_override_active_shows_plain_record(self):
+        """Without override_state_active, the record is shown normally."""
+        r = PerSQResult(sq_index=0, intent="get_student_record", status="success",
+                        data={"track_id": "AI", "cgpa": 2.63, "level": 4},
+                        override_state_active=False)
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "Artificial Intelligence" in answer
+        assert "2.63" in answer
+
+    def test_reset_wording_rule_in_system_prompt(self):
+        """The system prompt must contain the reset-assumptions rule."""
+        from gateway.response_composer import _SYSTEM_PROMPT
+        assert "cleared your what-if assumptions" in _SYSTEM_PROMPT
+        assert "official academic record" in _SYSTEM_PROMPT
+
+
+# ── Step 8 audit fixes: LLM path safety ──────────────────────────────────────
+
+class TestLLMPathSafety:
+
+    def test_llm_disabled_uses_deterministic(self):
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = "LLM answer"
+        composer = _make_composer(use_llm=False)
+        composer._llm = mock_llm
+        tw = _make_tw([PerSQResult(sq_index=0, intent="policy_query", status="success",
+                                    data={"answer": "Policy text.", "extracted_facts": []})])
+        qr = composer.compose("query", tw, "s", "n")
+        mock_llm.chat.assert_not_called()
+        assert "Policy text." in qr.answer_text
+
+    def test_llm_failure_uses_deterministic(self):
+        from gateway.llm_client import LLMError
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = LLMError("timeout")
+        composer = _make_composer(use_llm=True)
+        composer._llm = mock_llm
+        composer._fallbacks = []
+        tw = _make_tw([PerSQResult(sq_index=0, intent="policy_query", status="success",
+                                    data={"answer": "Policy text.", "extracted_facts": []})])
+        qr = composer.compose("query", tw, "s", "n")
+        assert len(qr.answer_text) > 0
+
+    def test_composer_does_not_import_kg_ale_rag(self):
+        """The Composer module must not import KG, RAG, ALE, QU, or SCP at the top level."""
+        import importlib
+        import sys
+        mod = sys.modules.get("gateway.response_composer")
+        if mod is None:
+            mod = importlib.import_module("gateway.response_composer")
+        forbidden = ("engines.kg", "engines.rag", "engines.ale",
+                     "gateway.query_understanding", "gateway.session_manager")
+        for name in forbidden:
+            assert not any(name in k for k in sys.modules if k.startswith("gateway.response_composer")), (
+                f"Composer must not import {name}"
+            )
+        # Verify the module itself doesn't reference those names as imports
+        import inspect
+        src = inspect.getsource(mod)
+        for name in ("from engines", "import engines"):
+            assert name not in src, f"Composer source must not contain '{name}'"
+
+
+# ── Logging: privacy-safe and diagnostically useful ───────────────────────────
+
+class TestComposerLogging:
+    """
+    Verify that compose() logs are diagnostically useful AND privacy-safe.
+
+    Privacy hard rules enforced here:
+      - raw user_text is never logged
+      - full narration packet contents are never logged
+      - final answer text is never logged
+      - session_id is truncated to 8 chars
+    """
+
+    _LOGGER = "gateway.response_composer"
+
+    def _make_tw_policy(self) -> TurnWrapper:
+        return _make_tw([PerSQResult(
+            sq_index=0, intent="policy_query", status="success",
+            data={"answer": "Max 21 CH per semester.", "extracted_facts": ["21 CH"]},
+        )])
+
+    def test_start_log_has_truncated_session_id(self, caplog):
+        """compose() start log must use the first 8 chars of session_id, not the full value."""
+        composer = _make_composer(use_llm=False)
+        full_sid = "abcdef1234567890"
+        tw = self._make_tw_policy()
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            composer.compose("query", tw, full_sid, "Chat")
+        start_logs = [r for r in caplog.records if "Composer.compose start" in r.message]
+        assert start_logs, "Expected a 'Composer.compose start' log line"
+        msg = start_logs[0].message
+        assert "abcdef12" in msg
+        assert "abcdef1234567890" not in msg
+
+    def test_result_log_has_required_diagnostic_fields(self, caplog):
+        """compose() result log must include all diagnostic fields."""
+        composer = _make_composer(use_llm=False)
+        tw = self._make_tw_policy()
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            composer.compose("query", tw, "sess-0001", "Chat")
+        result_logs = [r for r in caplog.records if "Composer.compose result" in r.message]
+        assert result_logs, "Expected a 'Composer.compose result' log line"
+        msg = result_logs[0].message
+        assert "duration_ms=" in msg
+        assert "fallback_reason=" in msg
+        assert "model=" in msg
+        assert "answer_len=" in msg
+        assert "citations=" in msg
+        assert "llm_used=" in msg
+        assert "qr_status=" in msg
+
+    def test_result_log_no_user_text(self, caplog):
+        """Raw user_text must never appear in any log record."""
+        composer = _make_composer(use_llm=False)
+        tw = self._make_tw_policy()
+        secret_query = "MY_VERY_SECRET_QUERY_THAT_MUST_NOT_BE_LOGGED"
+        with caplog.at_level(logging.DEBUG, logger=self._LOGGER):
+            composer.compose(secret_query, tw, "sess-0001", "Chat")
+        for record in caplog.records:
+            assert secret_query not in record.message, (
+                f"user_text leaked into log: {record.message}"
+            )
+
+    def test_result_log_no_packet_contents(self, caplog):
+        """Full narration packet contents must not appear in any log record."""
+        composer = _make_composer(use_llm=False)
+        tw = _make_tw([PerSQResult(
+            sq_index=0, intent="policy_query", status="success",
+            data={"answer": "UNIQUE_PACKET_CONTENT_9876", "extracted_facts": []},
+        )])
+        with caplog.at_level(logging.DEBUG, logger=self._LOGGER):
+            composer.compose("query", tw, "sess-0001", "Chat")
+        for record in caplog.records:
+            assert "UNIQUE_PACKET_CONTENT_9876" not in record.message, (
+                f"packet contents leaked into log: {record.message}"
+            )
+
+    def test_result_log_no_answer_text(self, caplog):
+        """Final answer text must not appear in any log record."""
+        composer = _make_composer(use_llm=False)
+        tw = _make_tw([PerSQResult(
+            sq_index=0, intent="policy_query", status="success",
+            data={"answer": "UNIQUE_ANSWER_TEXT_XYZABC", "extracted_facts": []},
+        )])
+        with caplog.at_level(logging.DEBUG, logger=self._LOGGER):
+            composer.compose("query", tw, "sess-0001", "Chat")
+        for record in caplog.records:
+            assert "UNIQUE_ANSWER_TEXT_XYZABC" not in record.message, (
+                f"answer text leaked into log: {record.message}"
+            )
+
+    def test_llm_success_path_logs_llm_used_true_and_model(self, caplog):
+        """When LLM succeeds, result log must show llm_used=True and the model name."""
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = "Great answer from the LLM."
+        composer = _make_composer(use_llm=True)
+        composer._llm = mock_llm
+        tw = self._make_tw_policy()
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            composer.compose("query", tw, "sess-0001", "Chat")
+        result_logs = [r for r in caplog.records if "Composer.compose result" in r.message]
+        assert result_logs, "Expected a 'Composer.compose result' log line"
+        msg = result_logs[0].message
+        assert "llm_used=True" in msg
+        assert "model=" in msg
+
+    def test_deterministic_fallback_logs_llm_used_false_and_reason(self, caplog):
+        """When COMPOSER_USE_LLM=false, result log must show llm_used=False and fallback_reason=llm_disabled."""
+        composer = _make_composer(use_llm=False)
+        tw = self._make_tw_policy()
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            composer.compose("query", tw, "sess-0001", "Chat")
+        result_logs = [r for r in caplog.records if "Composer.compose result" in r.message]
+        assert result_logs, "Expected a 'Composer.compose result' log line"
+        msg = result_logs[0].message
+        assert "llm_used=False" in msg
+        assert "fallback_reason=llm_disabled" in msg

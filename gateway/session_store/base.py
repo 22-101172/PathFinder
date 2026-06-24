@@ -26,5 +26,9 @@ class SessionStore(ABC):
         """Delete ALL sessions. Return count deleted. Dev use only."""
 
     @abstractmethod
+    def delete_all_for_student(self, student_id: str) -> int:
+        """Delete all sessions for a specific student. Return count deleted."""
+
+    @abstractmethod
     def get_summaries_for_student(self, student_id: str) -> list[tuple[str, str, str]]:
         """Return (session_id, session_name, last_updated) tuples for a student, ordered by last_updated DESC."""

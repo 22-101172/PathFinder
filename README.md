@@ -33,16 +33,18 @@ PathFinder supports several advising workflows:
 
 `main.py` exposes the backend service using FastAPI:
 
-- `POST /chat` handles user questions
+- `POST /chat` handles user questions; returns `session_id`, `session_name`, `answer_text`, `citations`, `status`
 - `GET /sessions/{student_id}` returns previous chat sessions for a student
-- `GET /session/{session_id}/history` returns conversation history
+- `GET /students/{student_id}/sessions/{session_id}/history` returns conversation history with ownership verification
+- `DELETE /students/{student_id}/sessions/{session_id}` deletes a specific session owned by the student
 - `GET /health` returns a basic health response
+- `GET /session/{session_id}/history` — **deprecated, returns 410 Gone**; clients must use the ownership-safe endpoint above
 
 ### 2. Gateway Layer
 
 The `gateway/` package coordinates the system:
 
-- `query_understanding.py`: classifies the question into an intent and engine pattern
+- `query_understanding.py`: classifies the question into one of 26 locked intents and an engine pattern
 - `orchestrator.py`: routes the request to KG, RAG, ALE, or mixed execution
 - `response_composer.py`: turns raw engine output into a user-friendly answer
 - `student_context_provider.py`: loads student data from Excel and builds a normalized `StudentContext`; computes per-course retake counts, lifetime improve-retake totals, completed regular semesters (Fall/Spring only, all-withdrawn semesters excluded), and zero-credit P-grade course lists; applies best-outcome resolution when a student has multiple attempts at the same course; handles Con grades (graduation project spanning semesters), I grades (incomplete), and withdrawal exclusion
@@ -117,7 +119,7 @@ You only need to rebuild the index when the handbook source changes.
 
 ## Knowledge Graph Engine
 
-The KG engine exposes 19 operations across four query groups:
+The KG engine exposes 18 operations across four query groups:
 
 - **Course catalogue (A2)**: course profile, prerequisites (direct or full recursive tree; non-course constraints are stored as `PrerequisiteConstraint` nodes), skills taught by a course, course search by skill name, course focus classification (primary track/skill-category focus of a course), and focus-course recommendations for a target track or role (courses the student has not yet taken that teach the most relevant skills)
 - **Career role exploration (B1)**: role profiles with weighted required skills, and roles reachable through a track's courses and skills
@@ -289,19 +291,21 @@ The code reads configuration from `.env`. Copy `.env.example` to `.env` and fill
 - `LLM_PROVIDER` — LLM provider label (e.g. `groq`)
 - `LLM_BASE_URL` — OpenAI-compatible endpoint base URL
 - `LLM_API_KEY` — API key for the LLM provider
-- `LLM_MODEL` — default model name (overridden per component below)
-- `LLM_TIMEOUT_SECONDS` — request timeout in seconds (default: `30`)
+- `LLM_MODEL` — default model fallback when no per-component model is set (default: `llama-3.1-8b-instant`)
+- `LLM_TIMEOUT_SECONDS` — request timeout in seconds (default: `20`)
 
 **Query Understanding model chain** (QU tries models in order; falls back to keyword matching):
 
-- `QU_PRIMARY_MODEL` — primary model for intent classification (default: `llama-3.3-70b-versatile`)
+- `QU_PRIMARY_MODEL` — primary model for intent classification (recommended: `llama-3.3-70b-versatile`)
 - `QU_FALLBACK_MODELS` — comma-separated fallback models tried on timeout, 429, or bad JSON
+- `QU_TIMEOUT_SECONDS` — per-call LLM timeout for QU (default: `30`)
 
 **Response Composer model chain** (Composer tries models in order; falls back to deterministic narration):
 
 - `COMPOSER_USE_LLM` — set to `false` to skip LLM and always use deterministic fallback (useful in CI)
-- `COMPOSER_PRIMARY_MODEL` — primary model for answer narration (default: `qwen/qwen3-32b`)
+- `COMPOSER_PRIMARY_MODEL` — primary model for answer narration (recommended: `qwen/qwen3-32b`)
 - `COMPOSER_FALLBACK_MODELS` — comma-separated fallback models tried on failure
+- `COMPOSER_TIMEOUT_SECONDS` — per-call LLM timeout for Composer (default: `30`)
 
 **Knowledge Graph**:
 
@@ -321,41 +325,75 @@ The code reads configuration from `.env`. Copy `.env.example` to `.env` and fill
 - `SESSION_DB_PATH` — path to the SQLite session file (default: `pathfinder_sessions.db`)
 - `QU_CONTEXT_TURNS` — number of recent turns passed to QU for context (default: `5`)
 
+**Dev/environment flags** (do not set in production):
+
+- `APP_ENV` — set to `dev` to enable developer-only endpoints (`DELETE /dev/...`)
+- `DEV_MODE` — set to `true` as an alternative to `APP_ENV=dev` for enabling dev endpoints
+
 ## Setup
 
-Install dependencies:
+**1. Create and activate a virtual environment (Python 3.10+):**
+
+```bash
+python -m venv .venv
+# On Windows:
+.venv\Scripts\activate
+# On macOS/Linux:
+source .venv/bin/activate
+```
+
+**2. Install dependencies:**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Configure the environment:
-
-- Edit `.env`
-- Add your `LLM_API_KEY`
-- Set the rest of the LLM / Neo4j variables as needed for your environment
-
-Place the student dataset:
-
-- Ensure `data/students_anonymous.xlsx` is present
-
-Build the RAG index the first time, or whenever the handbook changes:
+**3. Configure the environment:**
 
 ```bash
-python engines/rag/ingest.py
+cp .env.example .env
 ```
 
-Run the backend: (It also shows the loggings)
+Edit `.env` and fill in:
+- `LLM_API_KEY` — your LLM provider API key (e.g. Groq)
+- `LLM_BASE_URL` — OpenAI-compatible base URL for your provider
+- `QU_PRIMARY_MODEL`, `COMPOSER_PRIMARY_MODEL` — see Recommended Model Configuration below
+- Neo4j credentials (`NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`)
+- `GROQ_API_KEY` — required for RAG rule bundle extraction at startup
+
+**4. Start Neo4j:**
+
+Ensure your Neo4j instance is running and the knowledge graph is loaded. To load the graph from scratch, run the Cypher scripts in `engines/kg/cypher/`.
+
+**5. Place the student dataset:**
+
+Ensure `data/students_anonymous.xlsx` is present with a `data` sheet and a `registrations` sheet.
+
+**6. Build the RAG index** (first time, or whenever the handbook changes):
+
+```bash
+python engines/RAG/ingest.py
+```
+
+This creates `engines/RAG/chroma_db/` and `engines/RAG/chunks.pkl`. Startup will fail without these.
+
+**7. Start the backend:**
 
 ```bash
 python -m uvicorn main:app --reload
 ```
 
-Run the UI from a separate terminal:
+Startup takes 25–110 seconds (RAG model loading + rule bundle extraction). Check the log for `PathFinder: ready.`
+
+Backend API docs: `http://localhost:8000/docs`
+
+**8. Start the UI** (separate terminal, same virtual environment):
 
 ```bash
 python -m streamlit run ui/streamlit_app.py
 ```
+
+UI: `http://localhost:8501`
 
 ## Example Questions
 
@@ -410,8 +448,11 @@ These are worth knowing if you continue developing the project:
 - Semester planning and graduation roadmap both receive the available course list from the KG (`get_courses_by_track`). The orchestrator must populate `kg_data["available_courses"]` correctly; if it passes an empty list, ALE will return `no_eligible_courses`.
 - GPA simulation and target GPA solving are implemented in ALE, but the chat flow does not yet gather a rich simulation scenario (e.g. planned courses with attempt types and old grades) automatically from the conversation.
 - The frontend is a lightweight internal UI and does not include authentication beyond student ID entry.
-- The `delete_session` operation exists in the session manager but is not exposed via any API endpoint.
 - Rule bundle loading at startup calls the Groq API 11 times with a 2-second inter-call delay. On a cold start this takes roughly 25–35 seconds. `student_level_rules` is the most rate-limit-sensitive bundle and may fail on the first attempt if Groq returns a 429; a backend restart resolves it.
+- Full end-to-end behavioral validation (intent-by-intent, domain correctness) happens in Phase 2. Phase 1 validates components individually.
+- `qwen/qwen3-32b` (Composer primary) is a preview model; production model hardening is deferred to a later phase.
+- The `/health` endpoint returns a basic `{"status": "ok"}` response only. Per-component health checks are not yet implemented.
+- The Composer deterministic reset-assumptions wording improvement is deferred pending an `assumptions_cleared=True` signal from the Orchestrator.
 
 ## Troubleshooting
 
@@ -430,6 +471,81 @@ The KG adapter degrades gracefully: KG-dependent intents return `kg_unavailable`
 **Streamlit cannot reach backend:**
 Set `PATHFINDER_API_URL=http://127.0.0.1:8000` in `.env` (or the host:port where the backend is running).
 
+## Recommended Model Configuration
+
+These are the validated model settings for Phase 1 demo:
+
+```env
+# Query Understanding — llama-3.3-70b-versatile as primary for intent accuracy
+QU_PRIMARY_MODEL=llama-3.3-70b-versatile
+QU_FALLBACK_MODELS=openai/gpt-oss-120b,openai/gpt-oss-20b
+QU_TIMEOUT_SECONDS=30
+
+# Response Composer — qwen/qwen3-32b for demo narration quality
+COMPOSER_USE_LLM=true
+COMPOSER_PRIMARY_MODEL=qwen/qwen3-32b
+COMPOSER_FALLBACK_MODELS=llama-3.1-8b-instant,openai/gpt-oss-20b
+COMPOSER_TIMEOUT_SECONDS=30
+```
+
+Composer intentionally does not use `llama-3.3-70b-versatile` to avoid provider rate limits — QU already uses it as primary.
+`qwen/qwen3-32b` produces high-quality demo narration but is a preview model; production roadmap may move Composer primary to `openai/gpt-oss-20b`.
+
+## Test Commands
+
+Run targeted component tests (no live LLM required for most):
+
+```bash
+python -m pytest tests/test_main.py -v --tb=short
+python -m pytest tests/test_orchestrator.py -v --tb=short
+python -m pytest tests/test_response_composer.py -v --tb=short
+python -m pytest tests/test_query_understanding.py -v --tb=short
+python -m pytest tests/test_session_manager.py -v --tb=short
+python -m pytest tests/test_student_context_provider.py -v --tb=short
+python -m pytest tests/test_utils.py -v --tb=short
+```
+
+Run full non-live suite:
+
+```bash
+python -m pytest tests/ -v --tb=short -k "not smoke"
+```
+
+Do not run `smoke_test_*.py` or `acceptance_*.py` without live LLM and Neo4j configured — they make real external calls.
+
+## Supervisor Demo Queries
+
+The following are recommended queries for demonstrating PathFinder in a Phase 1 demo session. Full E2E behavioral validation happens in Phase 2; use these as guided demo flows, not automated regression tests.
+
+**Student record and overview:**
+- "What courses did I complete so far?"
+- "What level am I in?"
+- "What is my current CGPA?"
+
+**Course exploration:**
+- "What are the prerequisites of Advanced Programming?"
+- "What skills does Deep Learning teach?"
+- "Which courses teach machine learning?"
+
+**Eligibility and planning:**
+- "Can I take Advanced Programming?"
+- "What courses can I take next semester?"
+- "Can I graduate? If not, give me a roadmap."
+
+**Policy and rules:**
+- "What happens if my CGPA drops below 2?"
+- "How many credits can I register with my current GPA?"
+- "What is the retake policy for failed courses?"
+
+**Career and track guidance:**
+- "I want to become a data scientist. What am I missing?"
+- "Compare AI and Data Science tracks."
+- "What roles can I get with the AI track?"
+
+**Session chaining:**
+- "Tell me about Advanced Programming" → "What are its prerequisites?" → "Can I take it?"
+- "Assume I passed Operating Systems. Now plan my semester." → "Reset assumptions."
+
 ## Development Notes
 
 - FastAPI and Streamlit are run as separate processes.
@@ -439,7 +555,9 @@ Set `PATHFINDER_API_URL=http://127.0.0.1:8000` in `.env` (or the host:port where
 
 ## Suggested Next Improvements
 
-- Wire the orchestrator to pass `kg_data["available_courses"]` from `get_courses_by_track` for semester planning and roadmap requests
-- Expose `DELETE /session/{session_id}` in the API layer
-- Add tests for routing, adapters, and ALE modules
 - Add deployment instructions for backend, frontend, Neo4j, and vector index artifacts
+- Migrate LangChain Chroma integration to `langchain_chroma` (deprecation warning; deferred to Phase 5)
+- Set `HF_TOKEN` to avoid unauthenticated HuggingFace download limits on first startup
+- Per-component health checks in `/health` (currently returns basic `{"status": "ok"}` only)
+- Composer reset-assumptions wording: needs `assumptions_cleared=True` signal from Orchestrator
+- Horizontal scaling / shared session store (currently SQLite, single-process only)

@@ -28,12 +28,20 @@ class IntentValidationError(Exception):
     """Raised when the LLM output contains an unrecognized intent."""
 
 
+def _load_qu_timeout() -> float:
+    """Read QU_TIMEOUT_SECONDS from env; return 30.0 if missing or invalid."""
+    try:
+        return float(os.getenv("QU_TIMEOUT_SECONDS", "30"))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 def load_model_chain() -> list[str]:
     """Load model names from environment. Returns ordered list (primary first)."""
     primary = os.getenv("QU_PRIMARY_MODEL", "llama-3.3-70b-versatile")
     fallback_str = os.getenv(
         "QU_FALLBACK_MODELS",
-        "meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,llama-3.1-8b-instant",
+        "openai/gpt-oss-120b,openai/gpt-oss-20b",
     )
     fallbacks = [m.strip() for m in fallback_str.split(",") if m.strip()]
     # Deduplicate while preserving order
@@ -56,6 +64,8 @@ class QUModelChain:
     ) -> None:
         self._client = llm_client
         self._models = models or load_model_chain()
+        self._timeout: float = _load_qu_timeout()
+        logger.info("QU.model_chain models=%d timeout=%.1f", len(self._models), self._timeout)
 
     def call(
         self,
@@ -73,6 +83,7 @@ class QUModelChain:
                     json_mode=True,
                     model=model,
                     temperature=0.0,
+                    timeout_seconds=self._timeout,
                 )
                 data = parse_json_object(raw)
                 sq_list = _extract_sq_list(data)

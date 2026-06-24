@@ -95,11 +95,15 @@ def run_graduation_audit(input: RunGraduationAuditInput) -> RunGraduationAuditOu
     graduation_rules = input.graduation_rules
     warning_rules = input.warning_rules
     checks: list[AuditCheck] = []
-    dismissed = False
-    dismissal_kind = ""
+
+    # Appeal threshold — used by both dismissal checks
+    _appeal_threshold = (
+        graduation_rules.total_credits_required
+        * warning_rules.dismissal_extension_credits_percentage
+    )
 
     # Check 1 — Warning Dismissal
-    dismissed = (
+    warning_dismissed = (
         input.consecutive_warnings >= warning_rules.max_consecutive_warnings
         or input.total_warnings >= warning_rules.max_total_warnings
     )
@@ -110,39 +114,49 @@ def run_graduation_audit(input: RunGraduationAuditInput) -> RunGraduationAuditOu
         f"< {warning_rules.max_consecutive_warnings} consecutive "
         f"AND < {warning_rules.max_total_warnings} total"
     )
+    checks.append(AuditCheck(
+        name="warning_dismissal_check",
+        passed=not warning_dismissed,
+        actual_value=warning_actual,
+        required_value=warning_required,
+        gap=(
+            (
+                "Dismissed — appeal eligible"
+                if input.cumulative_passed_hours >= _appeal_threshold
+                else "Dismissed — no appeal"
+            )
+            if warning_dismissed else None
+        ),
+    ))
+
+    # Check 1b — Maximum Regular Semesters Dismissal
+    max_semester_dismissed = (
+        input.completed_regular_semesters > graduation_rules.maximum_regular_semesters
+    )
+    checks.append(AuditCheck(
+        name="maximum_semesters_check",
+        passed=not max_semester_dismissed,
+        actual_value=input.completed_regular_semesters,
+        required_value=graduation_rules.maximum_regular_semesters,
+        gap=(
+            f"Exceeded maximum of {graduation_rules.maximum_regular_semesters} semester(s) "
+            f"by {input.completed_regular_semesters - graduation_rules.maximum_regular_semesters}"
+            if max_semester_dismissed else None
+        ),
+    ))
+
+    dismissed = warning_dismissed or max_semester_dismissed
+    dismissal_kind = ""
     if dismissed:
-        appeal_threshold = (
-            graduation_rules.total_credits_required
-            * warning_rules.dismissal_extension_credits_percentage
-        )
         dismissal_kind = (
             "dismissed_but_appeal_eligible"
-            if input.cumulative_passed_hours >= appeal_threshold
+            if input.cumulative_passed_hours >= _appeal_threshold
             else "dismissed_no_appeal"
         )
-        dismissal_gap = (
-            "Dismissed — appeal eligible"
-            if dismissal_kind == "dismissed_but_appeal_eligible"
-            else "Dismissed — no appeal"
-        )
-        checks.append(AuditCheck(
-            name="warning_dismissal_check",
-            passed=False,
-            actual_value=warning_actual,
-            required_value=warning_required,
-            gap=dismissal_gap,
-        ))
-    else:
-        checks.append(AuditCheck(
-            name="warning_dismissal_check",
-            passed=True,
-            actual_value=warning_actual,
-            required_value=warning_required,
-            gap=None,
-        ))
 
-    # Check 2 — Military Training (skipped entirely when military_status is None → female)
-    if input.military_status is not None:
+    # Check 2 — Military Training
+    # Skipped when rule is disabled OR military_status is None (female)
+    if graduation_rules.military_training_required_for_males and input.military_status is not None:
         military_passed = input.military_status in ("Done", "Exempted")
         checks.append(AuditCheck(
             name="military_check",
@@ -199,15 +213,16 @@ def run_graduation_audit(input: RunGraduationAuditInput) -> RunGraduationAuditOu
         ),
     ))
 
-    # Check 6 — Zero-Credit Courses
-    zero_credit_passed = input.zero_credit_courses_passed
-    checks.append(AuditCheck(
-        name="zero_credit_check",
-        passed=zero_credit_passed,
-        actual_value=input.zero_credit_courses_passed,
-        required_value=True,
-        gap=None if zero_credit_passed else "Zero-credit course requirements not met",
-    ))
+    # Check 6 — Zero-Credit Courses (conditional on rule toggle)
+    if graduation_rules.must_pass_zero_credit_courses:
+        zero_credit_passed = input.zero_credit_courses_passed
+        checks.append(AuditCheck(
+            name="zero_credit_check",
+            passed=zero_credit_passed,
+            actual_value=input.zero_credit_courses_passed,
+            required_value=True,
+            gap=None if zero_credit_passed else "Zero-credit course requirements not met",
+        ))
 
     # -----------------------------------------------------------------------
     # Phase 4 — Final Status and Next Steps
@@ -222,9 +237,12 @@ def run_graduation_audit(input: RunGraduationAuditInput) -> RunGraduationAuditOu
     )
 
     if dismissed:
+        dismissal_reason_codes = [dismissal_kind]
+        if max_semester_dismissed:
+            dismissal_reason_codes.append("maximum_regular_semesters_exceeded")
         return RunGraduationAuditOutput(
             status=dismissal_kind,
-            reason_codes=[dismissal_kind],
+            reason_codes=dismissal_reason_codes,
             current_cgpa=input.current_cgpa,
             checks=checks,
             next_steps=["Contact academic advising regarding dismissal."],
@@ -237,12 +255,25 @@ def run_graduation_audit(input: RunGraduationAuditInput) -> RunGraduationAuditOu
     next_steps = _build_next_steps(checks, graduation_rules, input, final_status)
 
     # -----------------------------------------------------------------------
-    # Phase 6 — Output Assembly
+    # Phase 6 — Reason Codes and Output Assembly
     # -----------------------------------------------------------------------
+
+    reason_codes: list[str] = []
+    if final_status == "not_eligible":
+        _CHECK_TO_REASON: dict[str, str] = {
+            "cgpa_check": "cgpa_below_minimum",
+            "credits_check": "credits_incomplete",
+            "semesters_check": "minimum_regular_semesters_not_met",
+            "military_check": "military_training_required",
+            "zero_credit_check": "zero_credit_requirements_not_met",
+        }
+        for check in checks:
+            if not check.passed and check.name in _CHECK_TO_REASON:
+                reason_codes.append(_CHECK_TO_REASON[check.name])
 
     return RunGraduationAuditOutput(
         status=final_status,
-        reason_codes=[],
+        reason_codes=reason_codes,
         current_cgpa=input.current_cgpa,
         checks=checks,
         next_steps=next_steps,

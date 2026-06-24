@@ -1,4 +1,4 @@
-﻿"""
+"""
 ale/functions/generate_graduation_roadmap.py
 ============================================
 Implements generate_graduation_roadmap following ALE_Step5_Algorithms.md Function 6,
@@ -8,6 +8,16 @@ Multi-semester simulation loop: absorbs in-progress courses, then projects semes
 semester course selection and GPA evolution until graduation requirements are met or a
 terminal condition is reached.  No grade resolution — assumed_grade_per_pass is pre-
 resolved to grade points by the orchestrator.
+
+Supports two planning modes:
+  - Graduation mode (default): simulates until graduation or a terminal stop.
+  - Target-semester mode: simulates through a resolved target-end semester/year.
+    Orchestrator/QU/utils resolve the target text; ALE only consumes resolved fields.
+
+SCP/Orchestrator boundary (never inferred inside ALE):
+  - current_semester: owned by SCP
+  - starting semester/year: resolved by Orchestrator from ctx.current_semester + utils
+  - target_end semester/year: resolved by Orchestrator from QU params + utils
 """
 
 from dataclasses import dataclass
@@ -34,7 +44,25 @@ _HIGH_UNLOCK_THRESHOLD = 3    # unlock_score >= 3 earns "high_unlock" priority
 _DEFAULT_ASSUMED_GRADE = 2.6  # C+ — default grade assumed per pass when none provided
 _MAX_LOOP_GUARD        = 300  # absolute safeguard; prevents infinite loops on bad data
 
-_LEVEL_MAP = {"Freshman": 1, "Sophomore": 2, "Junior": 3, "Senior": 4}
+_LEVEL_MAP             = {"Freshman": 1, "Sophomore": 2, "Junior": 3, "Senior": 4}
+_VALID_SEMESTER_TYPES  = frozenset({"Fall", "Spring", "Summer"})
+_YEAR_MIN, _YEAR_MAX   = 2000, 2100
+
+
+def _semester_key(season: str, year: int) -> tuple[int, int]:
+    """Chronological sort key (academic_year, season_rank).
+
+    Academic-year convention used by QU handbook:
+      Fall YYYY opens academic year YYYY  → key (YYYY, 0)
+      Spring YYYY and Summer YYYY close year YYYY-1 → keys (YYYY-1, 1) and (YYYY-1, 2)
+
+    Correct ordering: Fall 2025 < Spring 2026 < Summer 2026 < Fall 2026.
+    """
+    if season == "Fall":
+        return (year, 0)
+    if season == "Spring":
+        return (year - 1, 1)
+    return (year - 1, 2)  # Summer
 
 
 def _is_offered_in_semester(semester_offering: list, target_semester_type: str) -> bool:
@@ -110,6 +138,32 @@ def generate_graduation_roadmap(
     if needs_summer_rules and input.summer_semester_rules is None:
         return _cannot_compute(["missing_summer_rules"], [])
 
+    # Belt-and-suspenders guards — protect against model_construct() bypass of Literal
+    if input.target_semester_type not in _VALID_SEMESTER_TYPES:  # type: ignore[comparison-overlap]
+        return _cannot_compute(["invalid_target_semester_type"], [])
+
+    if input.student_level not in _LEVEL_MAP:  # type: ignore[comparison-overlap]
+        return _cannot_compute(["invalid_student_level"], [])
+
+    if not (_YEAR_MIN <= input.starting_year <= _YEAR_MAX):
+        return _cannot_compute(["invalid_starting_year"], [])
+
+    # Target-end semester validation (both fields or neither)
+    has_end_type = input.target_end_semester_type is not None
+    has_end_year = input.target_end_year is not None
+    if has_end_type != has_end_year:
+        return _cannot_compute(["incomplete_target_end_semester"], [])
+
+    if has_end_type:
+        if input.target_end_semester_type not in _VALID_SEMESTER_TYPES:  # type: ignore[comparison-overlap]
+            return _cannot_compute(["invalid_target_end_semester_type"], [])
+        if not (_YEAR_MIN <= input.target_end_year <= _YEAR_MAX):  # type: ignore[operator]
+            return _cannot_compute(["invalid_target_end_year"], [])
+        if _semester_key(input.target_end_semester_type, input.target_end_year) < _semester_key(  # type: ignore[arg-type]
+            input.target_semester_type, input.starting_year
+        ):
+            return _cannot_compute(["target_end_before_start"], [])
+
     # -----------------------------------------------------------------------
     # Phase 2 — Study Status Gate
     # -----------------------------------------------------------------------
@@ -147,6 +201,12 @@ def generate_graduation_roadmap(
 
     global_warnings: list[str] = []
 
+    # Warning simulation state — only active when warning_rules is provided
+    sim_consecutive_warnings: int    = input.consecutive_warnings
+    sim_total_warnings: int          = input.total_warnings
+    warning_limit_reached_in_semester: str | None = None
+    _do_warning_sim: bool            = input.warning_rules is not None
+
     # Absorb in-progress courses — assumed passed before the loop begins
     if input.in_progress_courses:
         for code in input.in_progress_courses:
@@ -156,7 +216,7 @@ def generate_graduation_roadmap(
                     f"In-progress course {code} not found in available courses — "
                     "credit hours excluded from projection."
                 )
-                sim_completed.add(code)   # still mark as done so it is not re-selected
+                sim_completed.add(code)   # still mark done so it is not re-selected
                 continue
             sim_completed.add(code)
             sim_quality_pts += assumed_grade * ac.credits
@@ -168,17 +228,18 @@ def generate_graduation_roadmap(
             "In-progress courses assumed passed. Roadmap changes if any are not passed."
         )
 
-    # Non-course blockers — flagged but do not stop the simulation loop
+    # Non-course blockers — military and zero-credit are readiness gaps, not loop blockers.
+    # Evaluated against rules so rule toggles can disable them.
     non_course_blockers: list[str] = []
-    if input.current_cgpa < graduation_rules.minimum_cgpa:
-        non_course_blockers.append("cgpa_below_minimum")
     if (
-        input.military_status is not None
+        graduation_rules.military_training_required_for_males
+        and input.military_status is not None
         and input.military_status not in ("Done", "Exempted")
     ):
         non_course_blockers.append("military_training_required")
-    if not input.zero_credit_courses_passed:
+    if graduation_rules.must_pass_zero_credit_courses and not input.zero_credit_courses_passed:
         non_course_blockers.append("zero_credit_courses_required")
+    # cgpa_below_minimum: evaluated in Phase 5 using final sim_cgpa, not initial CGPA
 
     # -----------------------------------------------------------------------
     # Phase 4 — Simulation Loop
@@ -190,11 +251,12 @@ def generate_graduation_roadmap(
     pass_number    = 0
     loop_guard     = 0
 
-    # Edge case: requirements already met after absorbing in-progress
+    # Edge case: all graduation requirements already met after absorbing in-progress
     already_done = (
         sim_passed_hrs >= graduation_rules.total_credits_required
         and (input.completed_regular_semesters + regular_passes)
             >= graduation_rules.minimum_regular_semesters
+        and sim_cgpa >= graduation_rules.minimum_cgpa
     )
     if already_done:
         global_warnings.append("All graduation requirements already met.")
@@ -207,6 +269,34 @@ def generate_graduation_roadmap(
         loop_guard += 1
         if loop_guard > _MAX_LOOP_GUARD:
             return _cannot_compute(["infinite_loop_guard"], [])
+
+        # Target-end mode: stop BEFORE planning any semester beyond the requested target
+        if has_end_type:
+            if _semester_key(current_season, current_year) > _semester_key(
+                input.target_end_semester_type, input.target_end_year  # type: ignore[arg-type]
+            ):
+                gaps = _build_remaining_gaps(
+                    sim_passed_hrs,
+                    input.completed_regular_semesters + regular_passes,
+                    graduation_rules,
+                    sim_cgpa=sim_cgpa,
+                )
+                return GenerateGraduationRoadmapOutput(
+                    status="cannot_complete_projection",
+                    reason_codes=["target_semester_reached_not_graduated"],
+                    warnings=global_warnings,
+                    total_passes=len(semester_plans),
+                    non_course_blockers=non_course_blockers,
+                    remaining_graduation_gaps=gaps,
+                    semester_mode="accelerated" if input.accelerated_mode else "regular",
+                    credit_mode=_determine_credit_mode(input),
+                    simulation_grade_used=assumed_grade,
+                    semester_plans=semester_plans,
+                    target_reached_without_graduation=True,
+                    projected_consecutive_warnings=sim_consecutive_warnings if _do_warning_sim else None,
+                    projected_total_warnings=sim_total_warnings if _do_warning_sim else None,
+                    warning_limit_reached_in_semester=warning_limit_reached_in_semester,
+                )
 
         pass_number    += 1
         is_summer_pass  = (current_season == "Summer")
@@ -221,6 +311,7 @@ def generate_graduation_roadmap(
                 sim_passed_hrs,
                 input.completed_regular_semesters + regular_passes,
                 graduation_rules,
+                sim_cgpa=sim_cgpa,
             )
             return GenerateGraduationRoadmapOutput(
                 status="cannot_complete_projection",
@@ -233,6 +324,9 @@ def generate_graduation_roadmap(
                 credit_mode=_determine_credit_mode(input),
                 simulation_grade_used=assumed_grade,
                 semester_plans=semester_plans,
+                projected_consecutive_warnings=sim_consecutive_warnings if _do_warning_sim else None,
+                projected_total_warnings=sim_total_warnings if _do_warning_sim else None,
+                warning_limit_reached_in_semester=warning_limit_reached_in_semester,
             )
 
         # Credit / course-count cap for this pass
@@ -314,6 +408,7 @@ def generate_graduation_roadmap(
                 sim_passed_hrs,
                 input.completed_regular_semesters + regular_passes,
                 graduation_rules,
+                sim_cgpa=sim_cgpa,
             )
             return GenerateGraduationRoadmapOutput(
                 status="blocked",
@@ -326,6 +421,9 @@ def generate_graduation_roadmap(
                 credit_mode=_determine_credit_mode(input),
                 simulation_grade_used=assumed_grade,
                 semester_plans=semester_plans,
+                projected_consecutive_warnings=sim_consecutive_warnings if _do_warning_sim else None,
+                projected_total_warnings=sim_total_warnings if _do_warning_sim else None,
+                warning_limit_reached_in_semester=warning_limit_reached_in_semester,
             )
 
         # Sort by priority tier
@@ -350,6 +448,7 @@ def generate_graduation_roadmap(
                 sim_passed_hrs,
                 input.completed_regular_semesters + regular_passes,
                 graduation_rules,
+                sim_cgpa=sim_cgpa,
             )
             return GenerateGraduationRoadmapOutput(
                 status="blocked",
@@ -362,15 +461,26 @@ def generate_graduation_roadmap(
                 credit_mode=_determine_credit_mode(input),
                 simulation_grade_used=assumed_grade,
                 semester_plans=semester_plans,
+                projected_consecutive_warnings=sim_consecutive_warnings if _do_warning_sim else None,
+                projected_total_warnings=sim_total_warnings if _do_warning_sim else None,
+                warning_limit_reached_in_semester=warning_limit_reached_in_semester,
             )
 
         # State update — GPA evolves before we compute per-pass warnings
         credits_this_pass = sum(e.course.credits for e in selected)
+        retake_cap_applied = False
+        cap_pts = input.failed_retake_grade_cap_points
+
         for entry in selected:
             if entry.is_retake:
-                # Replacement: old failed attempt had 0 quality points (F); just add new
-                sim_quality_pts += assumed_grade * entry.course.credits
-                # sim_gpa_denom unchanged — credits already counted in CHs
+                if cap_pts is not None and assumed_grade > cap_pts:
+                    applied = cap_pts
+                    retake_cap_applied = True
+                else:
+                    applied = assumed_grade
+                # Replacement: old failed attempt had 0 quality points; just add new
+                sim_quality_pts += applied * entry.course.credits
+                # sim_gpa_denom unchanged — credits already counted in denominator
                 sim_failed.discard(entry.course.course_code)
             else:
                 sim_quality_pts += assumed_grade * entry.course.credits
@@ -384,6 +494,41 @@ def generate_graduation_roadmap(
         if is_regular_pass:
             regular_passes += 1
 
+        # Warning progression simulation — regular semesters only; Summer excluded
+        if _do_warning_sim and is_regular_pass:
+            warn_rules = input.warning_rules  # type: ignore[union-attr]
+            if sim_cgpa < warn_rules.cgpa_warning_threshold:
+                sim_consecutive_warnings += 1
+                sim_total_warnings += 1
+            else:
+                sim_consecutive_warnings = 0
+            if (
+                sim_consecutive_warnings >= warn_rules.max_consecutive_warnings
+                or sim_total_warnings >= warn_rules.max_total_warnings
+            ):
+                warning_limit_reached_in_semester = f"{current_season} {current_year}"
+                gaps = _build_remaining_gaps(
+                    sim_passed_hrs,
+                    input.completed_regular_semesters + regular_passes,
+                    graduation_rules,
+                    sim_cgpa=sim_cgpa,
+                )
+                return GenerateGraduationRoadmapOutput(
+                    status="cannot_complete_projection",
+                    reason_codes=["projected_warning_limit_reached"],
+                    warnings=global_warnings,
+                    total_passes=len(semester_plans),
+                    non_course_blockers=non_course_blockers,
+                    remaining_graduation_gaps=gaps,
+                    semester_mode="accelerated" if input.accelerated_mode else "regular",
+                    credit_mode=_determine_credit_mode(input),
+                    simulation_grade_used=assumed_grade,
+                    semester_plans=semester_plans,
+                    projected_consecutive_warnings=sim_consecutive_warnings,
+                    projected_total_warnings=sim_total_warnings,
+                    warning_limit_reached_in_semester=warning_limit_reached_in_semester,
+                )
+
         # Per-pass warnings (computed after state update so sim_cgpa is current)
         pass_warnings: list[str] = []
 
@@ -394,7 +539,14 @@ def generate_graduation_roadmap(
                 "available with academic council approval."
             )
 
-        # 2. Simulated CGPA below graduation minimum
+        # 2. Retake grade cap was applied this pass
+        if retake_cap_applied:
+            pass_warnings.append(
+                "Failed-retake courses have a maximum grade cap. "
+                "Projected CGPA may be lower than estimated without the cap."
+            )
+
+        # 3. Simulated CGPA below graduation minimum
         if sim_cgpa < graduation_rules.minimum_cgpa:
             pass_warnings.append(
                 f"Simulated CGPA after this semester ({sim_cgpa}) is below the minimum "
@@ -402,25 +554,26 @@ def generate_graduation_roadmap(
                 "Consult your academic advisor."
             )
 
-        # 3. Final pass — non-course graduation requirements
+        # 4. Final pass — non-course graduation requirements
         if is_final_pass:
             pass_warnings.append(
                 "This appears to be your final semester — verify all non-course "
                 "graduation requirements with the registrar."
             )
 
-        # 4. Summer pass
+        # 5. Summer pass
         if is_summer_pass:
             pass_warnings.append(
                 "Summer course availability is subject to faculty council announcement."
             )
 
-        # 5. Eligible credits below semester minimum
-        pool_credits = sum(e.course.credits for e in pool)
-        if pool_credits < credit_limit_rules.minimum_per_semester:
-            pass_warnings.append(
-                "Total eligible credits below minimum — consult your academic advisor."
-            )
+        # 6. Eligible credits below semester minimum (non-summer only — summer uses course-count cap)
+        if not is_summer_pass:
+            pool_credits = sum(e.course.credits for e in pool)
+            if pool_credits < credit_limit_rules.minimum_per_semester:
+                pass_warnings.append(
+                    "Total eligible credits below minimum — consult your academic advisor."
+                )
 
         planned_courses = [_build_planned_course(e) for e in selected]
 
@@ -444,6 +597,31 @@ def generate_graduation_roadmap(
     # Phase 5 — Output Assembly
     # -----------------------------------------------------------------------
 
+    # Final CGPA check — graduation requires meeting minimum CGPA threshold
+    if sim_cgpa < graduation_rules.minimum_cgpa:
+        non_course_blockers.append("cgpa_below_minimum")
+        gaps = _build_remaining_gaps(
+            sim_passed_hrs,
+            input.completed_regular_semesters + regular_passes,
+            graduation_rules,
+            sim_cgpa=sim_cgpa,
+        )
+        return GenerateGraduationRoadmapOutput(
+            status="cannot_complete_projection",
+            reason_codes=["cgpa_below_minimum"],
+            warnings=global_warnings,
+            total_passes=len(semester_plans),
+            non_course_blockers=non_course_blockers,
+            remaining_graduation_gaps=gaps,
+            semester_mode="accelerated" if input.accelerated_mode else "regular",
+            credit_mode=_determine_credit_mode(input),
+            simulation_grade_used=assumed_grade,
+            semester_plans=semester_plans,
+            projected_consecutive_warnings=sim_consecutive_warnings if _do_warning_sim else None,
+            projected_total_warnings=sim_total_warnings if _do_warning_sim else None,
+            warning_limit_reached_in_semester=warning_limit_reached_in_semester,
+        )
+
     projected_graduation_semester = (
         semester_plans[-1].semester_label if semester_plans else None
     )
@@ -458,6 +636,9 @@ def generate_graduation_roadmap(
         credit_mode=_determine_credit_mode(input),
         simulation_grade_used=assumed_grade,
         semester_plans=semester_plans,
+        projected_consecutive_warnings=sim_consecutive_warnings if _do_warning_sim else None,
+        projected_total_warnings=sim_total_warnings if _do_warning_sim else None,
+        warning_limit_reached_in_semester=warning_limit_reached_in_semester,
     )
 
 
@@ -550,6 +731,7 @@ def _build_remaining_gaps(
     sim_passed_hrs: int,
     total_regular_semesters: int,
     graduation_rules: GraduationRequirementRules,
+    sim_cgpa: float | None = None,
 ) -> list[str]:
     gaps: list[str] = []
     credit_gap = graduation_rules.total_credits_required - sim_passed_hrs
@@ -558,6 +740,10 @@ def _build_remaining_gaps(
     semester_gap = graduation_rules.minimum_regular_semesters - total_regular_semesters
     if semester_gap > 0:
         gaps.append(f"{semester_gap} regular semester(s) still needed")
+    if sim_cgpa is not None and sim_cgpa < graduation_rules.minimum_cgpa:
+        gaps.append(
+            f"CGPA ({sim_cgpa}) below graduation minimum ({graduation_rules.minimum_cgpa})"
+        )
     return gaps
 
 
@@ -567,4 +753,3 @@ def _determine_credit_mode(input: GenerateGraduationRoadmapInput) -> str:
     if input.target_credit_load is not None:
         return "student_specified"
     return "default"
-

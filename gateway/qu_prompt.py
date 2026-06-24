@@ -21,7 +21,7 @@ OUTPUT FORMAT — always a JSON object with a "queries" array:
       "entities": {
         "course_code": "<C-XXYYYY or course name/mention or null>",
         "role": "<role name e.g. data_scientist or null>",
-        "track": "<track name e.g. AI, CS, Cyber, Data Science, SW, General or null>",
+        "track": "<track name e.g. AI, CYS, DSE, SWE, GEN or null>",
         "skill": "<skill name or null>"
       },
       "secondary_entities": {
@@ -56,6 +56,13 @@ Policy: policy_query
 Student Record: get_student_record
 Control: clarification_needed | out_of_scope
 
+CLARIFICATION GUARD — apply BEFORE any intent mapping:
+If the student explicitly names a career role (data scientist, ML engineer, software engineer, cybersecurity analyst, etc.) or a track (AI, CYS, DSE, SWE), NEVER output clarification_needed. Use the matching Career/Role or Track intent directly.
+  • "I wanna be [role] / I want to become [role]" + missing/gap/lack wording → compute_skill_gap, role=[role], student_referential_fallback=true
+  • "important / core / key / focus courses for [role or track]" (no personal pronouns) → get_focus_courses_for_target, student_referential_fallback=false
+  • "focus / important courses I should still take / haven't taken / left for [role]" → get_focus_courses_for_target, student_referential_fallback=true
+Only use clarification_needed when the query has NO discernible intent AND no named role/track/course.
+
 INTENT GUIDE (critical mappings):
 - "can I take X / am I eligible for X" → check_course_eligibility (NOT check_eligibility)
 - "prerequisites for X / what do I need before X" → get_course_prerequisites with params.depth="direct" (NOT get_prerequisites)
@@ -64,8 +71,10 @@ INTENT GUIDE (critical mappings):
 - "careers in AI track / jobs from track" → get_roles_by_track
 - "what courses teach X / which courses cover X / courses that teach databases / courses for learning X" → search_courses_by_skill; extract skill entity = X (NOT get_course_info; NOT get_roles_by_skill)
 - "what roles need Python / roles for a skill" → clarification_needed (no locked intent maps skill→roles; do NOT use search_courses_by_skill, NOT get_roles_by_skill)
-- "courses for Data Scientist / courses to close gap" → recommend_courses_to_close_gap or get_focus_courses_for_target
-- "do I have the skills to become X / am I ready for X / what am I missing to become X" → compute_skill_gap (missing/gap/what-do-I-lack wording) or compute_alignment_score (fit/match/aligned/percentage wording); extract role entity, student_referential_fallback=true
+- "focus/core/key/important courses for [role/track]" (general wording, no personal pronouns) → get_focus_courses_for_target; student_referential_fallback=false; NEVER clarification_needed when a clear role or track is mentioned
+- "what focus/important courses should I still take / which focus courses have I not completed / what focus courses are left for me / based on my courses, what focus courses should I prioritize" → get_focus_courses_for_target; student_referential_fallback=true; personal trigger words: "still", "remaining", "left", "not completed", "haven't taken", "based on my"; NEVER clarification_needed when role/track is clear
+- "courses to close my gap / what courses do I still need to become X / recommend courses to help me become X / what courses am I missing for role X" → recommend_courses_to_close_gap; always student_referential_fallback=true
+- "do I have the skills to become X / am I ready for X / what am I missing to become X / I wanna be X what am I missing / I want to become X what am I lacking / what skills do I lack for X" → compute_skill_gap (missing/gap/what-do-I-lack wording) or compute_alignment_score (fit/match/aligned/percentage wording); extract role entity, student_referential_fallback=true; NEVER clarification_needed when a clear role name is present
 - "can I graduate + give roadmap" → [run_graduation_audit, generate_graduation_roadmap]
 - "if I get A in X, what is my GPA / if I get 90 in X" → simulate_gpa_forward; for multiple courses put ALL in params.expected_grades: {"course_name_or_code":"A","C-YY222":"B"}; percentages like 90 are valid grades; set entities.course_code null (multiple courses); student_referential_fallback=true
 - "if I get A in X and B in Y, can my GPA reach 2.0?" → simulate_gpa_forward (specific grades given + target check, NOT solve_target_gpa); put grades in params.expected_grades; student_referential_fallback=true
@@ -74,7 +83,9 @@ INTENT GUIDE (critical mappings):
 - "am I on probation / in academic danger / at risk academically / am I failing?" → get_student_record (student_referential_fallback=true) — academic_standing field will show warning/good
 - "how many credits can I register / take next semester (with my GPA)?" → TWO queries: [get_student_record, policy_query]; get_student_record gives their CGPA; policy_query original_text="What is the maximum credit hours a student can register based on CGPA?" — combining both lets the Composer give a personalized credit-limit answer
 - "assume I failed X, what happens to my plan / what now / what should I do" → plan_semester or generate_graduation_roadmap with assumed_failed_courses:[X], course_override_type:"assumed_failed" — NOT policy_query; policy_query is only for explicit rule/regulation questions
+- plan_semester is for COURSE REGISTRATION SCHEDULING ONLY: "what should I register next semester", "plan my Spring 2026 courses", "what courses can I take next term", "make me a semester schedule"; NEVER use plan_semester for generic career learning ("what should I study to become X", "what should I learn for ML engineering") — those → get_focus_courses_for_target (general or personal) or recommend_courses_to_close_gap (personal gap-closing)
 - "if I pass X / once I pass X, can I take Y?" → check_course_eligibility for Y; set assumed_passed_courses:[X], course_override_type:"assumed_passed"; use course names as-is if no code given (resolver will convert)
+- "if I take X and Y, how much better is my [role] alignment / will these planned courses improve my fit for [role]" → estimate_alignment_improvement; extract explicitly mentioned courses into params.planned_courses=["course1","course2"]; if no courses are explicitly mentioned and no session context references planned courses → clarification_needed (ask which courses they plan to take)
 - "reset assumptions / clear assumptions / cancel what-if / back to official record / remove overrides" → get_student_record with override_action:"clear"; NO confirmation needed; this clears all what-if assumptions immediately
 - Academic regulations/handbook topics (GPA, warning, probation, grading, attendance, retake, withdrawal, graduation requirements, credit limits) → policy_query (NOT handbook_query)
 - Non-academic topics (financial aid, tuition, housing, admissions, application deadlines, visa, parking, dorms, cafeteria, scholarships, student services outside curriculum) → out_of_scope
@@ -94,10 +105,11 @@ DECOMPOSITION RULES:
 ENTITY EXTRACTION:
 - course_code: use exact code if given (C-CS301); otherwise put the course name/mention as-is (resolver converts names to codes)
 - role: lowercase underscore format (data_scientist, ml_engineer, software_engineer)
-- track: normalize to one of AI | CS | Cyber | Data Science | SW | General
-- secondary_entities.track: ONLY for compare_tracks — the second track
+- track: Final resolved track IDs should be canonical: AI, CYS, DSE, SWE, GEN. Extract natural mentions ("cyber", "data science", "software engineering", "general") as is. Do NOT treat "CS" or "Computer Science" as a valid track unless supported; if unsupported/ambiguous, return clarification_needed.
+- secondary_entities.track: ONLY for compare_tracks — the second track. Note: compare_tracks supports exactly two tracks; if user asks to compare 3+ tracks, return clarification_needed.
+- If a phrase could refer to a course, track, or role and context does not disambiguate, return clarification_needed.
 - student_referential_fallback=true when: "my GPA", "my track", "can I", "am I", "what suits me", \
-"my courses", "should I", "my record", "I want to become"
+"my courses", "should I", "my record", "I want to become", "I wanna be", "what am I missing"
 
 POLICY HANDLING:
 - Use policy_query ONLY for academic regulations and handbook topics: GPA, academic warning, probation, grading, attendance, course retake, withdrawal, graduation requirements, credit limits, academic disciplinary rules
@@ -113,16 +125,31 @@ SESSION OVERRIDE RULES:
 - "plan as if I take X" / "add X to my plan" → added_courses:[X], course_override_type:"planned"
 - "assume I passed X" / "if I pass X" → assumed_passed_courses:[X], course_override_type:"assumed_passed"
 - "assume I failed X" → assumed_failed_courses:[X], course_override_type:"assumed_failed"
-- "clear / reset assumptions / back to official / cancel what-if" → override_action:"clear", course_override_type:"none"; NO confirmation prompt; immediately clear
+- "clear / reset assumptions / back to official / cancel what-if / remove what we assumed / forget the what-if scenario" → override_action:"clear", course_override_type:"none"; NO confirmation prompt; immediately clear
+- Generic confirmations like "yes", "yes i confirm", "sure", "ok" must NOT clear assumptions. If no clear/reset keyword is present, return clarification_needed.
 - "if I get A in OS" → params.expected_grades:{"OS":"A"} — use the course mention as the key, NOT a persistent session override
 - "if I get 90 in Programming Fundamentals" → params.expected_grades:{"Programming Fundamentals":"90"} — percentage is valid; use natural name as key
 - Real past claims ("I failed X last semester") → NO override unless user explicitly says assume/what-if/pretend
 
+SEMESTER EXTRACTION:
+- Explicit semester phrase ("Fall 2026", "Spring 2027", "Summer 2026") → add to params: target_semester="Fall 2026", target_semester_type="Fall", semester_resolution_source="explicit"
+- Relative semester phrase ("next semester", "next fall", "next spring", "next term", "the semester after next", "in two semesters", "my 7th semester", "two falls from now", "three semesters from now") → add to params: target_semester_text="<exact raw phrase>", semester_resolution_source="relative"; do NOT compute the actual year — the Orchestrator will resolve relative phrases using the student's current_semester from academic data
+- If neither explicit nor relative semester phrase is present: omit all semester params
+
 FOLLOW-UP / PRONOUN RESOLUTION:
-- Use provided last_course/last_role/last_track context to resolve "it", "that course", "this role"
+- Use provided last_course/last_role/last_track/last_skill context to resolve "it", "that course", "this role", "that skill"
 - If the referent is unambiguous, resolve it; if ambiguous → clarification_needed
 
 EXAMPLES:
+
+Input: "i wanna be data scientist what am i missing"
+{"queries":[{"intent":"compute_skill_gap","original_text":"I wanna be a data scientist, what am I missing?","entities":{"course_code":null,"role":"data_scientist","track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "important courses for data scientist"
+{"queries":[{"intent":"get_focus_courses_for_target","original_text":"important courses for data scientist","entities":{"course_code":null,"role":"data_scientist","track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "what focus courses should i still take for data scientist"
+{"queries":[{"intent":"get_focus_courses_for_target","original_text":"what focus courses should I still take for data scientist?","entities":{"course_code":null,"role":"data_scientist","track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
 
 Input: "Tell me about C-CS301"
 {"queries":[{"intent":"get_course_info","original_text":"Tell me about C-CS301","entities":{"course_code":"C-CS301","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
@@ -142,8 +169,8 @@ Input: "If I get A in OS, what will my GPA be?"
 Input: "if i get 90 in Programming Fundamentals and 85 in Digital Logic what will my cgpa be?"
 {"queries":[{"intent":"simulate_gpa_forward","original_text":"if i get 90 in Programming Fundamentals and 85 in Digital Logic what will my cgpa be?","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"expected_grades":{"Programming Fundamentals":"90","Digital Logic":"85"}},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
 
-Input: "Assume I failed AI, what happens to my plan?"
-{"queries":[{"intent":"plan_semester","original_text":"Assume I failed AI, what happens to my plan?","entities":{"course_code":"AI","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":["AI"],"target_role":null,"course_override_type":"assumed_failed","override_action":"accumulate"},"student_referential_fallback":true}]}
+Input: "Assume I failed Operating Systems, what happens to my plan?"
+{"queries":[{"intent":"plan_semester","original_text":"Assume I failed Operating Systems, what happens to my plan?","entities":{"course_code":"Operating Systems","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":["Operating Systems"],"target_role":null,"course_override_type":"assumed_failed","override_action":"accumulate"},"student_referential_fallback":true}]}
 
 Input: "Do I have the skills to become a machine learning engineer?"
 {"queries":[{"intent":"compute_skill_gap","original_text":"Do I have the skills to become a machine learning engineer?","entities":{"course_code":null,"role":"machine_learning_engineer","track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
@@ -169,9 +196,6 @@ Input: "if I pass Programming Fundamentals, can I take Advanced Programming?"
 Input: "reset assumptions"
 {"queries":[{"intent":"get_student_record","original_text":"Reset what-if assumptions and show my official academic record","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"clear"},"student_referential_fallback":true}]}
 
-Input: "yes i confirm"
-{"queries":[{"intent":"get_student_record","original_text":"Confirm reset of what-if assumptions","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"clear"},"student_referential_fallback":true}]}
-
 Input: "what are the full prerequisites of Data Structures?"
 {"queries":[{"intent":"get_course_prerequisites","original_text":"What are the full prerequisites of Data Structures?","entities":{"course_code":"Data Structures","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"depth":"full"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
 
@@ -193,10 +217,9 @@ def build_user_message(
 
     if recent_turns:
         lines = []
-        for t in recent_turns[-3:]:
+        for t in recent_turns:
             u = (t.get("user") or "")[:100]
-            a = (t.get("answer") or "")[:100]
-            lines.append(f"S: {u}\nA: {a}")
+            lines.append(f"S: {u}")
         parts.append("Recent turns:\n" + "\n".join(lines))
 
     refs: list[str] = []
@@ -206,6 +229,8 @@ def build_user_message(
         refs.append(f"last_role={last_referenced.role_id}")
     if last_referenced.track_id:
         refs.append(f"last_track={last_referenced.track_id}")
+    if last_referenced.skill_id:
+        refs.append(f"last_skill={last_referenced.skill_id}")
     if refs:
         parts.append("Context: " + ", ".join(refs))
 

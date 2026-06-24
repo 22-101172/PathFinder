@@ -6,6 +6,7 @@ from StudentContext (sourced from Student Context Provider).
 See ALE_Integration_Contract.md for the full contract."""
 
 import logging
+import time
 
 from pydantic import ValidationError
 
@@ -30,11 +31,143 @@ from engines.ale.schemas import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+
+# Scalar param keys safe to log verbatim (no PII)
+_SAFE_SCALAR_PARAM_KEYS = {
+    "target_course_code", "attempt_type", "target_cgpa",
+    "target_semester_type", "starting_year",
+    "target_end_semester_type", "target_end_year",
+    "accelerated_mode", "max_credits_mode", "target_credit_load",
+    "planned_course_source",
+}
+
+# Result list fields worth counting in the summary log
+_RESULT_COUNT_FIELDS = {
+    "plans", "semester_plans", "checks", "per_course_breakdown",
+    "grade_overrides", "gpa_neutral_courses", "default_distribution",
+    "personalized_distribution", "honors_checks", "non_course_blockers",
+    "next_steps",
+}
+
+
+def _duration_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
+
+
+def _summarize_params(params: dict) -> dict:
+    """Build a PII-safe log-friendly summary of ALE operation params."""
+    try:
+        summary: dict = {}
+        for k, v in params.items():
+            if k in _SAFE_SCALAR_PARAM_KEYS:
+                summary[k] = v
+            elif isinstance(v, list):
+                preview = [
+                    c.get("course_code") if isinstance(c, dict) else str(c)
+                    for c in v[:3]
+                ]
+                summary[k] = {"count": len(v), "preview": preview}
+            elif isinstance(v, dict):
+                summary[k] = {"_type": "dict", "keys": list(v.keys())[:5]}
+        return summary
+    except Exception:
+        return {}
+
+
+def _summarize_kg_data(kg_data: dict) -> dict:
+    """Build a PII-safe log-friendly summary of kg_data passed to the adapter."""
+    try:
+        summary: dict = {}
+        av = kg_data.get("available_courses")
+        if isinstance(av, list):
+            preview = [c.get("course_code") for c in av[:3] if isinstance(c, dict)]
+            summary["available_courses"] = {"count": len(av), "preview": preview}
+        zc = kg_data.get("required_zero_credit_courses")
+        if zc is not None:
+            summary["required_zero_credit_courses"] = {"count": len(zc), "values": list(zc)[:5]}
+        ccl = kg_data.get("course_credit_lookup")
+        if isinstance(ccl, dict):
+            summary["course_credit_lookup"] = {"count": len(ccl)}
+        prereqs = kg_data.get("course_prerequisites")
+        if prereqs is not None:
+            summary["course_prerequisites"] = {"count": len(prereqs), "preview": list(prereqs)[:3]}
+        cct = kg_data.get("course_credit_threshold")
+        if cct is not None:
+            summary["course_credit_threshold"] = cct
+        return summary
+    except Exception:
+        return {}
+
+
+def _summarize_result(result: dict) -> dict:
+    """Build a compact log-friendly summary of an ALE operation result."""
+    try:
+        summary: dict = {}
+        reason_codes = result.get("reason_codes")
+        if reason_codes:
+            summary["reason_codes"] = reason_codes
+        rdm = result.get("required_data_missing")
+        if rdm:
+            summary["required_data_missing_count"] = len(rdm)
+        warnings = result.get("warnings")
+        if warnings:
+            summary["warnings_count"] = len(warnings)
+        counts: dict = {}
+        for field in _RESULT_COUNT_FIELDS:
+            val = result.get(field)
+            if isinstance(val, list):
+                counts[field] = len(val)
+        if counts:
+            summary["counts"] = counts
+        for scalar in ("projected_cgpa", "projected_graduation_semester", "honors_status"):
+            if result.get(scalar) is not None:
+                summary[scalar] = result[scalar]
+        return summary
+    except Exception:
+        return {}
+
+
 def _as_dict(value):
     """Normalize a rule bundle value to a plain dict."""
     if hasattr(value, "model_dump"):
         return value.model_dump()
     return value
+
+
+_LEVEL_MAP = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
+
+
+def _map_student_level(level) -> str | None:
+    """Map integer SCP level (1–4) to ALE string level. Returns None for invalid values."""
+    return _LEVEL_MAP.get(level)
+
+
+def _compute_zero_credit_requirement_passed(
+    sc: StudentContext,
+    kg_data: dict,
+    params: dict,
+) -> bool | None:
+    """
+    Determine whether all required zero-credit courses have been passed.
+
+    sc.zero_credit_courses_passed is a list of passed course codes — NOT a boolean.
+    A non-empty list does NOT imply the requirement is satisfied; the required course
+    list must be explicitly provided via kg_data or params.
+
+    Returns:
+        True   — all required zero-credit courses are in sc.zero_credit_courses_passed
+        False  — at least one required zero-credit course is missing
+        None   — required list unavailable; caller must return cannot_compute
+    """
+    required = kg_data.get("required_zero_credit_courses")
+    if required is None:
+        required = params.get("required_zero_credit_courses")
+    if required is None:
+        return None
+    return set(required).issubset(set(sc.zero_credit_courses_passed))
 
 
 # ---------------------------------------------------------------------------
@@ -48,29 +181,61 @@ def call(
     kg_data: dict | None = None,
     params: dict | None = None,
 ) -> dict:
+    start = time.perf_counter()
     kg_data = kg_data or {}
     params = params or {}
-    logger.info("ALE operation: %s", operation)
+    logger.info(
+        "ALEAdapter.call start operation=%s params=%s kg_data=%s",
+        operation,
+        _summarize_params(params),
+        _summarize_kg_data(kg_data),
+    )
     try:
-        return _dispatch(operation, student_context, rule_bundles, kg_data, params)
+        result = _dispatch(operation, student_context, rule_bundles, kg_data, params)
+        status = result.get("status", "unknown")
+        summary = _summarize_result(result)
+        log = logger.warning if status in {"cannot_compute", "error"} else logger.info
+        log(
+            "ALEAdapter.call result operation=%s status=%s summary=%s duration_ms=%d",
+            operation,
+            status,
+            summary,
+            _duration_ms(start),
+        )
+        return result
     except ValidationError as exc:
         logger.error(
-            "ALE operation %s: input validation failed — likely missing or invalid "
+            "ALEAdapter.call operation=%s: input validation failed — missing or invalid "
             "StudentContext field or rule bundle: %s", operation, exc
         )
-        return {
+        result = {
             "status": "cannot_compute",
             "reason_codes": ["invalid_input"],
             "required_data_missing": [],
             "message": str(exc),
             "operation": operation,
         }
+        logger.warning(
+            "ALEAdapter.call result operation=%s status=cannot_compute reason_codes=%s duration_ms=%d",
+            operation, ["invalid_input"], _duration_ms(start),
+        )
+        return result
     except ValueError as exc:
-        logger.error("ALE operation %s: unknown operation or bad value: %s", operation, exc)
-        return {"status": "error", "message": str(exc), "operation": operation}
+        logger.error("ALEAdapter.call operation=%s: bad value or unknown operation: %s", operation, exc)
+        result = {"status": "error", "message": str(exc), "operation": operation}
+        logger.warning(
+            "ALEAdapter.call result operation=%s status=error duration_ms=%d",
+            operation, _duration_ms(start),
+        )
+        return result
     except Exception as exc:
-        logger.error("ALE operation %s failed unexpectedly: %s", operation, exc)
-        return {"status": "error", "message": str(exc), "operation": operation}
+        logger.error("ALEAdapter.call operation=%s failed unexpectedly: %s", operation, exc)
+        result = {"status": "error", "message": str(exc), "operation": operation}
+        logger.warning(
+            "ALEAdapter.call result operation=%s status=error duration_ms=%d",
+            operation, _duration_ms(start),
+        )
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +247,7 @@ def _parse_rules(rule_bundles: dict, key: str, model_class):
         bundle_dict = _as_dict(rule_bundles[key])
         return model_class(**bundle_dict)
     except (KeyError, Exception):
+        logger.warning("ALEAdapter: rule bundle missing or invalid: '%s'", key)
         raise ValueError(f"rule_bundles missing or invalid: '{key}'")
 
 
@@ -119,13 +285,17 @@ def _map_course_history(
             if course_credit_lookup
             else r.credit_hours
         )
+        # credit_hours=None means SCP has no authoritative credit data.
+        # Fall back to 0 so CourseHistoryEntry.credits (int) is satisfied.
+        # Orchestrator must patch credits from KG before ALE graduation audit.
+        safe_credits: int = real_credits if real_credits is not None else 0
 
         entries.append(CourseHistoryEntry(
             course_code=r.course_code,
             semester=r.semester_taken,
             semester_type="summer" if "summer" in r.semester_taken.lower() else "regular",
             grade_points=grade_points,
-            credits=real_credits,
+            credits=safe_credits,
             status=status,
         ))
     return entries
@@ -227,6 +397,7 @@ def _solve_target_gpa(sc: StudentContext, rule_bundles: dict, kg_data: dict, par
         graduation_rules=graduation_rules,
         assumed_grade_per_semester=params.get("assumed_grade_per_semester", None),
         credits_per_semester=params.get("credits_per_semester", 18),
+        completed_regular_semesters=sc.completed_regular_semesters,
         planned_course_source=params.get("planned_course_source", "orchestrator"),
     )
     return solve_target_gpa(inp).model_dump()
@@ -257,6 +428,20 @@ def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict,
     warning_rules = _parse_rules(rule_bundles, "academic_warning_rules", AcademicWarningRules)
     honors_rules = _parse_rules(rule_bundles, "honors_rules", HonorsRules)
 
+    zero_credit_passed = _compute_zero_credit_requirement_passed(sc, kg_data, params)
+    if zero_credit_passed is None:
+        logger.warning(
+            "ALEAdapter.run_graduation_audit: required_zero_credit_courses not provided "
+            "in kg_data or params — returning cannot_compute"
+        )
+        return {
+            "status": "cannot_compute",
+            "reason_codes": ["missing_required_zero_credit_course_list"],
+            "required_data_missing": [],
+            "message": "Cannot determine zero-credit requirement: required_zero_credit_courses not provided.",
+            "operation": "run_graduation_audit",
+        }
+
     inp = RunGraduationAuditInput(
         study_status=sc.study_status,
         completed_courses=sc.completed_courses,
@@ -268,7 +453,7 @@ def _run_graduation_audit(sc: StudentContext, rule_bundles: dict, kg_data: dict,
         total_warnings=sc.total_warnings,
         military_status=sc.military_status,
         completed_regular_semesters=sc.completed_regular_semesters,
-        zero_credit_courses_passed=bool(sc.zero_credit_courses_passed),
+        zero_credit_courses_passed=zero_credit_passed,
         course_history=_map_course_history(
             sc.course_history,
             grading_scale.model_dump(),
@@ -289,7 +474,18 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
     if "summer_semester_rules" in rule_bundles:
         summer_rules = _parse_rules(rule_bundles, "summer_semester_rules", SummerSemesterRules)
 
-    level_map = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
+    student_level = _map_student_level(sc.level)
+    if student_level is None:
+        logger.warning(
+            "ALEAdapter.generate_semester_plan: invalid student level=%r (expected 1–4)", sc.level
+        )
+        return {
+            "status": "cannot_compute",
+            "reason_codes": ["invalid_student_level"],
+            "required_data_missing": ["student_level"],
+            "message": f"Student level '{sc.level}' is not a valid academic level (expected 1–4).",
+            "operation": "generate_semester_plan",
+        }
 
     inp = GenerateSemesterPlanInput(
         study_status=sc.study_status,
@@ -300,7 +496,7 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
         total_improve_retakes_used=sc.total_improve_retakes_used,
         current_cgpa=sc.cgpa,
         cumulative_passed_hours=sc.total_credit_hours_earned,
-        student_level=level_map.get(sc.level, "Freshman"),
+        student_level=student_level,
         official_track=sc.track_id,
         incomplete_grade_flag=_derive_incomplete_flag(sc.course_history),
         available_courses=_map_available_courses(kg_data),
@@ -325,7 +521,48 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
     if "summer_semester_rules" in rule_bundles:
         summer_rules = _parse_rules(rule_bundles, "summer_semester_rules", SummerSemesterRules)
 
-    level_map = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
+    warning_rules = None
+    if "academic_warning_rules" in rule_bundles:
+        warning_rules = _parse_rules(rule_bundles, "academic_warning_rules", AcademicWarningRules)
+
+    # Pre-resolve failed-retake grade cap to grade points so ALE stays grade-scale-free
+    failed_retake_grade_cap_points: float | None = None
+    if "retake_rules" in rule_bundles:
+        try:
+            retake_rules = _parse_rules(rule_bundles, "retake_rules", RetakeRules)
+            cap_pts = resolve_grade(
+                retake_rules.failed_first_retake_grade_cap, grading_scale, "_retake_cap"
+            )
+            failed_retake_grade_cap_points = cap_pts  # None only for P-grade cap (not applicable here)
+        except Exception:
+            pass  # cap stays None — ALE will not apply a cap
+
+    student_level = _map_student_level(sc.level)
+    if student_level is None:
+        logger.warning(
+            "ALEAdapter.generate_graduation_roadmap: invalid student level=%r (expected 1–4)", sc.level
+        )
+        return {
+            "status": "cannot_compute",
+            "reason_codes": ["invalid_student_level"],
+            "required_data_missing": ["student_level"],
+            "message": f"Student level '{sc.level}' is not a valid academic level (expected 1–4).",
+            "operation": "generate_graduation_roadmap",
+        }
+
+    zero_credit_passed = _compute_zero_credit_requirement_passed(sc, kg_data, params)
+    if zero_credit_passed is None:
+        logger.warning(
+            "ALEAdapter.generate_graduation_roadmap: required_zero_credit_courses not provided "
+            "in kg_data or params — returning cannot_compute"
+        )
+        return {
+            "status": "cannot_compute",
+            "reason_codes": ["missing_required_zero_credit_course_list"],
+            "required_data_missing": [],
+            "message": "Cannot determine zero-credit requirement: required_zero_credit_courses not provided.",
+            "operation": "generate_graduation_roadmap",
+        }
 
     raw_grade = params.get("assumed_grade_per_pass", None)
     resolved_grade: float | None = None
@@ -361,18 +598,24 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
         gpa_counted_credits=sc.cumulative_chs,
         current_quality_points=sc.cumulative_cps,
         cumulative_passed_hours=sc.total_credit_hours_earned,
-        student_level=level_map.get(sc.level, "Freshman"),
+        student_level=student_level,
         official_track=sc.track_id,
         incomplete_grade_flag=_derive_incomplete_flag(sc.course_history),
-        zero_credit_courses_passed=bool(sc.zero_credit_courses_passed),
+        zero_credit_courses_passed=zero_credit_passed,
         military_status=sc.military_status,
         completed_regular_semesters=sc.completed_regular_semesters,
+        consecutive_warnings=sc.consecutive_warnings,
+        total_warnings=sc.total_warnings,
         available_courses=_map_available_courses(kg_data),
         credit_limit_rules=credit_limit_rules,
         graduation_rules=graduation_rules,
         summer_semester_rules=summer_rules,
+        warning_rules=warning_rules,
+        failed_retake_grade_cap_points=failed_retake_grade_cap_points,
         target_semester_type=params["target_semester_type"],
         starting_year=params["starting_year"],
+        target_end_semester_type=params.get("target_end_semester_type"),
+        target_end_year=params.get("target_end_year"),
         target_track=params.get("target_track", None),
         assumed_grade_per_pass=resolved_grade,
         accelerated_mode=params.get("accelerated_mode", False),

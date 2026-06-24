@@ -15,12 +15,19 @@ Provider neutrality:
   /v1 prefix), and others. Switching providers is therefore a config change,
   never a code change.
 
-Configuration (all via environment variables):
-  - LLM_PROVIDER         (label only, e.g. "groq")
+Configuration — shared provider credentials (LLM_*):
+  - LLM_PROVIDER         label only, e.g. "groq"
   - LLM_BASE_URL         e.g. "https://api.groq.com/openai/v1"
   - LLM_API_KEY          bearer token; if blank, is_configured() returns False
-  - LLM_MODEL            e.g. "llama-3.1-8b-instant"
-  - LLM_TIMEOUT_SECONDS  request timeout, default 20s
+  - LLM_MODEL            internal fallback default; callers pass their own
+                         model via chat(model=...)
+  - LLM_TIMEOUT_SECONDS  safe fallback request timeout (default 20s); callers
+                         should pass per-call timeout_seconds instead
+
+Component-specific behavior lives in the caller's env vars:
+  - QU uses QU_PRIMARY_MODEL, QU_FALLBACK_MODELS, QU_TIMEOUT_SECONDS
+  - Composer uses COMPOSER_PRIMARY_MODEL, COMPOSER_FALLBACK_MODELS,
+    COMPOSER_TIMEOUT_SECONDS, COMPOSER_USE_LLM
 
 Privacy contract (enforced by *callers*, documented here for clarity):
   Callers MUST NOT send student PII (name, student_id, grades, transcript,
@@ -92,9 +99,16 @@ class LLMClient:
         json_mode: bool = False,
         model: Optional[str] = None,
         temperature: float = 0.2,
+        timeout_seconds: Optional[float] = None,
     ) -> str:
+        """Send a chat completion request.
+
+        timeout_seconds: per-call override; falls back to client default when None.
+        """
         if not self.is_configured():
             raise LLMNotConfigured("LLM client is not configured (missing api_key or base_url)")
+
+        effective_timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
 
         url = f"{self.base_url}/chat/completions"
         payload: dict[str, Any] = {
@@ -114,10 +128,10 @@ class LLMClient:
         }
 
         try:
-            with httpx.Client(timeout=self.timeout_seconds) as client:
+            with httpx.Client(timeout=effective_timeout) as client:
                 response = client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
-            raise LLMError(f"LLM request timed out after {self.timeout_seconds}s") from exc
+            raise LLMError(f"LLM request timed out after {effective_timeout}s") from exc
         except httpx.HTTPError as exc:
             raise LLMError(f"LLM transport error: {exc}") from exc
 

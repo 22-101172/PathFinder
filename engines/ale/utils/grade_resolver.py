@@ -6,7 +6,15 @@ Shared grade resolution used by simulate_gpa_forward and solve_target_gpa.
 Converts any of the three accepted grade input formats into grade points (0.0–4.0).
 Returns None for P-grade (caller treats course as gpa_neutral).
 Raises GradeResolutionError for invalid inputs — caller maps this to cannot_compute.
+
+String inputs are normalized before lookup:
+  - Whitespace stripped.
+  - Numeric strings (e.g. "3.7", "90") parsed and routed to _resolve_numeric.
+  - "abs" / "ABS" variants normalized to "Abs" before grading-scale lookup.
+  - Other letters uppercased (preserves +/-) before grading-scale lookup.
 """
+
+import math
 
 from engines.ale.schemas import GradingScaleRules, StudentLevelRules
 
@@ -38,8 +46,38 @@ def resolve_grade(
                               percentage that does not match any configured range
     """
     if isinstance(grade_input, str):
-        return _resolve_letter(grade_input, grading_scale, course_code)
-    return _resolve_numeric(float(grade_input), grading_scale, course_code)
+        return _resolve_string(grade_input, grading_scale, course_code)
+    try:
+        return _resolve_numeric(float(grade_input), grading_scale, course_code)
+    except (TypeError, ValueError):
+        raise GradeResolutionError(course_code, grade_input)
+
+
+def _resolve_string(
+    raw: str,
+    grading_scale: GradingScaleRules,
+    course_code: str,
+) -> float | None:
+    s = raw.strip()
+    if not s:
+        raise GradeResolutionError(course_code, raw)
+    # Numeric string: "3.7", "90", "4.0" — route to numeric resolver
+    try:
+        return _resolve_numeric(float(s), grading_scale, course_code)
+    except ValueError:
+        pass
+    return _resolve_letter(_normalize_letter(s), grading_scale, course_code)
+
+
+def _normalize_letter(s: str) -> str:
+    """Normalize a grade letter to its canonical form.
+
+    "abs"/"ABS"/"Abs" → "Abs" (grading scale canonical key).
+    All other strings uppercased so "a" → "A", "b+" → "B+", "p" → "P".
+    """
+    if s.lower() == "abs":
+        return "Abs"
+    return s.upper()
 
 
 def _resolve_letter(
@@ -58,6 +96,8 @@ def _resolve_numeric(
     grading_scale: GradingScaleRules,
     course_code: str,
 ) -> float | None:
+    if not math.isfinite(value):
+        raise GradeResolutionError(course_code, value)
     if 0.0 <= value <= 4.0:
         return value
     if 4.0 < value <= 100.0:

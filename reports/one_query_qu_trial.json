@@ -1,0 +1,84 @@
+{
+  "query": "how much is tuition",
+  "expected_intent": "out_of_scope",
+  "expected_params": {},
+  "timestamp": "2026-06-23T17:52:17.750876+00:00",
+  "models_tested": [
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b"
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 0,
+    "rate_limited": 1,
+    "errors": 0
+  },
+  "model_results": [
+    {
+      "model": "llama-3.3-70b-versatile",
+      "status": "RATE_LIMIT",
+      "raw_output_truncated": null,
+      "parsed_intents": [],
+      "entities": [],
+      "params": [],
+      "student_referential_fallback": [],
+      "elapsed_s": 1.06,
+      "rate_limited": true,
+      "rate_limit_type": "TPD",
+      "error": "LLM HTTP 429 from groq: {\"error\":{\"message\":\"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01krhw37rhfa6sntdckn0nzdbg` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 96335, Requested 5642. Please try again in 28m28.128s. Need more tokens? Upgrade to Dev Tier today at http"
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "status": "PASS",
+      "raw_output_truncated": "{\"queries\":[{\"intent\":\"out_of_scope\",\"original_text\":\"how much is tuition\",\"entities\":{\"course_code\":null,\"role\":null,\"track\":null,\"skill\":null},\"secondary_entities\":null,\"params\":{},\"session_overrides\":{\"added_courses\":[],\"assumed_passed_courses\":[],\"assumed_failed_courses\":[],\"target_role\":null,\"course_override_type\":\"none\",\"override_action\":\"accumulate\"},\"student_referential_fallback\":false}]}",
+      "parsed_intents": [
+        "out_of_scope"
+      ],
+      "entities": [
+        {
+          "course_code": null,
+          "role_id": null,
+          "track_id": null,
+          "skill_id": null
+        }
+      ],
+      "params": [
+        {}
+      ],
+      "student_referential_fallback": [
+        false
+      ],
+      "elapsed_s": 1.79,
+      "rate_limited": false,
+      "rate_limit_type": null,
+      "error": null
+    },
+    {
+      "model": "openai/gpt-oss-20b",
+      "status": "PASS",
+      "raw_output_truncated": "{\"queries\":[{\"intent\":\"out_of_scope\",\"original_text\":\"how much is tuition\",\"entities\":{\"course_code\":null,\"role\":null,\"track\":null,\"skill\":null},\"secondary_entities\":null,\"params\":{},\"session_overrides\":{\"added_courses\":[],\"assumed_passed_courses\":[],\"assumed_failed_courses\":[],\"target_role\":null,\"course_override_type\":\"none\",\"override_action\":\"accumulate\"},\"student_referential_fallback\":false}]}",
+      "parsed_intents": [
+        "out_of_scope"
+      ],
+      "entities": [
+        {
+          "course_code": null,
+          "role_id": null,
+          "track_id": null,
+          "skill_id": null
+        }
+      ],
+      "params": [
+        {}
+      ],
+      "student_referential_fallback": [
+        false
+      ],
+      "elapsed_s": 2.61,
+      "rate_limited": false,
+      "rate_limit_type": null,
+      "error": null
+    }
+  ]
+}

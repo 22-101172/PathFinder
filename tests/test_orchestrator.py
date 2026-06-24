@@ -96,35 +96,42 @@ def _make_bundles(partial: dict | None = None) -> dict:
     return defaults
 
 
-# ── T01: Resolver fix — resolved_id key ──────────────────────────────────────
+# ── T01: Forbidden / stale intents ───────────────────────────────────────────
 
-class TestResolverFix:
+class TestForbiddenIntents:
 
-    def test_resolver_resolved_id_key_used(self):
-        """Proves the QU resolver reads 'resolved_id' correctly (not just 'id')."""
-        from gateway.query_understanding import _resolve_entity
+    def test_plan_next_semester_returns_validation_error(self):
+        orch = _make_orchestrator()
+        session = _make_session()
+        sqs = [_sq("plan_next_semester")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "error"
+        assert r.error_code == "validation_failed"
+        assert r.error_category == "intent"
 
-        def resolver_with_resolved_id(entity_type, entity_text):
-            return {
-                "status": "ok",
-                "resolved_id": "data_scientist",
-                "name": "Data Scientist",
-            }
+    def test_check_eligibility_stale_rejected(self):
+        orch = _make_orchestrator()
+        session = _make_session()
+        sqs = [_sq("check_eligibility", entities={"course_code": "C-CS301"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "error"
+        assert result.results[0].error_code == "validation_failed"
 
-        resolved, failure = _resolve_entity("role", "data scientist", resolver_with_resolved_id)
-        assert failure is None
-        assert resolved == "data_scientist"
+    def test_handbook_query_stale_rejected(self):
+        orch = _make_orchestrator()
+        session = _make_session()
+        sqs = [_sq("handbook_query", original_text="absence policy?")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "error"
 
-    def test_resolver_id_key_still_works(self):
-        """Old 'id' key fallback still works for backwards compatibility."""
-        from gateway.query_understanding import _resolve_entity
-
-        def old_resolver(entity_type, entity_text):
-            return {"status": "ok", "id": "data_scientist"}
-
-        resolved, failure = _resolve_entity("role", "data scientist", old_resolver)
-        assert failure is None
-        assert resolved == "data_scientist"
+    def test_simulate_gpa_stale_rejected(self):
+        orch = _make_orchestrator()
+        session = _make_session()
+        sqs = [_sq("simulate_gpa")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "error"
+        assert result.results[0].error_code == "validation_failed"
 
 
 # ── T02: Control intents ──────────────────────────────────────────────────────
@@ -710,3 +717,736 @@ class TestExtractLastReferenced:
         ref = orch.extract_last_referenced(sqs)
         # None means "don't update stored last_referenced" — preserves existing context
         assert ref is None
+
+    def test_extract_includes_all_entity_types(self):
+        """extract_last_referenced must surface course_code, role_id, track_id, and skill_id."""
+        orch = _make_orchestrator()
+        sqs = [_sq("get_course_info", entities={
+            "course_code": "C-CS301", "role_id": "data_scientist",
+            "track_id": "AI", "skill_id": "python",
+        })]
+        ref = orch.extract_last_referenced(sqs)
+        assert ref is not None
+        assert ref.course_code == "C-CS301"
+        assert ref.role_id == "data_scientist"
+        assert ref.track_id == "AI"
+        assert ref.skill_id == "python"
+
+
+# ── T12: Prerequisite depth param ────────────────────────────────────────────
+
+class TestPrerequisiteDepth:
+
+    def test_get_course_prerequisites_full_depth_passed_to_kg(self):
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-CS401", "direct_prerequisites": [], "all_prerequisites": []}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session()
+        sqs = [_sq("get_course_prerequisites",
+                   entities={"course_code": "C-CS401"},
+                   params={"depth": "full"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "success"
+        kg.call.assert_called_once_with("get_prerequisites", {"course_code": "C-CS401", "depth": "full"})
+
+
+# ── T13: GPA credits bug ──────────────────────────────────────────────────────
+
+class TestGPACreditsBug:
+
+    def test_simulate_gpa_zero_credit_course_preserved(self):
+        """credits=0 must NOT default to 3 — zero-credit is a valid value."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-HUM001", "name": "Military", "credits": 0}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "projected", "projected_cgpa": 3.0}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        session = _make_session(_make_student(in_progress=["C-HUM001"]))
+        sqs = [_sq("simulate_gpa_forward", params={"expected_grades": {"C-HUM001": "P"}})]
+        orch.execute_turn(sqs, session, _make_bundles())
+        ale.call.assert_called_once()
+        # ALE is called with positional args: (operation, ctx, bundles, kg_data, params)
+        positional = ale.call.call_args[0]
+        params_passed = positional[4]
+        planned_courses = params_passed.get("planned_courses", [])
+        assert len(planned_courses) == 1
+        assert planned_courses[0].credits == 0, "credits=0 must be preserved, not defaulted to 3"
+
+    def test_simulate_gpa_missing_credits_returns_cannot_compute(self):
+        """credits=None in KG profile must yield cannot_compute, not guess."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-XX001", "name": "Unknown"}  # no "credits" key
+        ale = MagicMock()
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        session = _make_session(_make_student(in_progress=["C-XX001"]))
+        sqs = [_sq("simulate_gpa_forward", params={"expected_grades": {"C-XX001": "A"}})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "informational"
+        ale.call.assert_not_called()
+
+    def test_simulate_gpa_course_not_found_returns_informational(self):
+        """KG business not-found in GPA path must not fabricate credits."""
+        kg = MagicMock()
+        kg.call.return_value = {"error": "course_not_found"}
+        ale = MagicMock()
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        session = _make_session(_make_student(in_progress=["C-XX999"]))
+        sqs = [_sq("simulate_gpa_forward", params={"expected_grades": {"C-XX999": "A"}})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "informational"
+        ale.call.assert_not_called()
+
+    def test_solve_target_gpa_missing_credits_returns_cannot_compute(self):
+        """credits=None in solve_target_gpa must yield informational, not guess."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-XX001", "name": "Unknown"}
+        ale = MagicMock()
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        student = _make_student(in_progress=["C-XX001"])
+        session = _make_session(student)
+        sqs = [_sq("solve_target_gpa", params={"target_gpa": 3.5})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "informational"
+        ale.call.assert_not_called()
+
+    def test_solve_target_gpa_zero_credit_course_preserved(self):
+        """credits=0 for solve_target_gpa must not default to 3."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-HUM001", "name": "Military", "credits": 0}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "solvable", "required_average_grade_points": 3.5}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        student = _make_student(in_progress=["C-HUM001"])
+        session = _make_session(student)
+        sqs = [_sq("solve_target_gpa", params={"target_gpa": 3.5})]
+        orch.execute_turn(sqs, session, _make_bundles())
+        ale.call.assert_called_once()
+        positional = ale.call.call_args[0]
+        params_passed = positional[4]
+        planned = params_passed.get("planned_courses", [])
+        assert len(planned) == 1
+        assert planned[0].credits == 0
+
+
+# ── T14: Graduation audit / roadmap — zero-credit courses ────────────────────
+
+class TestGraduationZeroCredit:
+
+    def test_graduation_audit_passes_required_zero_credit_courses(self):
+        """Orchestrator must pass required_zero_credit_courses in kg_data to ALE."""
+        kg = MagicMock()
+        ale = MagicMock()
+
+        def kg_side_effect(operation, params):
+            if operation == "get_courses_by_track":
+                return {"courses": [
+                    {"course_code": "C-HUM001", "credits": 0, "name": "Military Training",
+                     "level": 1, "semester_offering": [], "prerequisites": []},
+                    {"course_code": "C-CS101", "credits": 3, "name": "Intro Programming",
+                     "level": 1, "semester_offering": [], "prerequisites": []},
+                ]}
+            return {}
+
+        kg.call.side_effect = kg_side_effect
+        ale.call.return_value = {"status": "not_eligible", "checks": []}
+        student = _make_student(track_id="AI")
+        session = _make_session(student=student)
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        sqs = [_sq("run_graduation_audit")]
+        orch.execute_turn(sqs, session, _make_bundles())
+
+        call_args = ale.call.call_args
+        kg_data_passed = call_args[0][3]
+        assert "required_zero_credit_courses" in kg_data_passed
+        assert "C-HUM001" in kg_data_passed["required_zero_credit_courses"]
+        assert "C-CS101" not in kg_data_passed["required_zero_credit_courses"]
+
+    def test_graduation_roadmap_passes_required_zero_credit_courses(self):
+        """Orchestrator must pass required_zero_credit_courses to roadmap ALE call."""
+        kg = MagicMock()
+        ale = MagicMock()
+
+        def kg_side_effect(operation, params):
+            if operation == "get_courses_by_track":
+                return {"courses": [
+                    {"course_code": "C-HUM001", "credits": 0, "name": "Military Training",
+                     "level": 1, "semester_offering": ["Fall"], "prerequisites": []},
+                    {"course_code": "C-CS201", "credits": 3, "name": "Data Structures",
+                     "level": 2, "semester_offering": ["Fall", "Spring"], "prerequisites": []},
+                ]}
+            return {}
+
+        kg.call.side_effect = kg_side_effect
+        ale.call.return_value = {"status": "complete", "semester_plans": []}
+        student = _make_student(track_id="AI")
+        session = _make_session(student=student)
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        sqs = [_sq("generate_graduation_roadmap")]
+        orch.execute_turn(sqs, session, _make_bundles())
+
+        call_args = ale.call.call_args
+        kg_data_passed = call_args[0][3]
+        assert "required_zero_credit_courses" in kg_data_passed
+        assert "C-HUM001" in kg_data_passed["required_zero_credit_courses"]
+
+    def test_graduation_audit_blocked_for_unsupported_track(self):
+        """Audit must return informational not_applicable when student track is unsupported."""
+        from gateway.models.schemas import StudentContext
+        orch = _make_orchestrator()
+        student = StudentContext(
+            student_id="S001", name="Test", program="Unknown",
+            track_id=None, track_status="unsupported", track_error_code="unsupported_track",
+            level=3, first_semester="Fall 2022", study_status="Studying",
+            total_credit_hours_earned=60,
+        )
+        session = _make_session(student=student)
+        sqs = [_sq("run_graduation_audit")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "informational"
+        assert result.results[0].data["reason_code"] == "unsupported_track"
+
+
+# ── T15: Unsupported-track gate ───────────────────────────────────────────────
+
+class TestUnsupportedTrack:
+
+    def _make_unsupported_student(self):
+        from gateway.models.schemas import StudentContext
+        return StudentContext(
+            student_id="S001", name="Test", program="General",
+            track_id=None, track_status="unsupported", track_error_code="unsupported_track",
+            level=2, first_semester="Fall 2023", study_status="Studying",
+            total_credit_hours_earned=30,
+        )
+
+    def test_plan_semester_blocked_for_unsupported_track(self):
+        orch = _make_orchestrator()
+        session = _make_session(student=self._make_unsupported_student())
+        sqs = [_sq("plan_semester")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "informational"
+        assert result.results[0].data["reason_code"] == "unsupported_track"
+
+    def test_roadmap_blocked_for_unsupported_track(self):
+        orch = _make_orchestrator()
+        session = _make_session(student=self._make_unsupported_student())
+        sqs = [_sq("generate_graduation_roadmap")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "informational"
+        assert result.results[0].data["reason_code"] == "unsupported_track"
+
+    def test_explicit_track_query_works_for_unsupported_student(self):
+        """get_track_overview with explicit entity must work even if student track is unsupported."""
+        kg = MagicMock()
+        kg.call.return_value = {"track_id": "AI", "name": "AI Track"}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=self._make_unsupported_student())
+        # Explicit entity provided → should NOT be blocked by unsupported track
+        sqs = [_sq("get_track_overview", entities={"track_id": "AI"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "success"
+
+    def test_get_track_overview_blocked_when_falling_back_to_unsupported_track(self):
+        """get_track_overview without explicit entity on unsupported-track student → informational."""
+        orch = _make_orchestrator()
+        session = _make_session(student=self._make_unsupported_student())
+        sqs = [_sq("get_track_overview", student_referential_fallback=True)]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "informational"
+        assert result.results[0].data["reason_code"] == "unsupported_track"
+
+    def test_compare_tracks_explicit_both_works_despite_unsupported_student(self):
+        """compare_tracks with both explicit tracks must succeed even if student track is unsupported."""
+        kg = MagicMock()
+        kg.call.return_value = {"comparison": {}}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=self._make_unsupported_student())
+        sqs = [_sq("compare_tracks",
+                   entities={"track_id": "AI"},
+                   secondary_entities=EntitySet(track_id="DSE"))]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "success"
+
+
+# ── T16: Focus courses referential flag ──────────────────────────────────────
+
+class TestFocusCourses:
+
+    def test_general_query_passes_empty_completed_courses(self):
+        """Non-referential focus query must not leak student completed courses."""
+        kg = MagicMock()
+        kg.call.return_value = {"focus_courses": []}
+        orch = _make_orchestrator(kg=kg)
+        student = _make_student(completed=["C-CS301", "C-CS401"])
+        session = _make_session(student=student)
+        sqs = [_sq("get_focus_courses_for_target",
+                   entities={"role_id": "data_scientist"},
+                   student_referential_fallback=False)]
+        orch.execute_turn(sqs, session, _make_bundles())
+        call_args = kg.call.call_args
+        assert call_args[0][1]["completed_courses"] == []
+
+    def test_referential_query_passes_completed_courses(self):
+        """Referential focus query must pass completed courses for personalisation."""
+        kg = MagicMock()
+        kg.call.return_value = {"focus_courses": []}
+        orch = _make_orchestrator(kg=kg)
+        student = _make_student(completed=["C-CS301", "C-CS401"])
+        session = _make_session(student=student)
+        sqs = [_sq("get_focus_courses_for_target",
+                   entities={"role_id": "data_scientist"},
+                   student_referential_fallback=True)]
+        orch.execute_turn(sqs, session, _make_bundles())
+        call_args = kg.call.call_args
+        assert "C-CS301" in call_args[0][1]["completed_courses"]
+
+
+# ── T17: Student record assumptions flag ─────────────────────────────────────
+
+class TestStudentRecordAssumptions:
+
+    def test_student_record_flags_override_state_when_assumptions_active(self):
+        """get_student_record must set override_state_active=True when assumptions are present."""
+        orch = _make_orchestrator()
+        student = _make_student(completed=["C-CS301"])
+        session = _make_session(student=student)
+        sq_overrides = SessionOverrides(
+            added_courses=["C-AI321"], course_override_type="assumed_done"
+        )
+        sqs = [_sq("get_student_record", session_overrides=sq_overrides)]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "success"
+        assert result.results[0].override_state_active is True
+
+    def test_student_record_no_flag_when_no_assumptions(self):
+        orch = _make_orchestrator()
+        session = _make_session()
+        sqs = [_sq("get_student_record")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "success"
+        assert result.results[0].override_state_active is None
+
+
+# ── T18: RAG error handling ───────────────────────────────────────────────────
+
+class TestRAGErrorHandling:
+
+    def test_rag_adapter_error_returns_engine_error(self):
+        rag = MagicMock()
+        rag.execute.return_value = {"error": "rag_unavailable"}
+        orch = _make_orchestrator(rag=rag)
+        session = _make_session()
+        sqs = [_sq("policy_query", original_text="Absence policy?")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "error"
+        assert result.results[0].error_code == "engine_error"
+        assert result.results[0].error_category == "rag_adapter"
+
+    def test_rag_empty_query_error_returns_clarification(self):
+        rag = MagicMock()
+        rag.execute.return_value = {"error": "empty_query"}
+        orch = _make_orchestrator(rag=rag)
+        session = _make_session()
+        sqs = [_sq("policy_query", original_text="Something")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "clarification_needed"
+
+    def test_rag_no_evidence_without_error_is_soft(self):
+        rag = MagicMock()
+        rag.execute.return_value = {"answer": "Not found.", "extracted_facts": [], "citations": []}
+        orch = _make_orchestrator(rag=rag)
+        session = _make_session()
+        sqs = [_sq("policy_query", original_text="Obscure policy?")]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "soft_no_evidence"
+
+
+# ── T19: All 26 active intents smoke coverage ─────────────────────────────────
+
+class TestAllIntentsCoverage:
+    """Smoke: every active intent routes to a known (non-unhandled) status."""
+
+    def _smoke(self, intent, kg_return=None, ale_return=None, rag_return=None,
+               entities=None, params=None, sq_extra=None, original_text=None):
+        kg = MagicMock()
+        ale = MagicMock()
+        rag = MagicMock()
+        kg.call.return_value = kg_return or {}
+        ale.call.return_value = ale_return or {"status": "success"}
+        rag.execute.return_value = rag_return or {"answer": "x", "extracted_facts": ["f"], "citations": []}
+        orch = _make_orchestrator(kg=kg, ale=ale, rag=rag)
+        student = _make_student(completed=["C-CS101"], in_progress=["C-CS201"])
+        session = _make_session(student=student)
+        sq = _sq(intent, original_text=original_text or intent,
+                 entities=entities or {}, params=params or {}, **(sq_extra or {}))
+        result = orch.execute_turn([sq], session, _make_bundles())
+        r = result.results[0]
+        assert not (r.status == "error" and "Unrecognised intent" in (r.error_detail or "")), \
+            f"Intent {intent!r} hit unhandled fallback: {r}"
+        return r
+
+    def test_plan_semester(self):
+        r = self._smoke("plan_semester",
+                        kg_return={"courses": []}, ale_return={"status": "success", "plans": []})
+        assert r.status in ("success", "informational", "clarification_needed", "error")
+
+    def test_generate_graduation_roadmap(self):
+        r = self._smoke("generate_graduation_roadmap",
+                        kg_return={"courses": []}, ale_return={"status": "complete", "semester_plans": []})
+        assert r.status in ("success", "informational", "error")
+
+    def test_run_graduation_audit(self):
+        r = self._smoke("run_graduation_audit",
+                        kg_return={"courses": []}, ale_return={"status": "not_eligible", "checks": []})
+        assert r.status in ("success", "informational", "error")
+
+    def test_check_course_eligibility(self):
+        r = self._smoke("check_course_eligibility",
+                        entities={"course_code": "C-CS301"},
+                        kg_return={"direct_prerequisites": [], "non_course_prerequisites": []},
+                        ale_return={"status": "eligible"})
+        assert r.status in ("success", "error")
+
+    def test_simulate_gpa_forward(self):
+        r = self._smoke("simulate_gpa_forward",
+                        kg_return={"course_code": "C-CS201", "name": "DS", "credits": 3},
+                        ale_return={"status": "projected", "projected_cgpa": 3.1},
+                        params={"expected_grades": {"C-CS201": "A"}})
+        assert r.status in ("success", "informational")
+
+    def test_solve_target_gpa(self):
+        r = self._smoke("solve_target_gpa",
+                        kg_return={"course_code": "C-CS201", "name": "DS", "credits": 3},
+                        ale_return={"status": "solvable"},
+                        params={"target_gpa": 3.5})
+        assert r.status in ("success", "informational")
+
+    def test_get_course_info(self):
+        r = self._smoke("get_course_info",
+                        entities={"course_code": "C-CS301"},
+                        kg_return={"course_code": "C-CS301", "name": "OS", "credits": 3})
+        assert r.status == "success"
+
+    def test_get_course_prerequisites(self):
+        r = self._smoke("get_course_prerequisites",
+                        entities={"course_code": "C-CS301"},
+                        kg_return={"course_code": "C-CS301", "direct_prerequisites": []})
+        assert r.status == "success"
+
+    def test_get_skills_taught(self):
+        r = self._smoke("get_skills_taught",
+                        entities={"course_code": "C-CS301"},
+                        kg_return={"skills_taught": []})
+        assert r.status == "success"
+
+    def test_search_courses_by_skill(self):
+        r = self._smoke("search_courses_by_skill",
+                        entities={"skill_id": "python"},
+                        kg_return={"results": []})
+        assert r.status == "success"
+
+    def test_get_role_profile(self):
+        r = self._smoke("get_role_profile",
+                        entities={"role_id": "data_scientist"},
+                        kg_return={"role_id": "data_scientist"})
+        assert r.status == "success"
+
+    def test_get_roles_by_track(self):
+        r = self._smoke("get_roles_by_track",
+                        entities={"track_id": "AI"},
+                        kg_return={"roles": []})
+        assert r.status in ("success", "informational")
+
+    def test_compute_skill_gap(self):
+        r = self._smoke("compute_skill_gap",
+                        entities={"role_id": "data_scientist"},
+                        kg_return={"skill_gap": []})
+        assert r.status in ("success", "informational")
+
+    def test_compute_alignment_score(self):
+        r = self._smoke("compute_alignment_score",
+                        entities={"role_id": "data_scientist"},
+                        kg_return={"score": 0.5})
+        assert r.status in ("success", "informational")
+
+    def test_recommend_courses_to_close_gap(self):
+        r = self._smoke("recommend_courses_to_close_gap",
+                        entities={"role_id": "data_scientist"},
+                        kg_return={"recommendations": []})
+        assert r.status in ("success", "informational")
+
+    def test_find_best_matching_roles(self):
+        r = self._smoke("find_best_matching_roles",
+                        kg_return={"roles": []})
+        assert r.status in ("success", "informational")
+
+    def test_estimate_alignment_improvement(self):
+        r = self._smoke("estimate_alignment_improvement",
+                        entities={"role_id": "data_scientist"},
+                        params={"planned_courses": ["C-CS301"]},
+                        kg_return={"improvement": 0.1})
+        assert r.status in ("success", "informational")
+
+    def test_get_focus_courses_for_target(self):
+        r = self._smoke("get_focus_courses_for_target",
+                        entities={"role_id": "data_scientist"},
+                        kg_return={"focus_courses": []})
+        assert r.status in ("success", "informational")
+
+    def test_get_track_overview(self):
+        r = self._smoke("get_track_overview",
+                        entities={"track_id": "AI"},
+                        kg_return={"track_id": "AI"})
+        assert r.status == "success"
+
+    def test_compare_tracks(self):
+        r = self._smoke("compare_tracks",
+                        entities={"track_id": "AI"},
+                        sq_extra={"secondary_entities": EntitySet(track_id="DSE")},
+                        kg_return={"comparison": {}})
+        assert r.status in ("success", "informational")
+
+    def test_recommend_track_for_role(self):
+        r = self._smoke("recommend_track_for_role",
+                        entities={"role_id": "data_scientist"},
+                        kg_return={"recommended_track": "AI"})
+        assert r.status == "success"
+
+    def test_recommend_track_for_skill(self):
+        r = self._smoke("recommend_track_for_skill",
+                        entities={"skill_id": "python"},
+                        kg_return={"recommended_track": "AI"})
+        assert r.status == "success"
+
+    def test_policy_query(self):
+        r = self._smoke("policy_query",
+                        original_text="Absence policy?",
+                        rag_return={"answer": "20% limit", "extracted_facts": ["20%"], "citations": []})
+        assert r.status == "success"
+
+    def test_get_student_record(self):
+        r = self._smoke("get_student_record")
+        assert r.status == "success"
+
+    def test_clarification_needed(self):
+        r = self._smoke("clarification_needed", original_text="Which course?")
+        assert r.status == "clarification_needed"
+
+    def test_out_of_scope(self):
+        r = self._smoke("out_of_scope")
+        assert r.status == "out_of_scope"
+
+
+# ── T20: improve_retake_number must be 1, never from retake_count ─────────────
+
+class TestImproveRetakeNumber:
+
+    def test_simulate_gpa_improve_retake_number_is_1_regardless_of_retake_count(self):
+        """improve_retake_number must be 1 even when retake_count[code] = 3."""
+        from gateway.models.schemas import CourseRecord
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-CS301", "name": "OS", "credits": 3}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "projected", "projected_cgpa": 3.1}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        student = _make_student(
+            completed=["C-CS301"],
+            current_semester="Spring 2026",
+        )
+        # Inject retake_count with a high value to prove it is NOT used
+        student = student.model_copy(update={"retake_count": {"C-CS301": 3}})
+        session = _make_session(student=student)
+        sqs = [_sq("simulate_gpa_forward", params={"expected_grades": {"C-CS301": "A"}})]
+        orch.execute_turn(sqs, session, _make_bundles())
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        planned = params_passed["planned_courses"]
+        assert len(planned) == 1
+        assert planned[0].attempt_type == "improve_retake"
+        assert planned[0].improve_retake_number == 1, (
+            "improve_retake_number must be 1 (MVP-safe), not retake_count value 3"
+        )
+
+    def test_solve_target_gpa_improve_retake_number_is_1_regardless_of_retake_count(self):
+        """improve_retake_number must be 1 even when retake_count[code] = 3."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-CS301", "name": "OS", "credits": 3}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "solvable", "required_average_grade_points": 3.0}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        student = _make_student(completed=["C-CS301"])
+        student = student.model_copy(update={"retake_count": {"C-CS301": 3}})
+        session = _make_session(student=student)
+        sqs = [_sq("solve_target_gpa",
+                   params={"target_gpa": 3.5, "planned_courses": ["C-CS301"]})]
+        orch.execute_turn(sqs, session, _make_bundles())
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        planned = params_passed["planned_courses"]
+        assert len(planned) == 1
+        assert planned[0].attempt_type == "improve_retake"
+        assert planned[0].improve_retake_number == 1, (
+            "improve_retake_number must be 1 (MVP-safe), not retake_count value 3"
+        )
+
+
+# ── T21: plan_semester consumes target_semester / target_semester_text ─────────
+
+class TestPlanSemesterTargetSemester:
+
+    def test_plan_semester_target_semester_param_parsed(self):
+        """params.target_semester='Fall 2027' must resolve target_semester_type='Fall'."""
+        kg = MagicMock()
+        kg.call.return_value = {"courses": []}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "success", "plans": []}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        session = _make_session()
+        sqs = [_sq("plan_semester", params={"target_semester": "Fall 2027"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status == "success"
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        assert params_passed["target_semester_type"] == "Fall"
+
+    def test_plan_semester_target_semester_text_parsed(self):
+        """params.target_semester_text='Spring 2027' must resolve target_semester_type='Spring'."""
+        kg = MagicMock()
+        kg.call.return_value = {"courses": []}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "success", "plans": []}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        session = _make_session()
+        sqs = [_sq("plan_semester", params={"target_semester_text": "Spring 2027"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        assert params_passed["target_semester_type"] == "Spring"
+
+    def test_plan_semester_malformed_target_semester_returns_validation_error(self):
+        """A malformed target_semester string must return validation_failed, not a crash."""
+        orch = _make_orchestrator()
+        session = _make_session()
+        sqs = [_sq("plan_semester", params={"target_semester": "not-a-semester"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "error"
+        assert r.error_code == "validation_failed"
+
+
+# ── T22: resolved track_id passed as target_track to ALE ──────────────────────
+
+class TestResolvedTrackToALE:
+
+    def test_plan_semester_entity_track_id_passes_to_ale_target_track(self):
+        """entities.track_id must reach ALE as target_track even when not in params."""
+        kg = MagicMock()
+        kg.call.return_value = {"courses": []}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "success", "plans": []}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        # Student has no track (track_id=None) so entities.track_id="AI" is the only source
+        from gateway.models.schemas import StudentContext
+        student = StudentContext(
+            student_id="S001", name="Test", program="General",
+            track_id=None, track_status="supported",
+            level=2, first_semester="Fall 2023", study_status="Studying",
+            cgpa=2.5, cumulative_chs=40, cumulative_cps=100.0,
+            total_credit_hours_earned=40,
+            current_semester="Spring 2026",
+        )
+        session = _make_session(student=student)
+        sqs = [_sq("plan_semester", entities={"track_id": "AI"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        assert params_passed["target_track"] == "AI"
+
+    def test_graduation_roadmap_entity_track_id_passes_to_ale_target_track(self):
+        """entities.track_id must reach ALE roadmap as target_track."""
+        kg = MagicMock()
+        kg.call.return_value = {"courses": []}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "complete", "semester_plans": []}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        from gateway.models.schemas import StudentContext
+        student = StudentContext(
+            student_id="S001", name="Test", program="General",
+            track_id=None, track_status="supported",
+            level=2, first_semester="Fall 2023", study_status="Studying",
+            cgpa=2.5, cumulative_chs=40, cumulative_cps=100.0,
+            total_credit_hours_earned=40,
+            current_semester="Spring 2026",
+        )
+        session = _make_session(student=student)
+        sqs = [_sq("generate_graduation_roadmap", entities={"track_id": "DSE"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        assert params_passed["target_track"] == "DSE"
+
+
+# ── T23: relative semester phrase resolution ──────────────────────────────────
+
+class TestRelativeSemesterPhrases:
+
+    def test_roadmap_relative_target_semester_resolves_to_ale(self):
+        """'3 Falls from now' with Spring 2026 → ALE target_end_semester_type='Fall', target_end_year=2029."""
+        kg = MagicMock()
+        kg.call.return_value = {"courses": []}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "complete", "semester_plans": []}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        student = _make_student(current_semester="Spring 2026")
+        session = _make_session(student=student)
+        sqs = [_sq("generate_graduation_roadmap",
+                   params={"target_semester_text": "3 Falls from now",
+                           "semester_resolution_source": "relative"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status in ("success", "informational")
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        assert params_passed["target_end_semester_type"] == "Fall"
+        assert params_passed["target_end_year"] == 2029
+
+    def test_plan_semester_relative_target_semester_resolves_to_type(self):
+        """'3 Falls from now' with Spring 2026 → ALE target_semester_type='Fall'."""
+        kg = MagicMock()
+        kg.call.return_value = {"courses": []}
+        ale = MagicMock()
+        ale.call.return_value = {"status": "success", "plans": []}
+        orch = _make_orchestrator(kg=kg, ale=ale)
+        student = _make_student(current_semester="Spring 2026")
+        session = _make_session(student=student)
+        sqs = [_sq("plan_semester",
+                   params={"target_semester_text": "3 Falls from now",
+                           "semester_resolution_source": "relative"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        assert result.results[0].status in ("success", "informational")
+        ale.call.assert_called_once()
+        params_passed = ale.call.call_args[0][4]
+        assert params_passed["target_semester_type"] == "Fall"
+
+    def test_roadmap_unresolvable_phrase_returns_validation_failed(self):
+        """An unrecognised relative phrase must return validation_failed, not crash."""
+        orch = _make_orchestrator()
+        student = _make_student(current_semester="Spring 2026")
+        session = _make_session(student=student)
+        sqs = [_sq("generate_graduation_roadmap",
+                   params={"target_semester_text": "sometime next year"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "error"
+        assert r.error_code == "validation_failed"
+
+    def test_plan_semester_unresolvable_phrase_returns_validation_failed(self):
+        """An unrecognised phrase in plan_semester must return validation_failed."""
+        orch = _make_orchestrator()
+        student = _make_student(current_semester="Spring 2026")
+        session = _make_session(student=student)
+        sqs = [_sq("plan_semester",
+                   params={"target_semester": "sometime next year"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "error"
+        assert r.error_code == "validation_failed"

@@ -1,4 +1,4 @@
-﻿"""
+"""
 ale/functions/solve_target_gpa.py
 ===================================
 Implements solve_target_gpa following ALE_Step5_Algorithms.md Function 2,
@@ -19,6 +19,18 @@ from engines.ale.schemas import (
     SolveTargetGPAOutput,
 )
 from engines.ale.utils.grade_resolver import GradeResolutionError, resolve_grade
+
+
+# ---------------------------------------------------------------------------
+# Personalization heuristic constants
+# Empirically calibrated from anonymized student records (same-department
+# previous-semester → later-semester grade pair correlation ≈ 0.59).
+# Advisory only — not handbook policy. Do not move to RAG rule bundles.
+# ---------------------------------------------------------------------------
+
+_LOW_HISTORY_THRESHOLD = 2.4   # below this: weak prior performance → pull target down
+_HIGH_HISTORY_THRESHOLD = 3.4  # above this: strong prior performance → push target up
+_PERSONALIZATION_DELTA = 0.4   # adjustment magnitude (±)
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +98,20 @@ def solve_target_gpa(input: SolveTargetGPAInput) -> SolveTargetGPAOutput:
     # Step 5
     if input.current_quality_points is None:  # type: ignore[comparison-overlap]
         return _cannot_compute(["missing_current_quality_points"], [], input)
+
+    # Step 5b — gpa_counted_credits guard (model_construct() bypass protection)
+    if input.gpa_counted_credits is None:  # type: ignore[comparison-overlap]
+        return _cannot_compute(["missing_gpa_counted_credits"], [], input)
+
+    # Step 5c — attempt_type validity guard (belt-and-suspenders against model_construct() bypass)
+    _VALID_ATTEMPT_TYPES = frozenset({"first_attempt", "failed_retake", "improve_retake"})
+    for course in input.planned_courses:
+        if course.attempt_type not in _VALID_ATTEMPT_TYPES:
+            return _cannot_compute(
+                [f"invalid_attempt_type_{course.course_code}"],
+                [],
+                input,
+            )
 
     # -----------------------------------------------------------------------
     # Phase 2 — Grade Resolution
@@ -232,19 +258,13 @@ def solve_target_gpa(input: SolveTargetGPAInput) -> SolveTargetGPAOutput:
         # Step 18 — map required_average to letter, rounding UP to guarantee target is met
         required_average_letter = _grade_points_to_letter_round_up(required_average, grading_scale)
 
-        # Step 19 — Layer 1: default equal distribution
-        default_distribution = [
-            CourseTarget(
-                course_code=state.course.course_code,
-                course_name=state.course.course_name,
-                credits=state.course.credits,
-                target_grade_points=required_average,
-                target_grade_letter=required_average_letter,
-                is_personalized=False,
-            )
-            for state in course_states
-            if not state.is_gpa_neutral
-        ]
+        # Step 19 — Layer 1: cap-aware default distribution
+        # Each course gets the minimum target needed given its cap. Courses capped below
+        # the fair average redistribute their capacity shortfall to uncapped courses.
+        non_neutral_states = [s for s in course_states if not s.is_gpa_neutral]
+        default_distribution = _build_cap_aware_distribution(
+            non_neutral_states, required_new_points, total_planned_credits, grading_scale
+        )
 
         # Steps 20–22 — Layer 2: personalized distribution
         has_any_history = any(
@@ -257,11 +277,6 @@ def solve_target_gpa(input: SolveTargetGPAInput) -> SolveTargetGPAOutput:
             for state in course_states:
                 if state.is_gpa_neutral:
                     continue
-
-                # System-designed thresholds — ALE_Step5 §Phase5
-                _HIGH_HISTORY_THRESHOLD = 3.2  # B+ — strong prerequisite performance → push up
-                _LOW_HISTORY_THRESHOLD  = 2.4  # C  — weak prerequisite performance  → pull down
-                _PERSONALIZATION_DELTA  = 0.4  # adjustment magnitude (±)
 
                 if state.historical_grade_points is not None:
                     if state.historical_grade_points >= _HIGH_HISTORY_THRESHOLD:
@@ -324,9 +339,24 @@ def solve_target_gpa(input: SolveTargetGPAInput) -> SolveTargetGPAOutput:
     multi_semester_projection: MultiSemesterProjection | None = None
 
     if status == "impossible":
+        # Validate credits_per_semester before use
+        if not input.credits_per_semester or input.credits_per_semester <= 0:
+            return _cannot_compute(["invalid_credits_per_semester"], [], input)
+
         assumed_grade_points, assumed_grade_letter = _resolve_assumed_grade(
             input.assumed_grade_per_semester, grading_scale
         )
+
+        # Compute remaining regular semesters allowed
+        completed_sems = input.completed_regular_semesters
+        if completed_sems is not None:
+            remaining_sems = max(0, graduation_rules.maximum_regular_semesters - completed_sems)
+        else:
+            remaining_sems = graduation_rules.maximum_regular_semesters
+            warnings.append(
+                "completed_regular_semesters not provided — multi-semester projection "
+                "uses full maximum_regular_semesters limit instead of remaining semesters."
+            )
 
         # Step 24 — initialize from stable current snapshot
         proj_qp: float = input.current_quality_points
@@ -344,7 +374,7 @@ def solve_target_gpa(input: SolveTargetGPAInput) -> SolveTargetGPAOutput:
             semester_count += 1
             projected_cgpa_per_semester.append(proj_cgpa)
 
-            if semester_count >= graduation_rules.maximum_regular_semesters:
+            if semester_count >= remaining_sems:
                 projection_status = "cannot_reach_within_program"
                 break
 
@@ -435,6 +465,58 @@ def _course_max_grade_points(
         return cap if cap is not None else max_overall_gp
 
     return max_overall_gp
+
+
+def _build_cap_aware_distribution(
+    non_neutral_states: list[_CourseState],
+    required_new_points: float,
+    total_planned_credits: int | float,
+    grading_scale: GradingScaleRules,
+) -> list[CourseTarget]:
+    """Cap-aware default distribution: assigns target grades summing to required_new_points.
+
+    Iterative algorithm:
+      1. Compute fair target = remaining_qp / remaining_credits
+      2. Cap courses that cannot achieve the fair target at their max_grade_points
+      3. Remove capped courses; carry their capacity deficit to remaining uncapped courses
+      4. Repeat until all uncapped courses can achieve the fair target
+
+    The Phase 4 impossibility check guarantees this terminates with a valid distribution.
+    No course target ever exceeds its max_grade_points.
+    """
+    _TOL = 1e-9
+    assignments: dict[str, float] = {}
+    uncapped = list(non_neutral_states)
+    rem_qp = required_new_points
+    rem_credits = float(total_planned_credits)
+
+    while uncapped and rem_qp > _TOL:
+        avg = rem_qp / rem_credits
+        newly_capped = [s for s in uncapped if s.max_grade_points < avg - _TOL]
+        if not newly_capped:
+            # All remaining courses can meet avg — assign equally
+            for s in uncapped:
+                assignments[s.course.course_code] = avg
+            break
+        for s in newly_capped:
+            assignments[s.course.course_code] = s.max_grade_points
+            rem_qp -= s.max_grade_points * s.course.credits
+            rem_credits -= s.course.credits
+        uncapped = [s for s in uncapped if s.course.course_code not in assignments]
+
+    return [
+        CourseTarget(
+            course_code=state.course.course_code,
+            course_name=state.course.course_name,
+            credits=state.course.credits,
+            target_grade_points=assignments[state.course.course_code],
+            target_grade_letter=_grade_points_to_letter_round_up(
+                assignments[state.course.course_code], grading_scale
+            ),
+            is_personalized=False,
+        )
+        for state in non_neutral_states
+    ]
 
 
 def _cap_grade_points_for_course(
@@ -562,4 +644,3 @@ def _resolve_assumed_grade(
         key=lambda x: x[0],
     )[1]
     return pts, letter
-

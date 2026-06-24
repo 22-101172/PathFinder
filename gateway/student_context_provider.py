@@ -9,22 +9,26 @@ from gateway.utils import get_current_semester
 
 logger = logging.getLogger(__name__)
 
-# Track ID normalization — not a rule, just naming consistency
-# across all system components (QU, KG, ALE, Composer)
+# Canonical KG track IDs only — must match Neo4j track nodes exactly.
+# SCP maps program strings to these IDs.  Any program not in this map is
+# "unsupported" and will receive track_id=None / track_status="unsupported".
 PROGRAM_TO_TRACK: dict[str, str] = {
     "artificial intelligence": "AI",
-    "cyber security": "Cyber",
-    "cybersecurity": "Cyber",
-    "data science and engineering": "Data Science",
-    "data science": "Data Science",
-    "computer science": "CS",
-    "software engineering": "SW",
-    "general program": "General",
-    "general": "General",
+    "cyber security": "CYS",
+    "cybersecurity": "CYS",
+    "data science and engineering": "DSE",
+    "data science": "DSE",
+    "software engineering": "SWE",
+    "general program": "GEN",
+    "general": "GEN",
 }
 
+# Programs explicitly known to exist in registrar data but NOT mapped to any KG
+# track.  Computer Science is the current known case.  Carry-forward: supervisor
+# must confirm whether CS records should map to an existing KG track.
+_UNSUPPORTED_PROGRAMS: frozenset[str] = frozenset({"computer science"})
+
 # Level string → integer for ALE input
-# Source: Excel Level column values as written by the registrar
 LEVEL_MAP: dict[str, int] = {
     "freshman": 1,
     "sophomore": 2,
@@ -32,8 +36,7 @@ LEVEL_MAP: dict[str, int] = {
     "senior": 4,
 }
 
-# Best-outcome priority — higher wins when a student has multiple
-# registration rows for the same course
+# Best-outcome priority — used to track whether a student ever passed a course
 _OUTCOME_PRIORITY: dict[str, int] = {
     "passed":      6,
     "repeated":    5,
@@ -45,6 +48,11 @@ _OUTCOME_PRIORITY: dict[str, int] = {
 
 _df_data: Optional[pd.DataFrame] = None
 _df_reg: Optional[pd.DataFrame] = None
+_global_current_semester: Optional[str] = None  # Set once by load_excel()
+
+# Minimum active blank-registered rows for a semester to qualify as the
+# global current semester. Prevents stale blank rows from old semesters winning.
+_ACTIVE_BLANK_THRESHOLD: int = 100
 
 
 def _load_and_validate_excel(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -126,33 +134,62 @@ def load_excel(path: str) -> None:
 
     Both sheets are loaded: "data" (one row per student) and
     "registrations" (one row per course registration attempt).
+
+    Also computes _global_current_semester from the full registrations sheet.
     """
-    global _df_data, _df_reg
+    global _df_data, _df_reg, _global_current_semester
 
     logger.info("SCP | validating and loading %s", path)
     _df_data, _df_reg = _load_and_validate_excel(path)
 
+    _global_current_semester, _infer_method = _compute_global_current_semester(_df_reg)
+
     logger.info(
-        "SCP | loaded %d students, %d registration rows",
-        len(_df_data), len(_df_reg),
+        "SCP | loaded %d students, %d registration rows | "
+        "global_current_semester=%r (%s)",
+        len(_df_data), len(_df_reg), _global_current_semester, _infer_method,
     )
 
 
+def _parse_track(program_str: str) -> tuple[Optional[str], str, Optional[str]]:
+    """
+    Map a raw registrar program string to KG canonical track info.
 
-def _parse_track(program_str: str) -> str:
+    Returns (track_id, track_status, track_error_code).
+    KG canonical track IDs: AI, CYS, DSE, SWE, GEN.
+    Computer Science and other unknown/unsupported programs get track_id=None.
+
+    Carry-forward: Orchestrator must block track-dependent planning/roadmap/
+    recommendation flows when track_status is "unsupported", because KG has
+    no curriculum data for unsupported programs.
     """
-    Normalizes the raw program string from the Excel to a short track ID
-    used consistently across all system components.
-    This is naming normalization only — not a policy rule.
-    Falls back to "General" if no match found.
-    """
-    if not program_str:
-        return "General"
+    if not program_str or str(program_str).strip().lower() in ("", "nan"):
+        logger.warning("SCP | blank/missing program — cannot determine track")
+        return None, "unsupported", "unsupported_track"
+
     lower = program_str.lower()
+
+    # Check explicitly unsupported programs first (before generic unknown fallback)
+    for key in _UNSUPPORTED_PROGRAMS:
+        if key in lower:
+            logger.warning(
+                "SCP | program %r is not a KG track (unsupported) — "
+                "supervisor must confirm handling for this program",
+                program_str,
+            )
+            return None, "unsupported", "unsupported_track"
+
+    # Check supported track mappings (longer keys before shorter to avoid partial match)
     for key, track_id in PROGRAM_TO_TRACK.items():
         if key in lower:
-            return track_id
-    return "General"
+            return track_id, "supported", None
+
+    # Unknown program — not in any known map
+    logger.warning(
+        "SCP | unknown program %r — no KG track mapping found (treating as unsupported)",
+        program_str,
+    )
+    return None, "unsupported", "unsupported_track"
 
 
 def _safe_float(val) -> Optional[float]:
@@ -173,15 +210,29 @@ def _safe_int(val) -> Optional[int]:
         return None
 
 
+_GRADE_CASE_MAP: dict[str, str] = {
+    "abs": "Abs",
+    "con": "Con",
+    "p":   "P",
+    "f":   "F",
+    "i":   "I",
+    "w":   "W",
+}
+
+
 def _clean_grade(raw) -> Optional[str]:
     """
     Normalizes a raw letter grade value from the Excel cell.
     Returns None if the cell is empty, NaN, or missing.
+    Canonical casing is enforced for known token grades (P, Con, I, F, Abs, W)
+    so that grade comparisons in _map_status() are case-insensitive in practice.
     """
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return None
     s = str(raw).strip()
-    return None if s.lower() in ("", "nan") else s
+    if s.lower() in ("", "nan"):
+        return None
+    return _GRADE_CASE_MAP.get(s.lower(), s)
 
 
 def _map_status(reg_status: str, grade: Optional[str]) -> str:
@@ -263,6 +314,9 @@ def _compute_retake_count(student_regs: pd.DataFrame) -> dict[str, int]:
     IMPORTANT: Must be called on raw registration data BEFORE _map_status()
     is applied, because once statuses are mapped the withdrawal distinction
     based on tags could be lost if we rely on status alone.
+
+    Note: retake_count is the non-withdrawn attempt count, not the improve-retake
+    count. Orchestrator must not use retake_count as improve_retake_number.
     """
     counts: dict[str, int] = {}
     for _, row in student_regs.iterrows():
@@ -284,48 +338,223 @@ def _compute_retake_count(student_regs: pd.DataFrame) -> dict[str, int]:
 
 def _compute_improve_retakes(student_regs: pd.DataFrame) -> int:
     """
-    Counts the total lifetime improve-retake attempts used by the student,
-    including withdrawn attempts (which still consume a slot).
+    Counts distinct course codes where the student has used an improve-retake slot.
 
-    Policy decision:
-      A withdrawn improve-retake attempt counts as used because the registrar
-      approved the student's request to improve-retake the course.
-      Withdrawal does not "refund" the attempt.
+    Policy: the improve-retake cap is course-count based (one slot per course),
+    not raw-attempt based. A student who improves the same course twice uses one
+    slot, not two.
 
-    This is different from regular retake attempts, where a withdrawal is not
-    counted as an attempt at all. See _compute_retake_count() for contrast.
-
-    The ALE checks this against the improve-retake cap rule from RAG.
+    Withdrawn improve-retake rows are excluded: no confirmed handbook policy
+    states that a withdrawn improve-retake consumes a slot.  Conservative
+    documented behavior applies.
 
     IMPORTANT: Must be called on raw registration data BEFORE _map_status()
-    because the Improve tag is the only signal — once statuses are mapped
-    the distinction between regular and improve retakes is lost.
+    because the Improve tag is the only signal.
     """
-    count = 0
+    improved_courses: set[str] = set()
     for _, row in student_regs.iterrows():
         reg_status = str(row.get("Registration Status", "")).strip()
+        grade = _clean_grade(row.get("Letter Grade"))
         tags = {t.strip().lower() for t in reg_status.split(",")}
+
+        # Skip withdrawn rows — not confirmed to consume a slot
+        if "withdrawn" in tags or "forced withdraw" in tags or grade == "W":
+            continue
+
         if "improve" in tags or "repeat for improvement" in tags:
-            count += 1
-    return count
+            code = str(row.get("Course Code", "")).strip()
+            if code and code.lower() != "nan":
+                improved_courses.add(code)
+
+    return len(improved_courses)
 
 
-def _compute_regular_semesters(student_regs: pd.DataFrame) -> int:
+def _semester_key(semester: str) -> tuple:
     """
-    Counts distinct Fall and Spring semesters that are complete
-    (excludes current semester).
+    Sortable key for chronological semester ordering.
+    Fall YYYY → (YYYY, 2), Spring YYYY → (YYYY, 1), Summer YYYY → (YYYY, 0).
+    Unparseable → (-1, 0) so it sorts earliest.
+    """
+    parts = semester.strip().split()
+    if len(parts) != 2:
+        return (-1, 0)
+    season, year_str = parts[0], parts[1]
+    try:
+        year = int(year_str)
+    except ValueError:
+        return (-1, 0)
+    return (year, {"Fall": 2, "Spring": 1, "Summer": 0}.get(season, -1))
+
+
+def _latest_semester(semesters: list[str]) -> str:
+    """Return the chronologically latest semester from a list."""
+    return max(semesters, key=_semester_key)
+
+
+def _is_active_blank(reg_status: str, grade: Optional[str]) -> bool:
+    """
+    True when a registration row represents an active, not-yet-graded enrollment
+    in the current semester.
+
+    Conditions (all must hold):
+      1. Letter Grade is blank (None)
+      2. Registration Status contains "Registered"
+      3. Registration Status does NOT contain any terminal outcome tag:
+         Succeeded, Failed, Withdrawn, Forced Withdraw
+
+    This distinguishes genuinely in-progress rows from old blank rows that
+    appear in past semesters with terminal tags like "Succeeded, Registered".
+    """
+    if grade is not None:
+        return False
+    tags = {t.strip().lower() for t in reg_status.split(",")}
+    if "registered" not in tags:
+        return False
+    terminal = {"succeeded", "failed", "withdrawn", "forced withdraw"}
+    return not tags.intersection(terminal)
+
+
+def _compute_global_current_semester(
+    df_reg: pd.DataFrame,
+) -> tuple[Optional[str], str]:
+    """
+    Infer the current academic semester once from the full registrations sheet.
+
+    Algorithm:
+      1. Count active blank-registered rows per semester (see _is_active_blank).
+      2. If the semester with the highest count has >= _ACTIVE_BLANK_THRESHOLD
+         active rows, that is the global current semester.
+      3. Fallback: chronologically latest non-withdrawn row across all students.
+      4. Final fallback: system clock via get_current_semester().
+
+    Returns:
+      (semester, inference_method)
+      where inference_method is one of:
+        "active_blank_threshold"       — majority of active enrollments
+        "latest_non_withdrawn_global"  — no threshold met; latest completed row
+        "system_clock"                 — no usable registrar data at all
+    """
+    active_counts: dict[str, int] = {}
+    all_non_withdrawn: list[str] = []
+
+    for _, row in df_reg.iterrows():
+        semester = str(row.get("Semester", "")).strip()
+        if not semester or semester.lower() == "nan":
+            continue
+
+        reg_status = str(row.get("Registration Status", "")).strip()
+        grade = _clean_grade(row.get("Letter Grade"))
+        tags = {t.strip().lower() for t in reg_status.split(",")}
+
+        if "withdrawn" not in tags and "forced withdraw" not in tags and grade != "W":
+            all_non_withdrawn.append(semester)
+
+        if _is_active_blank(reg_status, grade):
+            active_counts[semester] = active_counts.get(semester, 0) + 1
+
+    if active_counts:
+        best_sem = max(active_counts, key=lambda s: active_counts[s])
+        best_count = active_counts[best_sem]
+        if best_count >= _ACTIVE_BLANK_THRESHOLD:
+            logger.info(
+                "SCP | global current_semester=%r via active_blank_threshold (count=%d)",
+                best_sem, best_count,
+            )
+            return best_sem, "active_blank_threshold"
+
+    if all_non_withdrawn:
+        chosen = _latest_semester(all_non_withdrawn)
+        logger.info(
+            "SCP | global current_semester=%r via latest_non_withdrawn_global",
+            chosen,
+        )
+        return chosen, "latest_non_withdrawn_global"
+
+    chosen = get_current_semester()
+    logger.warning(
+        "SCP | global current_semester=%r via system_clock (no registrar data)", chosen
+    )
+    return chosen, "system_clock"
+
+
+def _infer_current_semester(student_regs: pd.DataFrame) -> tuple[Optional[str], str]:
+    """
+    Infer the student's current academic semester from registration data.
+
+    Algorithm:
+      1. Map statuses for all non-withdrawn rows.
+      2. Count in-progress rows per semester (majority vote).
+      3. Pick the semester with the highest count; break ties chronologically.
+      4. Guard: if no semester has in-progress rows, fall back to the
+         chronologically latest non-withdrawn semester.
+      5. Final fallback: utils.get_current_semester() when registrar data
+         provides no signal at all.
+
+    Returns:
+      (semester, inference_method)
+      where inference_method is one of:
+        "majority_vote"         — multiple in-progress rows, one semester won
+        "single_inprogress"     — only one in-progress row found
+        "latest_non_withdrawn"  — no in-progress rows; latest completed used
+        "system_clock"          — no registrar data available
+    """
+    in_progress_counts: dict[str, int] = {}
+    all_non_withdrawn: list[str] = []
+
+    for _, row in student_regs.iterrows():
+        semester = str(row.get("Semester", "")).strip()
+        if not semester or semester.lower() == "nan":
+            continue
+        reg_status_raw = str(row.get("Registration Status", "")).strip()
+        grade_raw = _clean_grade(row.get("Letter Grade"))
+        tags = {t.strip().lower() for t in reg_status_raw.split(",")}
+
+        if "withdrawn" in tags or "forced withdraw" in tags or grade_raw == "W":
+            continue
+
+        all_non_withdrawn.append(semester)
+
+        if _map_status(reg_status_raw, grade_raw) == "in_progress":
+            in_progress_counts[semester] = in_progress_counts.get(semester, 0) + 1
+
+    if in_progress_counts:
+        max_count = max(in_progress_counts.values())
+        top = [s for s, c in in_progress_counts.items() if c == max_count]
+        chosen = _latest_semester(top)
+        method = "majority_vote" if max_count > 1 else "single_inprogress"
+        logger.info(
+            "SCP | current_semester=%r via %s (count=%d)", chosen, method, max_count
+        )
+        return chosen, method
+
+    if all_non_withdrawn:
+        chosen = _latest_semester(all_non_withdrawn)
+        logger.info(
+            "SCP | current_semester=%r via latest_non_withdrawn (no in-progress rows)",
+            chosen,
+        )
+        return chosen, "latest_non_withdrawn"
+
+    chosen = get_current_semester()
+    logger.warning(
+        "SCP | current_semester=%r via system_clock (no registrar data)", chosen
+    )
+    return chosen, "system_clock"
+
+
+def _compute_regular_semesters(
+    student_regs: pd.DataFrame, current_sem: Optional[str]
+) -> int:
+    """
+    Counts distinct Fall and Spring semesters that are complete.
+    Excludes the SCP-inferred current semester (not the system clock).
 
     Rules:
       - Summer semesters excluded entirely (not regular semesters)
-      - Current semester excluded — only count completed semesters
+      - current_sem excluded — only count completed semesters
       - A semester where ALL registrations were withdrawn does not count
       - A single non-withdrawn row in a completed semester is enough to count it
-
-    Rationale:
-      ALE graduation audit uses this count to determine eligibility.
-      Including current semester would incorrectly overcount study time.
     """
-    current_sem = get_current_semester()
     valid: set[str] = set()
 
     for _, row in student_regs.iterrows():
@@ -334,7 +563,7 @@ def _compute_regular_semesters(student_regs: pd.DataFrame) -> int:
             continue
 
         # Skip current semester — it is not complete yet
-        if semester == current_sem:
+        if current_sem and semester == current_sem:
             continue
 
         # Skip Summer
@@ -410,6 +639,8 @@ def get_context(student_id: str) -> Optional[StudentContext]:
       - I grade → treated as incomplete (counts as attempt, ongoing)
       - P grade → treated as passed + added to zero_credit_courses_passed
       - NaN or missing Excel cells → safe defaults via _safe_float/_safe_int
+      - Unsupported/unknown programs → track_id=None, track_status="unsupported"
+      - Invalid/blank level → level=None (ALEAdapter returns cannot_compute)
     """
     if _df_data is None or _df_reg is None:
         raise RuntimeError("Call load_excel() before get_context()")
@@ -431,32 +662,55 @@ def get_context(student_id: str) -> Optional[StudentContext]:
         None if not mil_raw or mil_raw.lower() in ("nan", "") else mil_raw
     )
 
+    # Level: do not silently default invalid/blank level to Freshman.
+    # ALEAdapter._map_student_level returns None for invalid level, and
+    # the ALE function returns cannot_compute / invalid_student_level.
+    level_raw = str(r.get("Level", "") or "").strip().lower()
+    level = LEVEL_MAP.get(level_raw)
+    if level is None:
+        logger.warning(
+            "SCP | %s: invalid or blank level=%r — setting level=None",
+            student_id, level_raw or "(blank)",
+        )
+
     # --- Registration rows for this student ---
     student_regs = _df_reg[
         _df_reg["ID"].astype(str) == str(student_id)
     ].copy()
 
-    # --- Derived fields from raw registrations (BEFORE status mapping) ---
-    # These must run on raw data because _map_status() loses tag detail
-    retake_count              = _compute_retake_count(student_regs)
-    total_improve_retakes_used = _compute_improve_retakes(student_regs)
-    completed_regular_semesters = _compute_regular_semesters(student_regs)
-    zero_credit_courses_passed  = _compute_zero_credit_passed(student_regs)
+    # --- Global current semester (computed once at load_excel() time) ---
+    # Falls back to system clock only when SCP was loaded without real data
+    # (e.g. unit tests that inject synthetic DataFrames without calling load_excel).
+    current_semester_val = (
+        _global_current_semester
+        if _global_current_semester is not None
+        else get_current_semester()
+    )
 
-    # --- Build course_history and best-outcome resolution ---
+    # --- Derived fields from raw registrations (BEFORE status mapping) ---
+    retake_count               = _compute_retake_count(student_regs)
+    total_improve_retakes_used = _compute_improve_retakes(student_regs)
+    # Always exclude the global current semester from the completed count.
+    # If _global_current_semester is None (synthetic tests), nothing is excluded.
+    completed_regular_semesters = _compute_regular_semesters(
+        student_regs,
+        _global_current_semester,
+    )
+    zero_credit_courses_passed = _compute_zero_credit_passed(student_regs)
+
+    # --- Build course_history and outcome tracking ---
     course_history: list[CourseRecord] = []
+
+    # best_outcome: highest-priority outcome per course (detects if ever passed)
     best_outcome: dict[str, str] = {}
 
-    # Track latest row per course to identify unresolved active attempts.
-    # Assumption: Excel registration rows are chronological; later rows
-    # appear later in the sheet.
-    latest_row_per_course: dict[str, tuple[int, str]] = {}
+    # latest_meaningful_status: most recent NON-WITHDRAWN outcome per course.
+    # Used for failed_courses: "latest meaningful state is failed"
+    latest_meaningful_status: dict[str, str] = {}
 
-    row_index = 0
     for _, reg in student_regs.iterrows():
         code = str(reg.get("Course Code", "")).strip()
         if not code or code.lower() == "nan":
-            row_index += 1
             continue
 
         reg_status = str(reg.get("Registration Status", "")).strip()
@@ -465,83 +719,70 @@ def get_context(student_id: str) -> Optional[StudentContext]:
 
         status = _map_status(reg_status, grade)
 
+        # credit_hours=None: credits are not authoritative from registrar data.
+        # Orchestrator/KG must patch via course_credit_lookup before ALE calls.
         course_history.append(CourseRecord(
             course_code=code,
-            credit_hours=0,   # sentinel — orchestrator patches via KG
+            credit_hours=None,
             grade=grade,
             semester_taken=semester,
             status=status,
         ))
 
-        # Keep best outcome per course using priority map.
-        # This drives completed_courses and failed_courses only.
+        # Track best outcome (passed/repeated win over everything)
         current = best_outcome.get(code, "withdrawn")
         if _OUTCOME_PRIORITY.get(status, 0) > _OUTCOME_PRIORITY.get(current, 0):
             best_outcome[code] = status
 
-        # Track latest row per course to detect currently active attempts.
-        latest_row_per_course[code] = (row_index, status)
-
-        row_index += 1
+        # Track latest meaningful (non-withdrawn) outcome for failed detection
+        if status != "withdrawn":
+            latest_meaningful_status[code] = status
 
     # --- Derive course lists ---
-    # completed/failed: use best-outcome (final status per course)
+    # completed: ever achieved passed or repeated (best historical outcome)
     completed = [c for c, s in best_outcome.items() if s in ("passed", "repeated")]
-    failed = [c for c, s in best_outcome.items() if s == "failed"]
+    completed_set = set(completed)
 
-    # in_progress: include active registrations and unresolved incomplete attempts.
-    # A course is in_progress if its latest attempt has status in_progress
-    # or unresolved incomplete. Old incomplete attempts that were later
-    # passed/repeated/failed do not remain in_progress.
+    # failed: latest meaningful state is "failed" AND course was never completed
+    # Using latest_meaningful_status (not best_outcome) ensures a later failed
+    # attempt is not hidden behind an older incomplete.
+    failed = [
+        c for c, s in latest_meaningful_status.items()
+        if s == "failed" and c not in completed_set
+    ]
+
+    # in_progress: student's active blank-registered rows in the global current
+    # semester only.  Old blank rows from completed semesters, I-grade rows, and
+    # rows with terminal tags (Succeeded/Failed/Withdrawn) are explicitly excluded.
+    # When _global_current_semester is None (synthetic tests without load_excel),
+    # in_progress_courses is always empty.
     in_progress_set: set[str] = set()
-
-    for course_code, (_latest_index, latest_status) in latest_row_per_course.items():
-        if latest_status == "in_progress":
-            in_progress_set.add(course_code)
-        elif (
-            latest_status == "incomplete"
-            and best_outcome.get(course_code) == "incomplete"
-        ):
-            in_progress_set.add(course_code)
+    if _global_current_semester:
+        for _, reg in student_regs.iterrows():
+            semester = str(reg.get("Semester", "")).strip()
+            if semester != _global_current_semester:
+                continue
+            reg_status = str(reg.get("Registration Status", "")).strip()
+            grade = _clean_grade(reg.get("Letter Grade"))
+            if _is_active_blank(reg_status, grade):
+                code = str(reg.get("Course Code", "")).strip()
+                if code and code.lower() != "nan":
+                    in_progress_set.add(code)
 
     in_progress = sorted(list(in_progress_set))
 
-    # Determine current_semester: in-progress rows → latest registration → system clock
-    current_semester_val: Optional[str] = None
-    in_progress_semesters: list[str] = []
-    all_non_withdrawn_semesters: list[str] = []
-    for _, reg in student_regs.iterrows():
-        semester = str(reg.get("Semester", "")).strip()
-        if not semester or semester.lower() == "nan":
-            continue
-        reg_status_raw = str(reg.get("Registration Status", "")).strip()
-        grade_raw = _clean_grade(reg.get("Letter Grade"))
-        tags = {t.strip().lower() for t in reg_status_raw.split(",")}
-        if "withdrawn" in tags or "forced withdraw" in tags or grade_raw == "W":
-            continue
-        status_val = _map_status(reg_status_raw, grade_raw)
-        all_non_withdrawn_semesters.append(semester)
-        if status_val == "in_progress":
-            in_progress_semesters.append(semester)
-
-    if in_progress_semesters:
-        current_semester_val = in_progress_semesters[-1]
-    elif all_non_withdrawn_semesters:
-        current_semester_val = all_non_withdrawn_semesters[-1]
-    else:
-        current_semester_val = get_current_semester()
-
-    # Note: course_history remains authoritative for all attempt-level details.
-    # Downstream components needing exact attempt history should query
-    # course_history, not rely only on derived completed/failed/in_progress lists.
-    # Withdrawn courses are intentionally excluded from all derived lists.
+    # --- Track normalization ---
+    program_str = str(r.get("Program", "") or "").strip()
+    track_id, track_status, track_error_code = _parse_track(program_str)
 
     ctx = StudentContext(
         student_id=str(r["ID"]),
         name=str(r.get("Name", "")).strip(),
-        program=str(r.get("Program", "")).strip(),
-        track_id=_parse_track(str(r.get("Program", ""))),
-        level=LEVEL_MAP.get(str(r.get("Level", "")).strip().lower(), 1),
+        program=program_str,
+        track_id=track_id,
+        track_status=track_status,
+        track_error_code=track_error_code,
+        level=level,
         first_semester=str(r.get("First Semester", "")).strip(),
         study_status=_get_study_status(r),
         military_status=military_status,
@@ -569,12 +810,14 @@ def get_context(student_id: str) -> Optional[StudentContext]:
     )
 
     logger.info(
-        "SCP | %s | track=%s level=%d cgpa=%s "
+        "SCP | %s | track=%s track_status=%s level=%s cgpa=%s study_status=%s "
         "completed=%d failed=%d in_progress=%d "
-        "regular_sems=%d improve_retakes=%d zero_credit=%d",
-        student_id, ctx.track_id, ctx.level, ctx.cgpa,
+        "regular_sems=%d current_sem=%r improve_retakes=%d zero_credit=%d",
+        student_id,
+        ctx.track_id, ctx.track_status, ctx.level, ctx.cgpa, ctx.study_status,
         len(ctx.completed_courses), len(ctx.failed_courses),
         len(ctx.in_progress_courses), ctx.completed_regular_semesters,
-        ctx.total_improve_retakes_used, len(ctx.zero_credit_courses_passed),
+        ctx.current_semester, ctx.total_improve_retakes_used,
+        len(ctx.zero_credit_courses_passed),
     )
     return ctx

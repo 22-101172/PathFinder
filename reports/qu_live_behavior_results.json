@@ -1,0 +1,202 @@
+{
+  "summary": {
+    "total": 10,
+    "passed": 9,
+    "failed": 1,
+    "pass_rate": "90%"
+  },
+  "results": [
+    {
+      "id": "LQ01",
+      "category": "Academic Planning",
+      "user_text": "what should i register next semester",
+      "status": "PASS",
+      "expected_intents": [
+        "plan_semester"
+      ],
+      "predicted_intents": [
+        "plan_semester"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 1.43,
+      "rate_limited": false,
+      "error": null,
+      "notes": "Basic plan_semester; student-referential"
+    },
+    {
+      "id": "LQ02",
+      "category": "Course Info",
+      "user_text": "full prereqs for advanced programming",
+      "status": "PASS",
+      "expected_intents": [
+        "get_course_prerequisites"
+      ],
+      "predicted_intents": [
+        "get_course_prerequisites"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 2.54,
+      "rate_limited": true,
+      "error": null,
+      "notes": "depth=full keyword test"
+    },
+    {
+      "id": "LQ03",
+      "category": "Academic Planning (compound)",
+      "user_text": "can i graduate and if not give me a roadmap",
+      "status": "PASS",
+      "expected_intents": [
+        "run_graduation_audit",
+        "generate_graduation_roadmap"
+      ],
+      "predicted_intents": [
+        "run_graduation_audit",
+        "generate_graduation_roadmap"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 2.83,
+      "rate_limited": true,
+      "error": null,
+      "notes": "Multi-SQ decomposition"
+    },
+    {
+      "id": "LQ04",
+      "category": "Course Info",
+      "user_text": "what courses teach databases",
+      "status": "PASS",
+      "expected_intents": [
+        "search_courses_by_skill"
+      ],
+      "predicted_intents": [
+        "search_courses_by_skill"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 2.95,
+      "rate_limited": true,
+      "error": null,
+      "notes": "search_courses_by_skill; skill entity not course"
+    },
+    {
+      "id": "LQ05",
+      "category": "Career / Role",
+      "user_text": "i wanna be data scientist what am i missing",
+      "status": "PASS",
+      "expected_intents": [
+        "compute_skill_gap"
+      ],
+      "predicted_intents": [
+        "compute_skill_gap"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 2.9,
+      "rate_limited": true,
+      "error": null,
+      "notes": "compute_skill_gap; student-referential"
+    },
+    {
+      "id": "LQ06",
+      "category": "Career / Role",
+      "user_text": "important courses for data scientist",
+      "status": "PASS",
+      "expected_intents": [
+        "get_focus_courses_for_target"
+      ],
+      "predicted_intents": [
+        "get_focus_courses_for_target"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 4.0,
+      "rate_limited": true,
+      "error": null,
+      "notes": "General focus; student_referential_fallback=false"
+    },
+    {
+      "id": "LQ07",
+      "category": "Career / Role",
+      "user_text": "what focus courses should i still take for data scientist",
+      "status": "PASS",
+      "expected_intents": [
+        "get_focus_courses_for_target"
+      ],
+      "predicted_intents": [
+        "get_focus_courses_for_target"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 3.88,
+      "rate_limited": true,
+      "error": null,
+      "notes": "Personal trigger 'still'; student_referential_fallback=true"
+    },
+    {
+      "id": "LQ08",
+      "category": "Track",
+      "user_text": "compare ai and data science",
+      "status": "RATE_LIMIT?",
+      "expected_intents": [
+        "compare_tracks"
+      ],
+      "predicted_intents": [
+        "clarification_needed"
+      ],
+      "intent_match": false,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 3.11,
+      "rate_limited": true,
+      "error": null,
+      "notes": "Two-track comparison with secondary_entities"
+    },
+    {
+      "id": "LQ09",
+      "category": "Control",
+      "user_text": "what roles need python",
+      "status": "PASS",
+      "expected_intents": [
+        "clarification_needed"
+      ],
+      "predicted_intents": [
+        "clarification_needed"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 3.37,
+      "rate_limited": true,
+      "error": null,
+      "notes": "No locked intent maps skill->roles; must clarify"
+    },
+    {
+      "id": "LQ10",
+      "category": "Control",
+      "user_text": "how much is tuition",
+      "status": "PASS",
+      "expected_intents": [
+        "out_of_scope"
+      ],
+      "predicted_intents": [
+        "out_of_scope"
+      ],
+      "intent_match": true,
+      "params_match": true,
+      "params_notes": [],
+      "elapsed_s": 2.69,
+      "rate_limited": true,
+      "error": null,
+      "notes": "Financial matter - out of scope"
+    }
+  ]
+}

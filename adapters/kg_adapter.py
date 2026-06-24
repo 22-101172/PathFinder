@@ -4,12 +4,99 @@ All 18 KG operations callable via call(operation, params).
 """
 from __future__ import annotations
 import logging
+import time
 from typing import Any
 
 from engines.kg.neo4j_client import Neo4jClient
 import engines.kg.queries as Q
 
 logger = logging.getLogger(__name__)
+
+_ADAPTER_ERRORS = {"kg_unavailable", "unknown_operation", "bad_params", "kg_error"}
+
+# Scalar param keys that are safe to log verbatim
+_SAFE_SCALAR_KEYS = {
+    "course_code", "role_id", "track_id", "track_id_1", "track_id_2",
+    "skill_id", "entity_type", "entity_text", "depth",
+    "target_id", "target_type",
+}
+
+# List param keys that may be long — summarise as count + short preview
+_LIST_KEYS = {"completed_courses", "skill_ids", "planned_courses"}
+
+# Result list fields worth counting
+_COUNTED_LIST_FIELDS = {
+    "results", "courses", "skills_taught", "required_skills", "covered_skills",
+    "missing_skills", "recommended_courses", "direct_prerequisites",
+    "full_prerequisite_tree", "non_course_prerequisites", "tracks", "roles",
+    "focus_courses", "ranked_roles", "ranked_tracks",
+}
+
+# Compact scalar result fields worth surfacing
+_COMPACT_SCALAR_FIELDS = {"total_results", "total_skills", "alignment_percentage"}
+
+
+def _duration_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
+
+
+def _summarize_params(params: dict | None) -> dict:
+    try:
+        if not isinstance(params, dict):
+            return {"_invalid": type(params).__name__ if params is not None else "NoneType"}
+        summary: dict[str, Any] = {}
+        for k, v in params.items():
+            if k in _SAFE_SCALAR_KEYS:
+                summary[k] = v
+            elif k in _LIST_KEYS:
+                if isinstance(v, list):
+                    preview = v[:3] + (["..."] if len(v) > 3 else [])
+                    summary[k] = {"count": len(v), "preview": preview}
+                else:
+                    summary[k] = v
+            elif isinstance(v, list):
+                preview = v[:5] + (["..."] if len(v) > 5 else [])
+                summary[k] = {"count": len(v), "preview": preview}
+            elif isinstance(v, dict):
+                summary[k] = {"_type": "dict"}
+            elif isinstance(v, (str, int, float, bool)) or v is None:
+                summary[k] = v
+            else:
+                summary[k] = {"_type": type(v).__name__}
+        return summary
+    except Exception:
+        return {}
+
+
+def _summarize_result(result: dict) -> tuple[str, dict]:
+    try:
+        keys = list(result.keys())
+        error = result.get("error")
+
+        if error is not None:
+            status = "adapter_error" if error in _ADAPTER_ERRORS else "business_error"
+        else:
+            status = "success"
+
+        summary: dict[str, Any] = {"keys": keys}
+        if error is not None:
+            summary["error"] = error
+
+        counts: dict[str, int] = {}
+        for field in _COUNTED_LIST_FIELDS:
+            val = result.get(field)
+            if isinstance(val, list):
+                counts[field] = len(val)
+        if counts:
+            summary["counts"] = counts
+
+        for field in _COMPACT_SCALAR_FIELDS:
+            if field in result:
+                summary[field] = result[field]
+
+        return status, summary
+    except Exception:
+        return "success", {"keys": []}
 
 
 class KGAdapter:
@@ -29,11 +116,25 @@ class KGAdapter:
             self._client.close()
 
     def call(self, operation: str, params: dict) -> dict:
+        start = time.perf_counter()
+        safe_params = _summarize_params(params)
+        logger.info(
+            "KGAdapter.call start operation=%s params=%s",
+            operation,
+            safe_params,
+        )
+
         if self._client is None:
+            logger.warning(
+                "KGAdapter.call result operation=%s status=adapter_error error=kg_unavailable duration_ms=%d",
+                operation,
+                _duration_ms(start),
+            )
             return {
                 "error": "kg_unavailable",
                 "detail": "Knowledge Graph is not connected. Check Neo4j configuration and startup.",
             }
+
         dispatch: dict[str, Any] = {
             "get_course_profile":              self.get_course_profile,
             "get_prerequisites":               self.get_prerequisites,
@@ -56,14 +157,40 @@ class KGAdapter:
         }
         fn = dispatch.get(operation)
         if fn is None:
+            logger.warning(
+                "KGAdapter.call result operation=%s status=adapter_error error=unknown_operation duration_ms=%d",
+                operation,
+                _duration_ms(start),
+            )
             return {"error": f"unknown_operation", "detail": operation}
+
         try:
-            return fn(**params)
+            result = fn(**params)
+            status, summary = _summarize_result(result)
+            log = logger.warning if status != "success" else logger.info
+            log(
+                "KGAdapter.call result operation=%s status=%s summary=%s duration_ms=%d",
+                operation,
+                status,
+                summary,
+                _duration_ms(start),
+            )
+            return result
         except TypeError as exc:
             logger.error("KGAdapter.call(%r) bad params: %s", operation, exc)
+            logger.warning(
+                "KGAdapter.call result operation=%s status=adapter_error error=bad_params duration_ms=%d",
+                operation,
+                _duration_ms(start),
+            )
             return {"error": "bad_params", "detail": str(exc)}
         except Exception as exc:
             logger.exception("KGAdapter.call(%r) failed", operation)
+            logger.warning(
+                "KGAdapter.call result operation=%s status=adapter_error error=kg_error duration_ms=%d",
+                operation,
+                _duration_ms(start),
+            )
             return {"error": "kg_error", "detail": str(exc)}
 
     def get_course_profile(self, course_code: str) -> dict:

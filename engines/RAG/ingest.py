@@ -3,17 +3,24 @@ import re
 import pickle
 import shutil
 import uuid
+from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+# langchain_community Chroma kept for compatibility; migrate to langchain_chroma once confirmed installed
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
+_RAG_DIR = Path(__file__).resolve().parent
 
 # ── config ──────────────────────────────────────────────────────────────────
-MD_PATH              = "CIS_Handbook.md"
+MD_PATH              = os.environ.get("RAG_HANDBOOK_PATH", str(_RAG_DIR / "CIS_Handbook.md"))
 DOC_ID               = "CIS Student Handbook"
 VERSION_DATE         = "2026-03-05"
-PERSIST_DIR          = "./chroma_db"
-CHUNKS_FILE          = "chunks.pkl"
+PERSIST_DIR          = os.environ.get("RAG_CHROMA_DIR",    str(_RAG_DIR / "chroma_db"))
+CHUNKS_FILE          = os.environ.get("RAG_CHUNKS_FILE",   str(_RAG_DIR / "chunks.pkl"))
 EMBED_MODEL          = "BAAI/bge-small-en-v1.5"
 
 PARENT_CHUNK_SIZE    = 800
@@ -55,8 +62,7 @@ def load_md_as_pages(md_path: str) -> list[Document]:
 
 def ingest_document():
     if not os.path.exists(MD_PATH):
-        print(f"❌ File not found: {MD_PATH}")
-        return
+        raise FileNotFoundError(f"Handbook not found: {MD_PATH}")
 
     print(f"📄 Reading: {MD_PATH}")
     page_docs = load_md_as_pages(MD_PATH)
@@ -106,7 +112,7 @@ def ingest_document():
     print(f"💾 Building ChromaDB (child chunks) → {PERSIST_DIR}...")
     Chroma.from_documents(child_chunks, embeddings, persist_directory=PERSIST_DIR)
 
-    print("🎉 Ingestion complete. Run: streamlit run app.py")
+    print("🎉 Ingestion complete. See README for how to start the PathFinder backend and UI.")
 
 
 if __name__ == "__main__":

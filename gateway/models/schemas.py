@@ -24,7 +24,7 @@ class QueryResponse(BaseModel):
     session_id: str
     session_name: str
     answer_text: str
-    citations: list[Citation] = []
+    citations: list[Citation] = Field(default_factory=list)
     status: Literal["ok", "error", "clarification_needed"] = "ok"
 
 
@@ -36,9 +36,9 @@ class EntitySet(BaseModel):
 
 
 class SessionOverrides(BaseModel):
-    added_courses: list[str] = []
-    assumed_failed_courses: list[str] = []
-    assumed_passed_courses: list[str] = []
+    added_courses: list[str] = Field(default_factory=list)
+    assumed_failed_courses: list[str] = Field(default_factory=list)
+    assumed_passed_courses: list[str] = Field(default_factory=list)
     target_role: Optional[str] = None
     course_override_type: Literal[
         "planned",
@@ -73,7 +73,7 @@ class StructuredQuery(BaseModel):
 class CourseRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
     course_code: str
-    credit_hours: int
+    credit_hours: Optional[int] = None  # None = credits unknown; KG/Orchestrator must patch
     grade: Optional[str] = None
     semester_taken: str
     status: Literal["passed", "repeated", "failed", "in_progress",
@@ -84,8 +84,10 @@ class StudentContext(BaseModel):
     student_id: str
     name: str
     program: str
-    track_id: str
-    level: int
+    track_id: Optional[str] = None        # None for unsupported/unknown programs
+    track_status: Literal["supported", "unsupported"] = "supported"
+    track_error_code: Optional[str] = None  # e.g. "unsupported_track"
+    level: Optional[int] = None            # None for invalid/blank level
     first_semester: str
     study_status: str
     military_status: Optional[str] = None
@@ -116,6 +118,7 @@ class LastReferenced(BaseModel):
     course_code: Optional[str] = None
     role_id: Optional[str] = None
     track_id: Optional[str] = None
+    skill_id: Optional[str] = None  # mirrors EntitySet.skill_id; merged per-turn
 
 
 class QUContext(BaseModel):
@@ -130,14 +133,14 @@ class SessionState(BaseModel):
     student_id: str
     session_name: str
     student_context: StudentContext
-    last_referenced: LastReferenced = LastReferenced()
-    overrides: SessionOverrides = SessionOverrides()
+    last_referenced: LastReferenced = Field(default_factory=LastReferenced)
+    overrides: SessionOverrides = Field(default_factory=SessionOverrides)
     turn_history: list[Turn] = Field(default_factory=list)
 
 
 class RAGResult(BaseModel):
     answer: Optional[str] = None
-    citations: list[Citation] = []
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class ComposerContext(BaseModel):
@@ -213,10 +216,10 @@ class SessionSummary(BaseModel):
 
 class StudentSessionsResponse(BaseModel):
     student_id: str
-    sessions: list[SessionSummary] = []
+    sessions: list[SessionSummary] = Field(default_factory=list)
 
 
 class SessionHistoryResponse(BaseModel):
     session_id: str
     session_name: str
-    turns: list[dict] = []
+    turns: list[dict] = Field(default_factory=list)

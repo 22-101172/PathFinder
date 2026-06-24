@@ -389,6 +389,7 @@ def test_graduation_audit_not_eligible_for_freshman(adapter, student_cannot_grad
         "run_graduation_audit",
         student_cannot_graduate,
         rule_bundles,
+        kg_data={"required_zero_credit_courses": ["HUM111"]},
     )
     assert result.get("status") != "error", f"Unexpected error: {result.get('message')}"
     assert result["status"] == "not_eligible", (
@@ -402,6 +403,7 @@ def test_graduation_audit_has_checks_field(adapter, student_good_standing, rule_
         "run_graduation_audit",
         student_good_standing,
         rule_bundles,
+        kg_data={"required_zero_credit_courses": ["HUM111"]},
     )
     assert result.get("status") != "error", f"Unexpected error: {result.get('message')}"
     assert "checks" in result, f"Missing 'checks' in result: {result}"
@@ -463,7 +465,7 @@ def test_graduation_roadmap_has_labeled_semesters(adapter, student_good_standing
         "generate_graduation_roadmap",
         student_good_standing,
         rule_bundles,
-        kg_data={"available_courses": available_courses_fall_only},
+        kg_data={"available_courses": available_courses_fall_only, "required_zero_credit_courses": ["HUM111"]},
         params={
             "target_semester_type": "Fall",
             "starting_year": 2026,
@@ -486,7 +488,7 @@ def test_graduation_roadmap_spring_only_course_not_in_fall_semester(adapter, stu
         "generate_graduation_roadmap",
         student_good_standing,
         rule_bundles,
-        kg_data={"available_courses": available_courses_fall_only},
+        kg_data={"available_courses": available_courses_fall_only, "required_zero_credit_courses": ["HUM111"]},
         params={
             "target_semester_type": "Fall",
             "starting_year": 2026,

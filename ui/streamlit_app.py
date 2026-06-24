@@ -20,9 +20,11 @@ def api_get_sessions(student_id):
         return []
 
 
-def api_load_history(session_id):
+def api_load_history(student_id, session_id):
     try:
-        r = requests.get(f"{API}/session/{session_id}/history", timeout=5)
+        r = requests.get(
+            f"{API}/students/{student_id}/sessions/{session_id}/history", timeout=5
+        )
         if r.status_code == 200:
             data = r.json()
             msgs = []
@@ -33,6 +35,35 @@ def api_load_history(session_id):
     except Exception:
         pass
     return [], ""
+
+
+def api_delete_session(student_id, session_id):
+    """Call DELETE /students/{student_id}/sessions/{session_id}. Returns True on success."""
+    try:
+        r = requests.delete(
+            f"{API}/students/{student_id}/sessions/{session_id}", timeout=5
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _apply_delete_to_state(state, deleted_session_id):
+    """
+    Pure helper: update a state dict after a session is deleted.
+    Removes deleted session from all_sessions.
+    Clears session_id/session_name/messages if the deleted session was the active one.
+    Returns the mutated state dict.
+    """
+    state["all_sessions"] = [
+        s for s in state.get("all_sessions", [])
+        if s["session_id"] != deleted_session_id
+    ]
+    if state.get("session_id") == deleted_session_id:
+        state["session_id"] = None
+        state["session_name"] = None
+        state["messages"] = []
+    return state
 
 
 def api_chat(user_text, student_id, session_id=None):
@@ -83,12 +114,32 @@ with st.sidebar:
             st.subheader("Sessions")
             for s in st.session_state.all_sessions:
                 label = s.get("session_name", s["session_id"])[:38]
-                if st.button(f"💬 {label}", key=s["session_id"], use_container_width=True):
-                    msgs, name = api_load_history(s["session_id"])
-                    st.session_state.session_id = s["session_id"]
-                    st.session_state.session_name = name
-                    st.session_state.messages = msgs
-                    st.rerun()
+                col1, col2 = st.columns([0.85, 0.15])
+                with col1:
+                    if st.button(f"💬 {label}", key=s["session_id"], use_container_width=True):
+                        msgs, name = api_load_history(st.session_state.student_id, s["session_id"])
+                        st.session_state.session_id = s["session_id"]
+                        st.session_state.session_name = name
+                        st.session_state.messages = msgs
+                        st.rerun()
+                with col2:
+                    if st.button("🗑", key=f"del_{s['session_id']}", use_container_width=True):
+                        if api_delete_session(st.session_state.student_id, s["session_id"]):
+                            fresh = api_get_sessions(st.session_state.student_id)
+                            state = {
+                                "all_sessions": fresh,
+                                "session_id": st.session_state.session_id,
+                                "session_name": st.session_state.session_name,
+                                "messages": list(st.session_state.messages),
+                            }
+                            _apply_delete_to_state(state, s["session_id"])
+                            st.session_state.all_sessions = state["all_sessions"]
+                            st.session_state.session_id = state["session_id"]
+                            st.session_state.session_name = state["session_name"]
+                            st.session_state.messages = state["messages"]
+                        else:
+                            st.warning("Could not delete session. Please try again.")
+                        st.rerun()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

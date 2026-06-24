@@ -14,6 +14,8 @@ ALE contract status: FULLY IMPLEMENTED
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -27,68 +29,200 @@ from engines.ale.schemas import (
 
 logger = logging.getLogger(__name__)
 
+_ANSWER_NOT_FOUND   = "Not found in handbook."
+_ANSWER_UNAVAILABLE = "The handbook search service is currently unavailable."
+_ANSWER_FAILURE     = "I could not search the handbook safely right now."
+
+
+def _safe_preview(text: Any, limit: int = 180) -> str:
+    try:
+        if text is None:
+            text = ""
+        if not isinstance(text, str):
+            text = str(text)
+        text = " ".join(text.split())
+        return text[:limit]
+    except Exception:
+        return ""
+
+
+def _duration_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
+
+
+def _load_rule_bundle_delay() -> float:
+    """Read RAG_RULE_BUNDLE_DELAY_SECONDS from env; default to 2.0 on missing/invalid."""
+    try:
+        return float(os.getenv("RAG_RULE_BUNDLE_DELAY_SECONDS", "2.0"))
+    except (TypeError, ValueError):
+        return 2.0
+
 
 class RAGAdapter:
 
     def __init__(self) -> None:
-        import sys
-        import os
-        
-        # Add both the current flat directory and the intended real structure path
-        current_dir = os.path.dirname(__file__)
-        sys.path.insert(0, current_dir)
-        sys.path.insert(0, os.path.join(current_dir, '..', 'engines', 'RAG'))
-        sys.path.insert(0, os.path.join(current_dir, '..', '..', 'engines', 'RAG'))
-        
         try:
-            import rag_core
-            self.extract_facts          = rag_core.extract_facts
-            self.extract_structured_fn  = rag_core.extract_structured
-            logger.info("RAGAdapter: rag_core loaded successfully.")
+            # Package import works when project root is on sys.path (pytest.ini pythonpath=.)
+            from engines.rag.rag_core import extract_facts, extract_structured
+            self.extract_facts         = extract_facts
+            self.extract_structured_fn = extract_structured
+            logger.info("RAGAdapter: rag_core loaded via package import.")
+        except ImportError:
+            # Fallback for environments where the project root is not on sys.path
+            try:
+                import sys
+                import os
+                _rag_dir = os.path.normpath(
+                    os.path.join(os.path.dirname(__file__), '..', 'engines', 'rag')
+                )
+                if _rag_dir not in sys.path:
+                    sys.path.insert(0, _rag_dir)
+                import rag_core  # type: ignore[import]
+                self.extract_facts         = rag_core.extract_facts
+                self.extract_structured_fn = rag_core.extract_structured
+                logger.info("RAGAdapter: rag_core loaded via fallback sys.path.")
+            except Exception as exc:
+                logger.error("RAGAdapter: failed to initialise RAG engine: %s", exc)
+                self.extract_facts         = None
+                self.extract_structured_fn = None
         except Exception as exc:
             logger.error("RAGAdapter: failed to initialise RAG engine: %s", exc)
-            self.extract_facts          = None
-            self.extract_structured_fn  = None
+            self.extract_facts         = None
+            self.extract_structured_fn = None
+
+    # ── citation builder ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_citations(source_documents) -> list[dict]:
+        """Build citation list from source_documents; skips malformed entries."""
+        if not source_documents:
+            return []
+        citations = []
+        for d in source_documents:
+            if isinstance(d, dict):
+                page = d.get("page")
+                text = d.get("text", "")
+            elif hasattr(d, "metadata") and hasattr(d, "page_content"):
+                # LangChain Document-like object
+                page = d.metadata.get("page") if isinstance(d.metadata, dict) else None
+                text = d.page_content or ""
+            elif hasattr(d, "page"):
+                page = d.page
+                text = getattr(d, "text", "")
+            else:
+                logger.debug(
+                    "RAGAdapter._build_citations: skipping malformed source_document type %s",
+                    type(d).__name__,
+                )
+                continue
+            citations.append({"source": "CIS Handbook", "page": page, "text": text})
+        return citations
 
     # ── execute (free-text) ──────────────────────────────────────────────────
 
     def execute(
         self,
         sub_query: str,
-        student_context: Optional[Any] = None,
+        student_context: Optional[Any] = None,  # intentionally ignored — never forwarded to RAG
     ) -> dict[str, Any]:
         """
-        Run the RAG pipeline for one free-text question.
+        Run the RAG pipeline for one free-text handbook policy question.
 
-        Returns dict with keys expected by the Orchestrator:
-            "answer"          : str
-            "extracted_facts" : list[str]
-            "citations"       : list[dict]
+        student_context is accepted to match the Orchestrator call signature but is
+        NEVER forwarded to the RAG engine (hard privacy boundary).
+
+        Returns dict with keys:
+            "found"          : bool
+            "answer"         : str
+            "extracted_facts": list[str]
+            "citations"      : list[dict]
+            "error"          : str  (only present on infrastructure/input failure)
         """
+        start = time.perf_counter()
+        logger.info(
+            "RAGAdapter.execute start query_len=%d query_preview=%r",
+            len(sub_query or ""),
+            _safe_preview(sub_query, 100),
+        )
+
         if not sub_query or not sub_query.strip():
-            return {"answer": "Not found in handbook.", "extracted_facts": [], "citations": []}
+            logger.info(
+                "RAGAdapter.execute result found=False facts=0 citations=0 error=empty_query duration_ms=%d",
+                _duration_ms(start),
+            )
+            return {
+                "found":           False,
+                "answer":          _ANSWER_NOT_FOUND,
+                "extracted_facts": [],
+                "citations":       [],
+                "error":           "empty_query",
+            }
 
         if self.extract_facts is None:
-            return {"answer": "RAG Engine is currently unavailable.", "extracted_facts": [], "citations": []}
+            logger.warning(
+                "RAGAdapter.execute result found=False facts=0 citations=0 error=rag_unavailable duration_ms=%d",
+                _duration_ms(start),
+            )
+            return {
+                "found":           False,
+                "answer":          _ANSWER_UNAVAILABLE,
+                "extracted_facts": [],
+                "citations":       [],
+                "error":           "rag_unavailable",
+            }
 
         try:
             result = self.extract_facts(sub_query)
-            facts  = result.get("extracted_facts", [])
-            answer = " ".join(facts) if facts else "Not found in handbook."
-            docs   = result.get("source_documents", [])
-            citations = [
-                {"source": "CIS Handbook", "page": d.get("page"), "text": d.get("text", "")}
-                for d in docs
-            ]
-            return {"answer": answer, "extracted_facts": facts, "citations": citations}
-
-        except Exception as exc:
-            logger.error("RAGAdapter.execute failed: %s", exc)
+        except Exception:
+            logger.exception("RAGAdapter.execute: unexpected error for query %r", sub_query)
+            logger.warning(
+                "RAGAdapter.execute result found=False facts=0 citations=0 error=rag_adapter_error duration_ms=%d",
+                _duration_ms(start),
+            )
             return {
-                "answer": f"An error occurred while searching the handbook: {exc}",
+                "found":           False,
+                "answer":          _ANSWER_FAILURE,
                 "extracted_facts": [],
-                "citations": [],
+                "citations":       [],
+                "error":           "rag_adapter_error",
             }
+
+        # Preserve safe error codes emitted by rag_core (rag_llm_error, rag_retrieval_error, …)
+        if "error" in result:
+            error_code = result["error"]
+            logger.warning(
+                "RAGAdapter.execute result found=False facts=0 citations=0 error=%s duration_ms=%d",
+                error_code,
+                _duration_ms(start),
+            )
+            return {
+                "found":           False,
+                "answer":          _ANSWER_FAILURE,
+                "extracted_facts": [],
+                "citations":       [],
+                "error":           error_code,
+            }
+
+        facts = result.get("extracted_facts") or []
+        found = bool(facts)  # facts present ↔ evidence found; empty list ↔ not found
+
+        citations = self._build_citations(result.get("source_documents")) if found else []
+        answer    = " ".join(facts) if found else _ANSWER_NOT_FOUND
+
+        logger.info(
+            "RAGAdapter.execute result found=%s facts=%d citations=%d answer_preview=%r duration_ms=%d",
+            found,
+            len(facts),
+            len(citations),
+            _safe_preview(answer, 220),
+            _duration_ms(start),
+        )
+        return {
+            "found":           found,
+            "answer":          answer,
+            "extracted_facts": facts,
+            "citations":       citations,
+        }
 
     # ── execute_structured ───────────────────────────────────────────────────
 
@@ -98,37 +232,94 @@ class RAGAdapter:
         expected_schema: dict,
     ) -> dict[str, Any]:
         """
-        Executes a query forcing the output to match the expected_schema.
+        Run the RAG pipeline with schema-forced extraction.
+
+        Returns dict with keys:
+            "data"     : dict   (schema-matched result on success, {} on failure)
+            "citations": list[dict]
+            "error"    : str    (only present on failure)
         """
+        start = time.perf_counter()
+        logger.info(
+            "RAGAdapter.execute_structured start query_len=%d query_preview=%r schema_keys=%s",
+            len(sub_query or ""),
+            _safe_preview(sub_query, 100),
+            list(expected_schema.keys()) if isinstance(expected_schema, dict) else [],
+        )
+
+        if not sub_query or not sub_query.strip():
+            logger.info(
+                "RAGAdapter.execute_structured result data_keys=[] citations=0 error=empty_query duration_ms=%d",
+                _duration_ms(start),
+            )
+            return {"data": {}, "citations": [], "error": "empty_query"}
+
+        if not expected_schema or not isinstance(expected_schema, dict):
+            logger.info(
+                "RAGAdapter.execute_structured result data_keys=[] citations=0 error=invalid_schema duration_ms=%d",
+                _duration_ms(start),
+            )
+            return {"data": {}, "citations": [], "error": "invalid_schema"}
+
         if self.extract_structured_fn is None:
-            return {"data": {}, "citations": [], "error": "RAG Engine is unavailable"}
+            logger.warning(
+                "RAGAdapter.execute_structured result data_keys=[] citations=0 error=rag_unavailable duration_ms=%d",
+                _duration_ms(start),
+            )
+            return {"data": {}, "citations": [], "error": "rag_unavailable"}
 
         try:
             result = self.extract_structured_fn(sub_query, expected_schema)
-            docs   = result.get("source_documents", [])
-            citations = [
-                {"source": "CIS Handbook", "page": d.get("page"), "text": d.get("text", "")}
-                for d in docs
-            ]
-            if "error" in result:
-                return {"data": {}, "citations": citations, "error": result["error"]}
-            data = result.get("data", {})
-            return {"data": data, "citations": citations}
+        except Exception:
+            logger.exception(
+                "RAGAdapter.execute_structured: unexpected error for query %r", sub_query
+            )
+            logger.warning(
+                "RAGAdapter.execute_structured result data_keys=[] citations=0 error=rag_adapter_error duration_ms=%d",
+                _duration_ms(start),
+            )
+            return {"data": {}, "citations": [], "error": "rag_adapter_error"}
 
-        except Exception as exc:
-            logger.error("RAGAdapter.execute_structured failed: %s", exc)
-            return {"data": {}, "citations": [], "error": str(exc)}
+        citations = self._build_citations(result.get("source_documents"))
+
+        if "error" in result:
+            error_code = result["error"]
+            logger.warning(
+                "RAGAdapter.execute_structured result data_keys=[] citations=%d error=%s duration_ms=%d",
+                len(citations),
+                error_code,
+                _duration_ms(start),
+            )
+            return {"data": {}, "citations": citations, "error": error_code}
+
+        data = result.get("data") or {}
+        logger.info(
+            "RAGAdapter.execute_structured result data_keys=%s citations=%d duration_ms=%d",
+            list(data.keys()),
+            len(citations),
+            _duration_ms(start),
+        )
+        return {"data": data, "citations": citations}
 
     # ── get_rule_bundles ─────────────────────────────────────────────────────
 
-    def get_rule_bundles(self, inter_call_delay: float = 2.0) -> dict[str, BaseModel | None]:
+    def get_rule_bundles(self, inter_call_delay: float | None = None) -> dict[str, BaseModel | None]:
         """
         Retrieves all 8 rule bundles required by ALE by querying the RAG engine
         with expected schemas.
 
         inter_call_delay: seconds to sleep between LLM calls to avoid Groq 30 RPM rate limit.
+            If None (default), reads RAG_RULE_BUNDLE_DELAY_SECONDS from env (default 2.0).
         """
-        import time as _time
+        start = time.perf_counter()
+
+        if inter_call_delay is None:
+            inter_call_delay = _load_rule_bundle_delay()
+
+        logger.info(
+            "RAGAdapter.get_rule_bundles start inter_call_delay=%.2f",
+            inter_call_delay,
+        )
 
         if self.extract_structured_fn is None:
             logger.warning("RAGAdapter.get_rule_bundles: RAG engine not available — returning empty bundles")
@@ -183,7 +374,7 @@ class RAGAdapter:
                 res_gs["error"],
             )
         bundles["grading_scale_rules"] = _warn_if_empty("grading_scale_rules", res_gs.get("data", {}))
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
 
         # 2. graduation_requirement_rules
         # Two-query approach: credit/CGPA requirements are in section 2 of the handbook;
@@ -206,7 +397,7 @@ class RAGAdapter:
                 "RAGAdapter.get_rule_bundles: bundle 'graduation_requirement_rules' query-1 error: %s",
                 res_gr1["error"],
             )
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
         res_gr2 = self.execute_structured(
             "What is the maximum number of regular fall and spring semesters a student is allowed "
             "before being dismissed from the program for failing to graduate?",
@@ -218,8 +409,16 @@ class RAGAdapter:
                 res_gr2["error"],
             )
         gr_data = _merge(res_gr1.get("data", {}), res_gr2.get("data", {}))
+        # HANDBOOK-BACKED NORMALIZATION:
+        # CIS Handbook Program Graduation Requirements explicitly require:
+        #   - passing all 0-credit courses
+        #   - male students passing military training
+        # Structured extraction may emit False when the evidence is missed because booleans
+        # have safe defaults. These two requirements are deterministic for the CIS program.
+        gr_data["must_pass_zero_credit_courses"] = True
+        gr_data["military_training_required_for_males"] = True
         bundles["graduation_requirement_rules"] = _warn_if_empty("graduation_requirement_rules", gr_data)
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
 
         # 3. academic_warning_rules
         # Two-query approach: warning/dismissal facts are in one section;
@@ -244,7 +443,7 @@ class RAGAdapter:
                 "RAGAdapter.get_rule_bundles: bundle 'academic_warning_rules' query-1 error: %s",
                 res_wr1["error"],
             )
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
         res_wr2 = self.execute_structured(
             "What are the conditions and extension terms for students appealing program dismissal, "
             "including what percentage of total program credit hours must be passed, and how many "
@@ -263,7 +462,7 @@ class RAGAdapter:
         if ext_pct is not None and ext_pct > 1.0:
             wr_data["dismissal_extension_credits_percentage"] = round(ext_pct / 100.0, 4)
         bundles["academic_warning_rules"] = _warn_if_empty("academic_warning_rules", wr_data)
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
 
         # 4. honors_rules
         honors_schema = {
@@ -283,7 +482,7 @@ class RAGAdapter:
                 res_hr["error"],
             )
         bundles["honors_rules"] = _warn_if_empty("honors_rules", res_hr.get("data", {}))
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
 
         # 5. credit_limit_rules
         # Two-query approach: CGPA bracket limits live in one section;
@@ -306,7 +505,7 @@ class RAGAdapter:
                 "RAGAdapter.get_rule_bundles: bundle 'credit_limit_rules' query-1 error: %s",
                 res_cl1["error"],
             )
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
         res_cl2 = self.execute_structured(
             "Can a student with a previous Incomplete grade in a course register for that course "
             "as an extra course on top of their normal semester credit hour limit?",
@@ -325,7 +524,7 @@ class RAGAdapter:
         if cl2_incomplete is not None:
             cl_data["incomplete_extra_course_allowed"] = cl2_incomplete
         bundles["credit_limit_rules"] = _warn_if_empty("credit_limit_rules", cl_data)
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
 
         # 6. retake_rules
         retake_schema = {
@@ -347,7 +546,7 @@ class RAGAdapter:
                 res_rr["error"],
             )
         bundles["retake_rules"] = _warn_if_empty("retake_rules", res_rr.get("data", {}))
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
 
         # 7. summer_semester_rules
         summer_schema = {
@@ -367,17 +566,25 @@ class RAGAdapter:
                 res_sr["error"],
             )
         sr_data = res_sr.get("data", {})
-        # CIS Handbook: summer course limits are fixed constants (2 default, 3 for CGPA≥3.0).
-        # RAG misses the CGPA threshold and may return empty data on quota exhaustion;
-        # normalize all three fields deterministically to guarantee Pydantic instantiation.
+        # HANDBOOK-BACKED STARTUP FALLBACK (CIS Handbook p.7):
+        #   "A student can register for up to 2 courses" (default)
+        #   "If your CGPA ≥3, you can register for up to 3 courses"
+        # All three values are explicit handbook constants. RAG occasionally misses
+        # the CGPA threshold on rate-limited or cold-start runs, so we fill only
+        # fields that are still None after extraction — never overwrite a real value.
+        # This fallback must be kept until Step 2D tests confirm live extraction
+        # is reliable enough to remove it.
         if sr_data.get("default_max_courses") is None:
             sr_data["default_max_courses"] = 2
+            logger.info("get_rule_bundles: summer default_max_courses filled from fallback (2)")
         if sr_data.get("cgpa_above_3_max_courses") is None:
             sr_data["cgpa_above_3_max_courses"] = 3
+            logger.info("get_rule_bundles: summer cgpa_above_3_max_courses filled from fallback (3)")
         if sr_data.get("cgpa_threshold_for_extra_course") is None:
             sr_data["cgpa_threshold_for_extra_course"] = 3.0
+            logger.info("get_rule_bundles: summer cgpa_threshold_for_extra_course filled from fallback (3.0)")
         bundles["summer_semester_rules"] = _warn_if_empty("summer_semester_rules", sr_data)
-        _time.sleep(inter_call_delay)
+        time.sleep(inter_call_delay)
 
         # 8. student_level_rules
         student_level_schema = {
@@ -436,6 +643,11 @@ class RAGAdapter:
             bundle_data = _sanitize_nulls(bundles.get(bundle_name, {}))
             try:
                 converted_bundles[bundle_name] = schema_class(**bundle_data)
+                logger.info(
+                    "RAGAdapter.get_rule_bundles bundle=%s status=ok model=%s",
+                    bundle_name,
+                    type(converted_bundles[bundle_name]).__name__,
+                )
             except Exception as exc:
                 logger.error(
                     "RAGAdapter.get_rule_bundles: Pydantic instantiation failed for bundle '%s': %s",
@@ -443,17 +655,35 @@ class RAGAdapter:
                     exc,
                 )
                 converted_bundles[bundle_name] = None
+                logger.warning(
+                    "RAGAdapter.get_rule_bundles bundle=%s status=missing_or_invalid",
+                    bundle_name,
+                )
+
+        loaded_count = sum(1 for v in converted_bundles.values() if v is not None)
+        missing_names = [k for k, v in converted_bundles.items() if v is None]
 
         if any(value is not None for value in converted_bundles.values()):
-            failed = [k for k, v in converted_bundles.items() if v is None]
-            if failed:
+            if missing_names:
                 logger.warning(
                     "RAGAdapter.get_rule_bundles: partial rule bundle load. Failed bundles: %s",
-                    failed,
+                    missing_names,
                 )
+            logger.info(
+                "RAGAdapter.get_rule_bundles complete loaded=%d missing=%s duration_ms=%d",
+                loaded_count,
+                missing_names,
+                _duration_ms(start),
+            )
             return converted_bundles
 
         logger.critical(
             "RAGAdapter.get_rule_bundles: all rule bundle conversions failed — returning {}"
+        )
+        logger.info(
+            "RAGAdapter.get_rule_bundles complete loaded=%d missing=%s duration_ms=%d",
+            loaded_count,
+            missing_names,
+            _duration_ms(start),
         )
         return {}

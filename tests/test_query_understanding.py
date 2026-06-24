@@ -13,6 +13,7 @@ Categories:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -37,6 +38,8 @@ from gateway.qu_llm_chain import (
     IntentValidationError,
     _extract_sq_list,
     _validate_intents,
+    load_model_chain,
+    _load_qu_timeout,
 )
 from gateway.query_understanding import (
     _clarification,
@@ -161,6 +164,11 @@ class TestPreprocessing:
         assert grades.get("C-CS301") == "A"
         assert grades.get("C-AI321") == "B+"
 
+    def test_T06d_reset_assumptions_signal(self):
+        from gateway.qu_preprocessing import detect_reset_signal
+        assert detect_reset_signal("reset assumptions") is True
+        assert detect_reset_signal("cancel what-if") is True
+
 
 # ── Category 2: Schema / Intent Validation ────────────────────────────────────
 
@@ -243,6 +251,28 @@ class TestDeterministicFallback:
     def test_T16b_empty_text_returns_clarification(self):
         result = self._fallback("")
         assert result[0].intent == "clarification_needed"
+
+    def test_T16c_reset_assumptions_fallback(self):
+        result = self._fallback("Please reset assumptions")
+        assert result[0].intent == "get_student_record"
+        assert result[0].session_overrides.override_action == "clear"
+
+    def test_T16d_override_before_policy_fallback(self):
+        # Text has both override ("assume") and policy ("what happens if")
+        result = self._fallback("Assume I fail algorithms, what happens if...?")
+        # Override signal is present, so policy_query should be skipped, returning clarification or another intent
+        # In deterministic fallback, without specific course code, it will hit clarification
+        assert result[0].intent == "clarification_needed"
+
+    def test_T16e_yes_alone_returns_clarification(self):
+        result = self._fallback("yes")
+        assert result[0].intent == "clarification_needed"
+        assert result[0].session_overrides.override_action != "clear"
+
+    def test_T16f_sure_returns_clarification(self):
+        result = self._fallback("sure, go ahead")
+        assert result[0].intent == "clarification_needed"
+        assert result[0].session_overrides.override_action != "clear"
 
 
 # ── Category 4: LLM Mock Parsing ─────────────────────────────────────────────
@@ -528,6 +558,49 @@ class TestEdgeCases:
         assert sq.intent == "get_course_info"
         assert sq.entities.course_code == "C-CS302"
 
+    def test_parse_raw_sq_params_validation(self):
+        raw = {
+            "intent": "solve_target_gpa",
+            "original_text": "test",
+            "params": {
+                "target_gpa": "3.5",
+                "depth": "ALL",
+                "expected_grades": ["OS", "A"] # invalid list
+            }
+        }
+        sq = _parse_raw_sq(raw, "test")
+        assert sq.params.get("target_gpa") == 3.5
+        assert sq.params.get("depth") == "full"
+        assert "expected_grades" not in sq.params
+
+    def test_parse_raw_sq_invalid_target_gpa(self):
+        raw = {"intent": "solve_target_gpa", "params": {"target_gpa": "5.0"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert "target_gpa" not in sq.params
+
+    def test_parse_raw_sq_target_cgpa_alias(self):
+        raw = {"intent": "solve_target_gpa", "params": {"target_cgpa": "3.5"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert sq.params.get("target_gpa") == 3.5
+        assert "target_cgpa" not in sq.params
+
+    def test_parse_raw_sq_target_cgpa_out_of_range(self):
+        raw = {"intent": "solve_target_gpa", "params": {"target_cgpa": "5.5"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert "target_gpa" not in sq.params
+        assert "target_cgpa" not in sq.params
+
+    def test_parse_raw_sq_target_gpa_takes_precedence_over_cgpa(self):
+        raw = {"intent": "solve_target_gpa", "params": {"target_gpa": "3.0", "target_cgpa": "2.0"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert sq.params.get("target_gpa") == 3.0
+        assert "target_cgpa" not in sq.params
+
+    def test_prompt_mentions_last_skill(self):
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "last_skill" in prompt
+
     def test_no_pii_in_user_message(self):
         from gateway.qu_prompt import build_user_message
         last_ref = LastReferenced(course_code="C-CS301")
@@ -536,6 +609,20 @@ class TestEdgeCases:
         msg = build_user_message("What about prerequisites?", last_ref, turns)
         assert "student_id" not in msg.lower()
         assert "cgpa" not in msg.lower() or "3." not in msg  # no raw GPA numbers
+
+    def test_build_user_message_privacy(self):
+        from gateway.qu_prompt import build_user_message
+        last_ref = LastReferenced()
+        turns = [{"user": "hello", "answer": "raw answer with CGPA 2.85"}]
+        msg = build_user_message("test", last_ref, turns)
+        assert "hello" in msg
+        assert "raw answer" not in msg
+
+    def test_build_user_message_last_skill(self):
+        from gateway.qu_prompt import build_user_message
+        last_ref = LastReferenced(skill_id="SK_Python")
+        msg = build_user_message("test", last_ref, [])
+        assert "last_skill=SK_Python" in msg
 
     def test_extract_sq_list_handles_bare_single_object(self):
         data = {"intent": "get_course_info", "original_text": "test"}
@@ -664,3 +751,549 @@ class TestEntityResolution:
         )
         assert result[0].intent == "get_role_profile"
         assert result[0].entities.role_id == "data_scientist"
+
+    def test_resolver_failure_safety_exception(self, monkeypatch):
+        response = _sq_json("get_course_info", entities={"course_code": "Algorithms"})
+        client = _make_mock_client([response])
+        def raising_resolver(et, txt):
+            raise ValueError("Mock exception")
+        result = _run_qu("Tell me about Algorithms", client, monkeypatch=monkeypatch, resolver=raising_resolver)
+        assert result[0].intent == "clarification_needed"
+
+    def test_resolver_failure_safety_missing_id(self, monkeypatch):
+        response = _sq_json("get_course_info", entities={"course_code": "Algorithms"})
+        client = _make_mock_client([response])
+        def bad_ok_resolver(et, txt):
+            return {"status": "ok"} # missing id
+        result = _run_qu("Tell me about Algorithms", client, monkeypatch=monkeypatch, resolver=bad_ok_resolver)
+        assert result[0].intent == "clarification_needed"
+
+    def test_override_course_list_resolution(self, monkeypatch):
+        response = _sq_json(
+            "plan_semester",
+            session_overrides={"assumed_passed_courses": ["oop", "C-CS112"], "assumed_failed_courses": ["os"], "added_courses": ["intro ai"], "course_override_type": "none", "override_action": "accumulate"}
+        )
+        client = _make_mock_client([response])
+        def tracking_resolver(et, txt):
+            if txt.upper() == "C-CS112":
+                return {"status": "ok", "id": "C-CS112"}
+            return {"status": "ok", "id": f"RESOLVED_{txt.upper()}"}
+            
+        result = _run_qu("Assume I passed oop...", client, monkeypatch=monkeypatch, resolver=tracking_resolver)
+        sq = result[0]
+        assert "RESOLVED_OOP" in sq.session_overrides.assumed_passed_courses
+        assert "C-CS112" in sq.session_overrides.assumed_passed_courses
+        assert "RESOLVED_OS" in sq.session_overrides.assumed_failed_courses
+        assert "RESOLVED_INTRO AI" in sq.session_overrides.added_courses
+
+    def test_expected_grades_key_resolution(self, monkeypatch):
+        response = _sq_json(
+            "simulate_gpa_forward",
+            params={"expected_grades": {"os": "A", "oop": "90"}}
+        )
+        client = _make_mock_client([response])
+        def tracking_resolver(et, txt):
+            return {"status": "ok", "id": f"C_{txt.upper()}"}
+            
+        result = _run_qu("If I get A in os...", client, monkeypatch=monkeypatch, resolver=tracking_resolver)
+        sq = result[0]
+        assert sq.params["expected_grades"]["C_OS"] == "A"
+        assert sq.params["expected_grades"]["C_OOP"] == "90"
+        assert "os" not in sq.params["expected_grades"]
+
+    def test_non_strict_course_code_uses_resolver(self, monkeypatch):
+        response = _sq_json(
+            "get_course_info",
+            entities={"course_code": "CS219"} # No C- prefix
+        )
+        client = _make_mock_client([response])
+        def tracking_resolver(et, txt):
+            return {"status": "ok", "id": "C-CS219"}
+
+        result = _run_qu("Tell me about CS219", client, monkeypatch=monkeypatch, resolver=tracking_resolver)
+        assert result[0].entities.course_code == "C-CS219"
+
+    def test_resolver_unknown_status_returns_clarification(self, monkeypatch):
+        response = _sq_json("get_course_info", entities={"course_code": "Algorithms"})
+        client = _make_mock_client([response])
+        def unknown_status_resolver(et, txt):
+            return {"status": "some_brand_new_unknown_status"}
+        result = _run_qu("Tell me about Algorithms", client, monkeypatch=monkeypatch, resolver=unknown_status_resolver)
+        assert result[0].intent == "clarification_needed"
+
+    def test_expected_grades_values_preserved_as_strings(self, monkeypatch):
+        """Grade values (letter, percentage, decimal) must be preserved as strings; ALE owns final validation."""
+        response = _sq_json(
+            "simulate_gpa_forward",
+            params={"expected_grades": {"C-CS301": "B+", "C-AI311": "90", "C-CS218": 3.7}},
+        )
+        client = _make_mock_client([response])
+        def identity_resolver(et, txt):
+            return {"status": "ok", "id": txt}
+
+        result = _run_qu("If I get B+ in C-CS301...", client, monkeypatch=monkeypatch, resolver=identity_resolver)
+        grades = result[0].params.get("expected_grades", {})
+        assert grades.get("C-CS301") == "B+"
+        assert grades.get("C-AI311") == "90"
+        assert grades.get("C-CS218") == "3.7"
+
+    def test_resolver_none_nulls_noncanonical_course(self, monkeypatch):
+        """Without resolver, non-canonical course names must be nulled out (not passed raw to KG)."""
+        response = _sq_json(
+            "get_course_info",
+            entities={"course_code": "Operating Systems", "role": None, "track": None, "skill": None},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("Tell me about Operating Systems", client, monkeypatch=monkeypatch, resolver=None)
+        assert result[0].entities.course_code is None
+
+    def test_resolver_none_keeps_canonical_course(self, monkeypatch):
+        """Without resolver, C-prefixed canonical codes must be passed through."""
+        response = _sq_json(
+            "get_course_info",
+            entities={"course_code": "C-CS316", "role": None, "track": None, "skill": None},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("Tell me about C-CS316", client, monkeypatch=monkeypatch, resolver=None)
+        assert result[0].entities.course_code == "C-CS316"
+
+    def test_resolver_none_nulls_noncanonical_role(self, monkeypatch):
+        """Without resolver, natural role names must be nulled out."""
+        response = _sq_json(
+            "get_role_profile",
+            entities={"course_code": None, "role": "Data Scientist", "track": None, "skill": None},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("Tell me about Data Scientist", client, monkeypatch=monkeypatch, resolver=None)
+        assert result[0].entities.role_id is None
+
+    def test_resolver_none_keeps_canonical_track(self, monkeypatch):
+        """Without resolver, canonical track IDs (AI/CYS/DSE/SWE/GEN) must pass through."""
+        response = _sq_json(
+            "get_track_overview",
+            entities={"course_code": None, "role": None, "track": "AI", "skill": None},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("Tell me about AI track", client, monkeypatch=monkeypatch, resolver=None)
+        assert result[0].entities.track_id == "AI"
+
+
+# ── Boundary Audit Tests ──────────────────────────────────────────────────────
+
+class TestBoundaryAudit:
+    """Step 6D-0: focused boundary regression tests for intent taxonomy audit."""
+
+    # ── Depth in deterministic fallback ──────────────────────────────────────
+
+    def test_depth_full_prerequisites_deterministic(self):
+        """Deterministic fallback: 'full prerequisites' → depth='full'."""
+        pre = preprocess("What are the full prerequisites for C-CS301?")
+        result = _deterministic_fallback("What are the full prerequisites for C-CS301?", pre)
+        assert result[0].intent == "get_course_prerequisites"
+        assert result[0].params.get("depth") == "full"
+
+    def test_depth_direct_prerequisites_deterministic(self):
+        """Deterministic fallback: 'prerequisites' (no full/complete/etc.) → depth='direct'."""
+        pre = preprocess("What are the prerequisites for C-CS301?")
+        result = _deterministic_fallback("What are the prerequisites for C-CS301?", pre)
+        assert result[0].intent == "get_course_prerequisites"
+        assert result[0].params.get("depth") == "direct"
+
+    def test_depth_complete_prerequisites_deterministic(self):
+        """Deterministic fallback: 'complete prerequisites' → depth='full'."""
+        pre = preprocess("Give me the complete prerequisites for C-AI311")
+        result = _deterministic_fallback("Give me the complete prerequisites for C-AI311", pre)
+        assert result[0].intent == "get_course_prerequisites"
+        assert result[0].params.get("depth") == "full"
+
+    # ── Semester params normalization ─────────────────────────────────────────
+
+    def test_explicit_semester_params_normalized(self):
+        """target_semester 'FALL 2026' normalizes to 'Fall 2026'; type normalizes; source preserved."""
+        raw = {
+            "intent": "plan_semester",
+            "params": {
+                "target_semester": "FALL 2026",
+                "target_semester_type": "fall",
+                "semester_resolution_source": "explicit",
+            },
+        }
+        sq = _parse_raw_sq(raw, "help me plan Fall 2026")
+        assert sq.params.get("target_semester") == "Fall 2026"
+        assert sq.params.get("target_semester_type") == "Fall"
+        assert sq.params.get("semester_resolution_source") == "explicit"
+
+    def test_relative_semester_params_preserved(self):
+        """target_semester_text for relative phrase is preserved; no target_semester key."""
+        raw = {
+            "intent": "plan_semester",
+            "params": {
+                "target_semester_text": "two falls from now",
+                "semester_resolution_source": "relative",
+            },
+        }
+        sq = _parse_raw_sq(raw, "plan two falls from now")
+        assert sq.params.get("target_semester_text") == "two falls from now"
+        assert sq.params.get("semester_resolution_source") == "relative"
+        assert "target_semester" not in sq.params
+
+    def test_next_semester_relative_preserved(self):
+        """'next semester' relative phrase is preserved as target_semester_text."""
+        raw = {
+            "intent": "plan_semester",
+            "params": {
+                "target_semester_text": "next semester",
+                "semester_resolution_source": "relative",
+            },
+        }
+        sq = _parse_raw_sq(raw, "what should I register next semester")
+        assert sq.params.get("target_semester_text") == "next semester"
+        assert sq.params.get("semester_resolution_source") == "relative"
+
+    def test_invalid_semester_type_rejected(self):
+        """Invalid target_semester_type ('winter') is deleted."""
+        raw = {"intent": "plan_semester", "params": {"target_semester_type": "winter"}}
+        sq = _parse_raw_sq(raw, "plan my winter semester")
+        assert "target_semester_type" not in sq.params
+
+    def test_invalid_semester_format_rejected(self):
+        """target_semester without year ('next Fall') is deleted."""
+        raw = {"intent": "plan_semester", "params": {"target_semester": "next Fall"}}
+        sq = _parse_raw_sq(raw, "plan next fall")
+        assert "target_semester" not in sq.params
+
+    def test_invalid_resolution_source_rejected(self):
+        """Unknown semester_resolution_source is deleted."""
+        raw = {"intent": "plan_semester", "params": {"semester_resolution_source": "auto"}}
+        sq = _parse_raw_sq(raw, "plan semester")
+        assert "semester_resolution_source" not in sq.params
+
+    # ── Prompt boundary string tests ──────────────────────────────────────────
+
+    def test_prompt_plan_semester_registration_only_boundary(self):
+        """Prompt must explicitly state plan_semester is for REGISTRATION SCHEDULING only."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "REGISTRATION SCHEDULING ONLY" in prompt or "COURSE REGISTRATION" in prompt
+
+    def test_prompt_career_learning_not_plan_semester(self):
+        """Prompt must explicitly state career learning queries do NOT use plan_semester."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "NEVER use plan_semester" in prompt
+
+    def test_prompt_focus_courses_personal_signal_words(self):
+        """Prompt must list personal signal words (still/remaining/left) for get_focus_courses_for_target."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "still" in prompt and "remaining" in prompt and "left" in prompt
+
+    def test_prompt_estimate_alignment_planned_courses_rule(self):
+        """Prompt must instruct LLM to extract planned_courses for estimate_alignment_improvement."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "estimate_alignment_improvement" in prompt
+        assert "planned_courses" in prompt
+
+    def test_prompt_semester_extraction_section_present(self):
+        """Prompt must contain SEMESTER EXTRACTION section with explicit/relative guidance."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "SEMESTER EXTRACTION" in prompt
+        assert "semester_resolution_source" in prompt
+        assert "target_semester_text" in prompt
+
+    # ── LLM mock: get_focus_courses_for_target student-referential boundary ───
+
+    def test_focus_courses_general_not_student_referential(self, monkeypatch):
+        """'Important courses for data scientist' (general) → student_referential_fallback=false."""
+        response = _sq_json(
+            "get_focus_courses_for_target",
+            original_text="Important courses for data scientist",
+            entities={"course_code": None, "role": "data_scientist", "track": None, "skill": None},
+            student_referential_fallback=False,
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("What are the important courses for data scientist?", client, monkeypatch=monkeypatch)
+        assert result[0].intent == "get_focus_courses_for_target"
+        assert result[0].student_referential_fallback is False
+
+    def test_focus_courses_remaining_is_student_referential(self, monkeypatch):
+        """'What focus courses should I still take for data scientist' → student_referential_fallback=true."""
+        response = _sq_json(
+            "get_focus_courses_for_target",
+            original_text="What focus courses should I still take for data scientist?",
+            entities={"course_code": None, "role": "data_scientist", "track": None, "skill": None},
+            student_referential_fallback=True,
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("What focus courses should I still take for data scientist?", client, monkeypatch=monkeypatch)
+        assert result[0].intent == "get_focus_courses_for_target"
+        assert result[0].student_referential_fallback is True
+
+    def test_estimate_alignment_improvement_planned_courses_extracted(self, monkeypatch):
+        """estimate_alignment_improvement with explicit planned_courses preserves them in params."""
+        response = _sq_json(
+            "estimate_alignment_improvement",
+            entities={"course_code": None, "role": "data_scientist", "track": None, "skill": None},
+            params={"planned_courses": ["C-AI311", "C-CS301"]},
+            student_referential_fallback=True,
+        )
+        client = _make_mock_client([response])
+        result = _run_qu(
+            "If I take C-AI311 and C-CS301, how much better is my data scientist alignment?",
+            client, monkeypatch=monkeypatch,
+        )
+        sq = result[0]
+        assert sq.intent == "estimate_alignment_improvement"
+        assert "planned_courses" in sq.params
+        assert "C-AI311" in sq.params["planned_courses"]
+
+    def test_estimate_alignment_improvement_no_courses_clarifies(self, monkeypatch):
+        """estimate_alignment_improvement with no planned courses → LLM returns clarification."""
+        response = _sq_json(
+            "clarification_needed",
+            original_text="Which courses are you planning to take for the alignment check?",
+        )
+        client = _make_mock_client([response])
+        result = _run_qu(
+            "How much better would my data scientist alignment be?",
+            client, monkeypatch=monkeypatch,
+        )
+        assert result[0].intent == "clarification_needed"
+
+    def test_planned_courses_non_list_removed(self):
+        """planned_courses that is not a list is removed by _parse_raw_sq."""
+        raw = {"intent": "estimate_alignment_improvement", "params": {"planned_courses": "C-AI311"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert "planned_courses" not in sq.params
+
+    def test_planned_courses_list_preserved_as_strings(self):
+        """planned_courses list is preserved and coerced to strings."""
+        raw = {"intent": "estimate_alignment_improvement", "params": {"planned_courses": ["C-AI311", "C-CS301"]}}
+        sq = _parse_raw_sq(raw, "test")
+        assert sq.params["planned_courses"] == ["C-AI311", "C-CS301"]
+
+
+# ── Model Chain Config Tests ──────────────────────────────────────────────────
+
+class TestModelChainConfig:
+    """Step 6D-0.5: focused model chain, timeout, and context-turns config tests."""
+
+    def test_load_model_chain_dedup(self, monkeypatch):
+        """Primary model duplicated in fallbacks is deduplicated, keeping position."""
+        monkeypatch.setenv("QU_PRIMARY_MODEL", "model-a")
+        monkeypatch.setenv("QU_FALLBACK_MODELS", "model-a,model-b,model-c")
+        chain = load_model_chain()
+        assert chain.count("model-a") == 1
+        assert chain == ["model-a", "model-b", "model-c"]
+
+    def test_load_model_chain_primary_first(self, monkeypatch):
+        """Primary model must always be the first element in the chain."""
+        monkeypatch.setenv("QU_PRIMARY_MODEL", "primary-model")
+        monkeypatch.setenv("QU_FALLBACK_MODELS", "fallback-a,fallback-b")
+        chain = load_model_chain()
+        assert chain[0] == "primary-model"
+        assert chain == ["primary-model", "fallback-a", "fallback-b"]
+
+    def test_load_model_chain_empty_fallback(self, monkeypatch):
+        """Empty fallback string produces a single-model chain."""
+        monkeypatch.setenv("QU_PRIMARY_MODEL", "only-model")
+        monkeypatch.setenv("QU_FALLBACK_MODELS", "")
+        chain = load_model_chain()
+        assert chain == ["only-model"]
+
+    def test_load_model_chain_strips_whitespace(self, monkeypatch):
+        """Whitespace around model names in QU_FALLBACK_MODELS is stripped."""
+        monkeypatch.setenv("QU_PRIMARY_MODEL", "model-a")
+        monkeypatch.setenv("QU_FALLBACK_MODELS", " model-b , model-c ")
+        chain = load_model_chain()
+        assert chain == ["model-a", "model-b", "model-c"]
+
+    def test_timeout_default_when_env_missing(self, monkeypatch):
+        """QU_TIMEOUT_SECONDS defaults to 30.0 when env var is not set."""
+        monkeypatch.delenv("QU_TIMEOUT_SECONDS", raising=False)
+        timeout = _load_qu_timeout()
+        assert timeout == 30.0
+
+    def test_timeout_loads_from_env(self, monkeypatch):
+        """QU_TIMEOUT_SECONDS value is correctly parsed from env."""
+        monkeypatch.setenv("QU_TIMEOUT_SECONDS", "15")
+        timeout = _load_qu_timeout()
+        assert timeout == 15.0
+
+    def test_timeout_invalid_falls_back_to_default(self, monkeypatch):
+        """Non-numeric QU_TIMEOUT_SECONDS falls back to 30.0."""
+        monkeypatch.setenv("QU_TIMEOUT_SECONDS", "not_a_number")
+        timeout = _load_qu_timeout()
+        assert timeout == 30.0
+
+    def test_build_user_message_all_turns_included(self):
+        """QU_CONTEXT_TURNS is now authoritative: all passed turns appear in message."""
+        from gateway.qu_prompt import build_user_message
+        last_ref = LastReferenced()
+        turns = [
+            {"user": "turn one query", "answer": "answer A"},
+            {"user": "turn two query", "answer": "answer B"},
+            {"user": "turn three query", "answer": "answer C"},
+            {"user": "turn four query", "answer": "answer D"},
+        ]
+        msg = build_user_message("current query", last_ref, turns)
+        assert "turn one query" in msg
+        assert "turn two query" in msg
+        assert "turn three query" in msg
+        assert "turn four query" in msg
+
+    def test_build_user_message_answer_text_stripped(self):
+        """Previous answer_text must NOT appear in the user message sent to LLM (privacy guard)."""
+        from gateway.qu_prompt import build_user_message
+        last_ref = LastReferenced()
+        turns = [{"user": "can I take OS?", "answer": "CGPA_SENSITIVE_DATA_XYZ"}]
+        msg = build_user_message("test query", last_ref, turns)
+        assert "CGPA_SENSITIVE_DATA_XYZ" not in msg
+        assert "can I take OS?" in msg
+
+    def test_build_user_message_user_text_truncated_at_100_chars(self):
+        """Student turn user text is capped at 100 chars before sending to LLM."""
+        from gateway.qu_prompt import build_user_message
+        last_ref = LastReferenced()
+        long_text = "A" * 200
+        turns = [{"user": long_text, "answer": "some answer"}]
+        msg = build_user_message("current query", last_ref, turns)
+        assert "A" * 101 not in msg
+        assert "A" * 100 in msg
+
+    def test_production_fallback_chain_no_deprecated_models(self, monkeypatch):
+        """Updated .env fallback chain must not contain models deprecated before Aug 16, 2026."""
+        import os
+        # Simulate the updated .env values
+        monkeypatch.setenv("QU_PRIMARY_MODEL", "llama-3.3-70b-versatile")
+        monkeypatch.setenv("QU_FALLBACK_MODELS", "openai/gpt-oss-120b,openai/gpt-oss-20b")
+        chain = load_model_chain()
+        # These two are shut down July 17, 2026 — must not appear in any chain
+        assert "meta-llama/llama-4-scout-17b-16e-instruct" not in chain
+        assert "qwen/qwen3-32b" not in chain
+        # Production replacements must be present
+        assert "openai/gpt-oss-120b" in chain
+        assert "openai/gpt-oss-20b" in chain
+
+
+# ── Alias Table Tests ─────────────────────────────────────────────────────────
+
+# ── Logging Tests ─────────────────────────────────────────────────────────────
+
+class TestQULogging:
+    """Step 6-logging: verify QU emits safe diagnostic logs without PII."""
+
+    def test_start_log_emitted_no_raw_text(self, monkeypatch, caplog):
+        """QU.start must be emitted with query_len; raw user text must not appear."""
+        response = _sq_json("get_course_info",
+                            entities={"course_code": "C-CS301", "role": None, "track": None, "skill": None})
+        client = _make_mock_client([response])
+        secret = "UNIQUESECRETQUERY_XYZABC123"
+        with caplog.at_level(logging.INFO, logger="gateway.query_understanding"):
+            _run_qu(secret, client, monkeypatch=monkeypatch)
+        start_records = [r for r in caplog.records if "QU.start" in r.message]
+        assert start_records, "QU.start log not emitted"
+        assert "query_len=" in start_records[0].message
+        assert secret not in caplog.text
+
+    def test_preprocess_log_emitted_with_signals(self, monkeypatch, caplog):
+        """QU.preprocess must be emitted with correct boolean signal values."""
+        response = _sq_json("policy_query")
+        client = _make_mock_client([response])
+        with caplog.at_level(logging.INFO, logger="gateway.query_understanding"):
+            _run_qu("What is the withdrawal policy?", client, monkeypatch=monkeypatch)
+        pre_records = [r for r in caplog.records if "QU.preprocess" in r.message]
+        assert pre_records, "QU.preprocess log not emitted"
+        assert "policy=True" in pre_records[0].message
+
+    def test_result_log_contains_source_and_duration(self, monkeypatch, caplog):
+        """QU.result must include source= and duration_ms= fields."""
+        response = _sq_json("get_course_info")
+        client = _make_mock_client([response])
+        with caplog.at_level(logging.INFO, logger="gateway.query_understanding"):
+            _run_qu("test query", client, monkeypatch=monkeypatch)
+        result_records = [r for r in caplog.records if "QU.result" in r.message]
+        assert result_records, "QU.result log not emitted"
+        assert "source=" in result_records[0].message
+        assert "duration_ms=" in result_records[0].message
+
+    def test_all_models_failed_source_in_result(self, monkeypatch, caplog):
+        """When all LLMs fail, QU.result source must be deterministic_fallback_all_models_failed."""
+        from gateway.llm_client import LLMError
+        client = MagicMock()
+        client.is_configured.return_value = True
+        client.chat.side_effect = LLMError("timeout")
+        with caplog.at_level(logging.INFO, logger="gateway.query_understanding"):
+            _run_qu("What is the withdrawal policy?", client, monkeypatch=monkeypatch)
+        result_records = [r for r in caplog.records if "QU.result" in r.message]
+        assert result_records, "QU.result log not emitted"
+        assert "deterministic_fallback_all_models_failed" in result_records[0].message
+
+    def test_llm_not_configured_source_in_result(self, monkeypatch, caplog):
+        """When LLM not configured, QU.result source must be deterministic_fallback_llm_not_configured."""
+        client = MagicMock()
+        client.is_configured.return_value = False
+        with caplog.at_level(logging.INFO, logger="gateway.query_understanding"):
+            _run_qu("Can I take C-CS301?", client, monkeypatch=monkeypatch)
+        result_records = [r for r in caplog.records if "QU.result" in r.message]
+        assert result_records, "QU.result log not emitted"
+        assert "deterministic_fallback_llm_not_configured" in result_records[0].message
+
+    def test_resolver_failure_logs_safe_warning_no_mention(self, monkeypatch, caplog):
+        """Entity resolution failure must log QU.resolve_failed without the raw entity mention."""
+        response = _sq_json(
+            "get_course_info",
+            entities={"course_code": "SomeCourseName", "role": None, "track": None, "skill": None},
+        )
+        client = _make_mock_client([response])
+
+        def not_found_resolver(et, txt):
+            return {"status": "not_found"}
+
+        with caplog.at_level(logging.WARNING, logger="gateway.query_understanding"):
+            result = _run_qu("Tell me about some course", client, monkeypatch=monkeypatch,
+                             resolver=not_found_resolver)
+        assert result[0].intent == "clarification_needed"
+        warn_records = [r for r in caplog.records if "QU.resolve_failed" in r.message]
+        assert warn_records, "QU.resolve_failed warning not emitted"
+        # entity mention must not appear in log
+        assert "SomeCourseName" not in caplog.text
+
+    def test_resolve_summary_log_emitted(self, monkeypatch, caplog):
+        """QU.resolve summary must be emitted after entity resolution."""
+        response = _sq_json("get_course_info",
+                            entities={"course_code": "C-CS301", "role": None, "track": None, "skill": None})
+        client = _make_mock_client([response])
+
+        def ok_resolver(et, txt):
+            return {"status": "ok", "resolved_id": txt}
+
+        with caplog.at_level(logging.INFO, logger="gateway.query_understanding"):
+            _run_qu("Tell me about C-CS301", client, monkeypatch=monkeypatch, resolver=ok_resolver)
+        resolve_records = [r for r in caplog.records if "QU.resolve" in r.message]
+        assert resolve_records, "QU.resolve log not emitted"
+
+    def test_no_raw_query_in_any_log(self, monkeypatch, caplog):
+        """Raw user query text must never appear in any QU log line."""
+        response = _sq_json("get_course_info")
+        client = _make_mock_client([response])
+        unique_marker = "UNIQUEPIIMARKER_NOSHOULDAPPEAR_999"
+        with caplog.at_level(logging.DEBUG, logger="gateway.query_understanding"):
+            _run_qu(unique_marker, client, monkeypatch=monkeypatch)
+        assert unique_marker not in caplog.text
+
+
+def test_sw_track_alias_exists_in_entity_aliases():
+    """'sw' must be a valid alias for the SWE track in entity_aliases.json."""
+    import json
+    import os
+    alias_path = os.path.join(
+        os.path.dirname(__file__), "..", "engines", "kg", "data", "entity_aliases.json"
+    )
+    with open(alias_path, encoding="utf-8") as f:
+        data = json.load(f)
+    assert "sw" in data["track"]["aliases"]["SWE"], (
+        "'sw' alias missing from SWE track in entity_aliases.json"
+    )

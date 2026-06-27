@@ -1297,3 +1297,269 @@ def test_sw_track_alias_exists_in_entity_aliases():
     assert "sw" in data["track"]["aliases"]["SWE"], (
         "'sw' alias missing from SWE track in entity_aliases.json"
     )
+
+
+# ── D6 Record Focus / Response Style Tests ────────────────────────────────────
+
+class TestD6FocusDetection:
+    """Tests for deterministic D6 record_focus and response_style detection.
+    All tests use the deterministic fallback path (LLM not configured).
+    """
+
+    def _fallback(self, text: str) -> list:
+        from gateway.qu_preprocessing import preprocess
+        from gateway.query_understanding import _deterministic_fallback
+        pre = preprocess(text)
+        return _deterministic_fallback(text, pre)
+
+    def test_level_query_routes_to_student_record_not_clarification(self):
+        sqs = self._fallback("what is my level?")
+        assert len(sqs) == 1
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "academic_level"
+
+    def test_my_level_query_routes_to_academic_level_focus(self):
+        sqs = self._fallback("what level am I?")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "academic_level"
+
+    def test_cgpa_only_query_sets_only_style(self):
+        sqs = self._fallback("only cgpa pls")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "cgpa"
+        assert sqs[0].params.get("response_style") == "only"
+
+    def test_my_cgpa_query_sets_cgpa_focus(self):
+        sqs = self._fallback("what is my cgpa?")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "cgpa"
+
+    def test_in_progress_courses_query(self):
+        sqs = self._fallback("what courses am I taking now?")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "in_progress_courses"
+
+    def test_completed_courses_query(self):
+        sqs = self._fallback("what courses have I completed so far?")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "completed_courses"
+
+    def test_standing_query(self):
+        sqs = self._fallback("am I in good academic standing?")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "academic_standing"
+
+    def test_cooked_query_routes_to_standing(self):
+        sqs = self._fallback("am I cooked academically?")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "academic_standing"
+
+    def test_assumption_only_routes_to_acknowledgement_not_plan(self):
+        sqs = self._fallback("Assume I failed Programming Fundamentals.")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "assumption_acknowledgement"
+
+    def test_assumption_with_followup_does_not_set_acknowledgement(self):
+        """'Assume I failed X, what should I take next?' → NOT assumption_acknowledgement."""
+        sqs = self._fallback("Assume I failed Programming Fundamentals, what should I take next?")
+        # Should NOT produce assumption_acknowledgement; may produce plan_semester or other
+        if sqs[0].params.get("record_focus") is not None:
+            assert sqs[0].params.get("record_focus") != "assumption_acknowledgement"
+
+    def test_yes_no_style_detected(self):
+        sqs = self._fallback("just answer yes or no: am I taking Advanced Physics now?")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("response_style") == "yes_no"
+
+    def test_reset_signal_sets_reset_focus(self):
+        sqs = self._fallback("reset assumptions")
+        assert sqs[0].intent == "get_student_record"
+        assert sqs[0].params.get("record_focus") == "reset_assumptions"
+
+    def test_parse_raw_sq_normalizes_valid_record_focus(self):
+        from gateway.query_understanding import _parse_raw_sq
+        raw = {"intent": "get_student_record", "params": {"record_focus": "cgpa"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert sq.params.get("record_focus") == "cgpa"
+
+    def test_parse_raw_sq_drops_invalid_record_focus(self):
+        from gateway.query_understanding import _parse_raw_sq
+        raw = {"intent": "get_student_record", "params": {"record_focus": "invalid_focus"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert "record_focus" not in sq.params
+
+    def test_parse_raw_sq_normalizes_valid_response_style(self):
+        from gateway.query_understanding import _parse_raw_sq
+        raw = {"intent": "get_student_record", "params": {"response_style": "yes_no"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert sq.params.get("response_style") == "yes_no"
+
+    def test_parse_raw_sq_drops_invalid_response_style(self):
+        from gateway.query_understanding import _parse_raw_sq
+        raw = {"intent": "get_student_record", "params": {"response_style": "bullet_list"}}
+        sq = _parse_raw_sq(raw, "test")
+        assert "response_style" not in sq.params
+
+
+# ── Phase 2 Behavioral Stabilization Tests ────────────────────────────────────
+
+
+class TestPhase2EntityCandidatesNormalization:
+    """QU normalization: entity_candidates from LLM params guide entity extraction."""
+
+    def _normalize(self, intent: str, entities_dict: dict, params_dict: dict) -> StructuredQuery:
+        from gateway.query_understanding import _normalize_one_sq
+        sq = StructuredQuery(
+            intent=intent,
+            original_text="test",
+            entities=EntitySet(**{k: entities_dict.get(k) for k in ("course_code", "role_id", "track_id", "skill_id")}),
+            params=params_dict,
+        )
+        return _normalize_one_sq(sq, "test", PreprocessResult(), LastReferenced())
+
+    def test_entity_candidates_first_used_as_course_when_entity_missing(self):
+        """First entity_candidate becomes course_code when entity missing."""
+        sq = self._normalize(
+            "get_course_info",
+            {"course_code": None, "role_id": None, "track_id": None, "skill_id": None},
+            {"entity_candidates": ["probability and statistics", "intro to probability"]},
+        )
+        assert sq.entities.course_code == "probability and statistics"
+
+    def test_entity_candidates_skipped_when_entity_already_set(self):
+        """entity_candidates not applied when course entity already present."""
+        sq = self._normalize(
+            "get_course_info",
+            {"course_code": "C-CS219", "role_id": None, "track_id": None, "skill_id": None},
+            {"entity_candidates": ["something else"]},
+        )
+        assert sq.entities.course_code == "C-CS219"
+
+    def test_skill_candidates_first_used_for_skill_search(self):
+        """First skill_candidate becomes skill_id for search_courses_by_skill."""
+        sq = self._normalize(
+            "search_courses_by_skill",
+            {"course_code": None, "role_id": None, "track_id": None, "skill_id": None},
+            {"skill_candidates": ["machine learning", "deep learning"]},
+        )
+        assert sq.entities.skill_id == "machine learning"
+
+    def test_entity_candidates_fallback_for_skill_when_no_skill_candidates(self):
+        """entity_candidates used for skill when skill_candidates absent."""
+        sq = self._normalize(
+            "search_courses_by_skill",
+            {"course_code": None, "role_id": None, "track_id": None, "skill_id": None},
+            {"entity_candidates": ["object-oriented programming"]},
+        )
+        assert sq.entities.skill_id == "object-oriented programming"
+
+    def test_get_skills_taught_uses_entity_candidates(self):
+        """get_skills_taught: entity_candidates promotes course candidate."""
+        sq = self._normalize(
+            "get_skills_taught",
+            {"course_code": None, "role_id": None, "track_id": None, "skill_id": None},
+            {"entity_type_hint": "course", "entity_candidates": ["probability and statistics"]},
+        )
+        assert sq.entities.course_code == "probability and statistics"
+
+
+class TestPhase2ResolverCandidateList:
+    """QU resolver: tries entity_candidates in order when primary entity resolution fails."""
+
+    def _make_resolver(self, course_map: dict[str, str] = None,
+                       skill_map: dict[str, str] = None) -> any:
+        """Type-aware resolver: course_map for courses, skill_map for skills."""
+        course_map = {k.lower(): v for k, v in (course_map or {}).items()}
+        skill_map = {k.lower(): v for k, v in (skill_map or {}).items()}
+
+        def resolver(entity_type: str, mention: str) -> dict:
+            key = mention.strip().lower()
+            if entity_type == "course" and key in course_map:
+                return {"status": "ok", "resolved_id": course_map[key]}
+            if entity_type == "skill" and key in skill_map:
+                return {"status": "ok", "resolved_id": skill_map[key]}
+            return {"status": "not_found"}
+        return resolver
+
+    def _make_sq(self, intent: str, course_code=None, skill_id=None, params=None) -> StructuredQuery:
+        return StructuredQuery(
+            intent=intent,
+            original_text="test",
+            entities=EntitySet(course_code=course_code, skill_id=skill_id),
+            params=params or {},
+        )
+
+    def test_candidate_resolves_when_primary_fails(self):
+        """Resolver tries entity_candidates when primary entity fails."""
+        from gateway.query_understanding import _resolve_sq
+        resolver = self._make_resolver(
+            course_map={"intro to machine learning": "C-AI301"}
+        )
+        sq = self._make_sq(
+            "get_course_info",
+            course_code="machine learning",  # won't resolve as course
+            params={"entity_candidates": ["machine learning", "intro to machine learning"]},
+        )
+        result = _resolve_sq(sq, resolver)
+        assert result.intent == "get_course_info"
+        assert result.entities.course_code == "C-AI301"
+
+    def test_clarification_when_all_candidates_fail(self):
+        """clarification_needed when primary and all candidates fail and no skill fallback."""
+        from gateway.query_understanding import _resolve_sq
+        resolver = self._make_resolver()  # resolves nothing
+        sq = self._make_sq(
+            "get_course_info",
+            course_code="gibberish course name",
+            params={"entity_candidates": ["another gibberish", "yet another"]},
+        )
+        result = _resolve_sq(sq, resolver)
+        assert result.intent == "clarification_needed"
+
+    def test_topic_fallback_course_to_skill(self):
+        """Course-intent fails as course but skill resolves → reroute to search_courses_by_skill."""
+        from gateway.query_understanding import _resolve_sq
+        # object-oriented programming resolves as skill but NOT as course
+        resolver = self._make_resolver(skill_map={"object-oriented programming": "SK_OOP"})
+        sq = self._make_sq(
+            "get_course_info",
+            course_code="object-oriented programming",
+            params={"entity_candidates": ["object-oriented programming"]},
+        )
+        result = _resolve_sq(sq, resolver)
+        assert result.intent == "search_courses_by_skill"
+        assert result.entities.skill_id == "SK_OOP"
+        assert result.params.get("topic_fallback") is True
+        assert result.params.get("original_intent") == "get_course_info"
+
+    def test_skill_candidates_tried_in_order(self):
+        """skill_candidates list tried in priority order when primary fails."""
+        from gateway.query_understanding import _resolve_sq
+        resolver = self._make_resolver(skill_map={"machine learning": "SK_ML"})
+        sq = self._make_sq(
+            "search_courses_by_skill",
+            skill_id="ml",  # won't resolve
+            params={"skill_candidates": ["ml", "machine learning"]},
+        )
+        result = _resolve_sq(sq, resolver)
+        assert result.intent == "search_courses_by_skill"
+        assert result.entities.skill_id == "SK_ML"
+
+    def test_multi_skill_resolved_ids_stored_in_params(self):
+        """When skill_candidates resolve, resolved_skill_ids stored in params."""
+        from gateway.query_understanding import _resolve_sq
+        resolver = self._make_resolver(skill_map={
+            "machine learning": "SK_ML",
+            "deep learning": "SK_DL",
+        })
+        sq = self._make_sq(
+            "search_courses_by_skill",
+            skill_id="machine learning",
+            params={"skill_candidates": ["machine learning", "deep learning"]},
+        )
+        result = _resolve_sq(sq, resolver)
+        assert result.intent == "search_courses_by_skill"
+        assert result.entities.skill_id == "SK_ML"
+        resolved_ids = result.params.get("resolved_skill_ids", [])
+        assert "SK_ML" in resolved_ids
+        assert "SK_DL" in resolved_ids

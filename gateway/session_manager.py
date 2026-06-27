@@ -269,6 +269,7 @@ def get_or_create_session(
     return state, True
 
 
+
 def get_qu_context(session_id: str, user_text: str) -> QUContext | None:
     session = _store.load(session_id)
     if session is None:

@@ -20,11 +20,14 @@ Does NOT:
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+_TRACE = os.getenv("PATHFINDER_TRACE", "").lower() in ("true", "1", "yes")
 
 from gateway.models.schemas import (
     EntitySet, LastReferenced, PerSQResult, SessionOverrides,
@@ -73,6 +76,21 @@ _STUDENT_REQUIRED_INTENTS = (
 
 _KG_ADAPTER_ERRORS = frozenset({"kg_unavailable", "unknown_operation", "bad_params", "kg_error"})
 
+_LEVEL_DISPLAY: dict[int, str] = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
+
+_D6_SCALAR_FOCUSES: frozenset[str] = frozenset({
+    "cgpa", "academic_level", "academic_standing", "academic_warnings",
+    "probation_status", "completed_credits", "last_semester_gpa",
+    "study_status", "track", "current_semester",
+})
+
+_D6_COMPLETED_ONLY_FOCUSES: frozenset[str] = frozenset({"completed_courses"})
+_D6_IN_PROGRESS_ONLY_FOCUSES: frozenset[str] = frozenset({"in_progress_courses"})
+_D6_FAILED_ONLY_FOCUSES: frozenset[str] = frozenset({"failed_courses"})
+_D6_NO_ENRICH_FOCUSES: frozenset[str] = frozenset({"assumption_acknowledgement", "reset_assumptions"})
+_D6_COURSE_STATUS_CHECK_FOCUSES: frozenset[str] = frozenset({"course_status_check"})
+_D6_FAILED_HISTORY_FOCUSES: frozenset[str] = frozenset({"failed_course_history"})
+
 _FORBIDDEN_INTENTS = frozenset({
     "plan_next_semester", "get_prerequisites", "handbook_query",
     "check_eligibility", "simulate_gpa", "generate_semester_plan",
@@ -85,6 +103,35 @@ _FORBIDDEN_INTENTS = frozenset({
 _CONDITIONAL_STUDENT_INTENTS = frozenset({
     "get_roles_by_track", "get_track_overview", "compare_tracks",
 })
+
+# ── Route trace: engine + operation labels ────────────────────────────────────
+
+_INTENT_ENGINE_OP: dict[str, tuple[str, str]] = {
+    "get_course_info": ("KG", "get_course_profile"),
+    "get_course_prerequisites": ("KG", "get_prerequisites"),
+    "get_skills_taught": ("KG", "get_skills_taught"),
+    "search_courses_by_skill": ("KG", "search_courses_by_skill"),
+    "get_role_profile": ("KG", "get_role_profile"),
+    "get_roles_by_track": ("KG", "get_roles_by_track"),
+    "compute_skill_gap": ("KG", "compute_skill_gap"),
+    "compute_alignment_score": ("KG", "compute_alignment_score"),
+    "recommend_courses_to_close_gap": ("KG", "recommend_courses_to_close_gap"),
+    "find_best_matching_roles": ("KG", "find_best_matching_roles"),
+    "estimate_alignment_improvement": ("KG", "estimate_alignment_improvement"),
+    "get_focus_courses_for_target": ("KG", "get_focus_courses_for_target"),
+    "get_track_overview": ("KG", "get_track_overview"),
+    "compare_tracks": ("KG", "compare_tracks"),
+    "recommend_track_for_role": ("KG", "recommend_track_for_role"),
+    "recommend_track_for_skill": ("KG", "recommend_track_for_skill"),
+    "get_student_record": ("StudentContext", "student_record_snapshot"),
+    "policy_query": ("RAG", "execute_policy_query"),
+    "plan_semester": ("ALE", "generate_semester_plan"),
+    "generate_graduation_roadmap": ("ALE", "generate_graduation_roadmap"),
+    "run_graduation_audit": ("ALE", "run_graduation_audit"),
+    "check_course_eligibility": ("ALE", "check_course_eligibility"),
+    "simulate_gpa_forward": ("ALE", "simulate_gpa_forward"),
+    "solve_target_gpa": ("ALE", "solve_target_gpa"),
+}
 
 
 # ── Turn-level cache ──────────────────────────────────────────────────────────
@@ -289,6 +336,7 @@ class Orchestrator:
                     had_clear=had_clear,
                     rule_bundles=rule_bundles,
                     caches=caches,
+                    execution_overrides=execution_overrides,
                 )
             except Exception as exc:
                 logger.exception("Orchestrator: unhandled error SQ[%d] intent=%s", idx, sq.intent)
@@ -340,6 +388,7 @@ class Orchestrator:
         had_clear: bool,
         rule_bundles: dict,
         caches: _TurnCaches,
+        execution_overrides: Optional[SessionOverrides] = None,
     ) -> PerSQResult:
         intent = sq.intent
 
@@ -376,6 +425,23 @@ class Orchestrator:
             sq_index, intent, _ctx_mode, sq.student_referential_fallback, has_active_assumptions,
         )
 
+        if _TRACE:
+            record_focus = sq.params.get("record_focus", "N/A")
+            entity_display = (
+                sq.entities.course_code or sq.entities.role_id
+                or sq.entities.track_id or sq.entities.skill_id or "N/A"
+            )
+            _engine, _operation = _INTENT_ENGINE_OP.get(intent, ("KG", intent))
+            logger.info(
+                "Orchestrator.route_trace[%d] intent=%s context_mode=%s\n"
+                "  entity: %s\n"
+                "  record_focus: %s\n"
+                "  engine: %s operation: %s\n"
+                "  assumptions_active: %s",
+                sq_index, intent, _ctx_mode,
+                entity_display, record_focus, _engine, _operation, has_active_assumptions,
+            )
+
         # Dispatch
         if intent == "plan_semester":
             return self._exec_plan_semester(sq_index, sq, ctx, rule_bundles, caches, has_active_assumptions)
@@ -398,7 +464,7 @@ class Orchestrator:
         if intent == "policy_query":
             return self._exec_policy(sq_index, sq)
         if intent == "get_student_record":
-            return self._exec_student_record(sq_index, sq, ctx, rule_bundles, has_active_assumptions, had_clear)
+            return self._exec_student_record(sq_index, sq, ctx, rule_bundles, has_active_assumptions, caches, had_clear, execution_overrides)
 
         return _err(sq_index, intent, "validation_failed", "result_shape",
                     f"Unrecognised intent: {intent!r}")
@@ -975,46 +1041,78 @@ class Orchestrator:
         if intent == "get_course_info":
             code = sq.entities.course_code
             if not code:
+                candidate = sq.params.get("attempted_candidate")
+                if candidate:
+                    return _clarif(sq_index, intent,
+                        f"I couldn't find a course named '{candidate}' in the current CIS catalogue. "
+                        f"Could you provide the exact course name or code?")
                 return _clarif(sq_index, intent, "Which course would you like to know about?")
             result = self._kg.call("get_course_profile", {"course_code": code})
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
             if "error" in result:
-                return _info(sq_index, intent, result)
+                candidate = sq.params.get("attempted_candidate") or code
+                return _info(sq_index, intent, {**result, "attempted_candidate": candidate})
             return _ok(sq_index, intent, result)
 
         if intent == "get_course_prerequisites":
             code = sq.entities.course_code
             if not code:
+                candidate = sq.params.get("attempted_candidate")
+                if candidate:
+                    return _clarif(sq_index, intent,
+                        f"I couldn't find a course named '{candidate}' in the current CIS catalogue. "
+                        f"Could you provide the exact course name or code?")
                 return _clarif(sq_index, intent, "Which course's prerequisites would you like to see?")
             depth = sq.params.get("depth", "direct")
             result = self._kg.call("get_prerequisites", {"course_code": code, "depth": depth})
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
             if "error" in result:
-                return _info(sq_index, intent, result)
+                candidate = sq.params.get("attempted_candidate") or code
+                return _info(sq_index, intent, {**result, "attempted_candidate": candidate})
             return _ok(sq_index, intent, result)
 
         if intent == "get_skills_taught":
             code = sq.entities.course_code
             if not code:
+                candidate = sq.params.get("attempted_candidate")
+                if candidate:
+                    return _clarif(sq_index, intent,
+                        f"I couldn't find a course named '{candidate}' in the current CIS catalogue. "
+                        f"Could you provide the exact course name or code?")
                 return _clarif(sq_index, intent, "Which course would you like to see skills for?")
             result = self._kg.call("get_skills_taught", {"course_code": code})
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
             if "error" in result:
-                return _info(sq_index, intent, result)
+                candidate = sq.params.get("attempted_candidate") or code
+                return _info(sq_index, intent, {**result, "attempted_candidate": candidate})
             return _ok(sq_index, intent, result)
 
         if intent == "search_courses_by_skill":
             skill = sq.entities.skill_id
-            if not skill:
+            # Multi-skill: prefer resolved_skill_ids list when available (also used for session follow-ups)
+            skill_ids = sq.params.get("resolved_skill_ids")
+            if not skill_ids and skill:
+                skill_ids = [skill]
+            if not skill_ids:
+                attempted = sq.params.get("attempted_skill")
+                if attempted:
+                    return _clarif(sq_index, intent,
+                        f"I couldn't find a skill matching '{attempted}' in the curriculum. "
+                        f"Could you provide a more specific skill name?")
                 return _clarif(sq_index, intent, "Which skill are you looking for courses about?")
-            result = self._kg.call("search_courses_by_skill", {"skill_ids": [skill]})
+            result = self._kg.call("search_courses_by_skill", {"skill_ids": skill_ids})
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
             if "error" in result:
-                return _info(sq_index, intent, result)
+                attempted = sq.params.get("attempted_skill") or (skill_ids[0] if skill_ids else skill)
+                return _info(sq_index, intent, {**result, "attempted_skill": attempted})
+            # For topic_fallback: pass the flag through so Composer can explain the reroute
+            if sq.params.get("topic_fallback"):
+                result = {**result, "topic_fallback": True,
+                          "original_mention": sq.params.get("attempted_candidate", "")}
             return _ok(sq_index, intent, result)
 
         return _err(sq_index, intent, "validation_failed", "result_shape",
@@ -1264,9 +1362,14 @@ class Orchestrator:
         self, sq_index: int, sq: StructuredQuery,
         ctx: StudentContext, rule_bundles: dict,
         assumptions_active: bool,
+        caches: _TurnCaches,
         had_clear: bool = False,
+        execution_overrides: Optional[SessionOverrides] = None,
     ) -> PerSQResult:
         intent = "get_student_record"
+
+        record_focus = sq.params.get("record_focus") or "full_record"
+        response_style = sq.params.get("response_style") or "normal"
 
         # Compute academic_standing from rule bundles
         warning_rules = rule_bundles.get("academic_warning_rules")
@@ -1284,10 +1387,87 @@ class Orchestrator:
                 academic_standing = "good"
             academic_standing_reason = None
 
-        snapshot = {
+        # Focus-aware enrichment: skip KG calls for scalar-only or no-enrich focuses
+        failed_history_codes: list = []
+        failed_history_details: list = []
+
+        if record_focus in _D6_SCALAR_FOCUSES or record_focus in _D6_NO_ENRICH_FOCUSES:
+            completed_details: list = []
+            in_progress_details: list = []
+            failed_details: list = []
+        elif record_focus in _D6_COMPLETED_ONLY_FOCUSES:
+            completed_details = self._enrich_course_details(ctx.completed_courses or [], caches)
+            in_progress_details = []
+            failed_details = []
+        elif record_focus in _D6_IN_PROGRESS_ONLY_FOCUSES:
+            completed_details = []
+            in_progress_details = self._enrich_course_details(ctx.in_progress_courses or [], caches)
+            failed_details = []
+        elif record_focus in _D6_FAILED_ONLY_FOCUSES:
+            completed_details = []
+            in_progress_details = []
+            failed_details = self._enrich_course_details(ctx.failed_courses or [], caches)
+        elif record_focus in _D6_COURSE_STATUS_CHECK_FOCUSES:
+            target_code = sq.entities.course_code
+            if target_code:
+                # Enrich only the target course, not all courses
+                completed_details = self._enrich_course_details(
+                    [c for c in (ctx.completed_courses or []) if c == target_code], caches
+                )
+                in_progress_details = self._enrich_course_details(
+                    [c for c in (ctx.in_progress_courses or []) if c == target_code], caches
+                )
+                failed_details = self._enrich_course_details(
+                    [c for c in (ctx.failed_courses or []) if c == target_code], caches
+                )
+            else:
+                # No specific course — enrich current courses only
+                completed_details = []
+                in_progress_details = self._enrich_course_details(ctx.in_progress_courses or [], caches)
+                failed_details = []
+        elif record_focus in _D6_FAILED_HISTORY_FOCUSES:
+            # Extract all courses ever failed from course_history
+            failed_history_codes = list(dict.fromkeys(
+                r.course_code for r in (ctx.course_history or [])
+                if r.status in ("failed", "repeated")
+            ))
+            failed_history_details = self._enrich_course_details(failed_history_codes, caches)
+            completed_details = []
+            in_progress_details = []
+            failed_details = []
+        else:
+            # full_record, progress_summary, unknown focus → enrich all
+            completed_details = self._enrich_course_details(ctx.completed_courses or [], caches)
+            in_progress_details = self._enrich_course_details(ctx.in_progress_courses or [], caches)
+            failed_details = self._enrich_course_details(ctx.failed_courses or [], caches)
+
+        level_display: Optional[str] = None
+        if ctx.level is not None:
+            level_display = _LEVEL_DISPLAY.get(ctx.level, str(ctx.level))
+
+        # Scenario credits: when assumptions added passed courses with known credits
+        scenario_completed_credits: Optional[int] = None
+        eff_overrides = execution_overrides if execution_overrides is not None else sq.session_overrides
+        if assumptions_active and eff_overrides and eff_overrides.assumed_passed_courses and completed_details:
+            known = [d["credits"] for d in completed_details if isinstance(d.get("credits"), int)]
+            if len(known) == len(completed_details):
+                scenario_completed_credits = sum(known)
+
+        # Assumed course lists for Composer labelling
+        assumed_failed = list(eff_overrides.assumed_failed_courses) if eff_overrides else []
+        assumed_passed = list(eff_overrides.assumed_passed_courses) if eff_overrides else []
+
+        snapshot: dict = {
+            "record_focus": record_focus,
+            "response_style": response_style,
             "track_id": ctx.track_id,
+            "program": ctx.program,
             "level": ctx.level,
+            "level_display": level_display,
             "cgpa": ctx.cgpa,
+            "last_semester_gpa": ctx.last_semester_gpa,
+            "last_semester_chs": ctx.last_semester_chs,
+            "last_semester_cps": ctx.last_semester_cps,
             "academic_standing": academic_standing,
             "academic_standing_reason": academic_standing_reason,
             "study_status": ctx.study_status,
@@ -1299,6 +1479,14 @@ class Orchestrator:
             "in_progress_courses": ctx.in_progress_courses,
             "failed_courses": ctx.failed_courses,
             "first_semester": ctx.first_semester,
+            "completed_course_details": completed_details,
+            "in_progress_course_details": in_progress_details,
+            "failed_course_details": failed_details,
+            "failed_history_codes": failed_history_codes,
+            "failed_history_details": failed_history_details,
+            "scenario_completed_credits": scenario_completed_credits,
+            "assumed_failed_courses": assumed_failed,
+            "assumed_passed_courses": assumed_passed,
         }
 
         if had_clear:
@@ -1312,6 +1500,33 @@ class Orchestrator:
                    override_state_active=True if assumptions_active else None)
 
     # ── KG helper ─────────────────────────────────────────────────────────────
+
+    def _enrich_course_details(self, codes: list, caches: _TurnCaches) -> list:
+        """Return enriched course detail dicts for a list of course codes.
+
+        Uses course_profile_cache. KG failure, non-dict result, or unknown course
+        produces a fallback dict with course_name=None and credits=None.
+        Never raises.
+        """
+        details = []
+        for code in codes:
+            if code not in caches.course_profile_cache:
+                result = self._kg.call("get_course_profile", {"course_code": code})
+                caches.course_profile_cache[code] = result
+            profile = caches.course_profile_cache.get(code, {})
+            if (
+                not isinstance(profile, dict)
+                or _is_kg_adapter_error(profile)
+                or "error" in profile
+            ):
+                details.append({"course_code": code, "course_name": None, "credits": None})
+            else:
+                details.append({
+                    "course_code": code,
+                    "course_name": profile.get("name"),
+                    "credits": profile.get("credits"),
+                })
+        return details
 
     def _get_courses_by_track(
         self, track_id: str, caches: _TurnCaches,

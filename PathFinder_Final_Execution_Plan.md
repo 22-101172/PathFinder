@@ -2668,6 +2668,10 @@ Total: 305 tests — 305 passed, 0 failed
 
 ## Phase 2 — Integration & Behavioral Testing
 
+### Status: PARTIAL COMPLETE ✅ — Behavioral Stabilization Done (2026-06-25)
+
+D6 student-record enrichment fixed and verified. Behavioral stabilization completed 2026-06-25; session-memory patch applied and rolled back as unstable; all behavioral fixes preserved. 1037 tests pass (1 pre-existing RAG failure). Full intent-by-intent integration testing and chatbot intelligence upgrade continue in the Last Battle Plan.
+
 ### Goal
 
 Test PathFinder as a complete academic advising chatbot after all components have been individually audited and stabilized.
@@ -2746,7 +2750,286 @@ Regression test set passes end-to-end.
 
 ---
 
+### Phase 2 D6 Defect Log
+
+| ID | Description | Status | Tests |
+|----|-------------|--------|-------|
+| D6-BUG-1 | Student-record course lists returned raw codes only (`C-CS112`, `HUM111` etc.) — no course names. Observed in manual test with STU000031. | **FIXED 2026-06-24** | 27 tests in `test_phase2_d6_student_record.py` + 10 in `test_orchestrator.py` (D6 enrichment) + 12 in `test_response_composer.py` (D6 rendering) |
+
+**Fix summary (D6-BUG-1):**
+
+- `gateway/orchestrator.py`: Added `_enrich_course_details()` method that calls `get_course_profile` per course code using `caches.course_profile_cache`. Updated `_exec_student_record` to populate `completed_course_details`, `in_progress_course_details`, `failed_course_details` — each item `{course_code, course_name, credits}`. Raw code lists kept for backward compat. KG failure → fallback with `course_name=None, credits=None`; never fails the student record result.
+- `gateway/response_composer.py`: Added `_render_course_detail()` helper. Updated `_extract_student_record` to forward the three detail fields. Updated `_narrate_intent` for `get_student_record` to prefer `*_course_details` over raw codes, rendering each as `"Course Name (COURSE_CODE)"` (name-first, per rule 26). Fallback to raw codes if details absent.
+
+**Post-fix behavior (STU000031):**
+
+```
+Completed courses (5):
+  • Humanities I (HUM111)
+  • Physics I (C-PH111)
+  • Introduction to Computer Science (C-CS111)
+  • Calculus I (C-MA111)
+  • Technical Writing (HUM126)
+
+In-progress courses (5):
+  • Programming Fundamentals (C-CS112)
+  • Calculus II (C-MA112)
+  • Advanced Physics (C-PH112)
+  • Digital Logic Design (C-PH113)
+  • Introduction to Management (HUM224)
+```
+
+D6 manual testing may resume.
+
+---
+
+## PathFinder — The Last Battle Plan
+
+### 26 June → 30 June 2026
+
+#### Mission
+
+Finish PathFinder as a complete, demo-ready, deployable academic and career advising product by the end of 30 June.
+
+The goal is a system that is not only technically working, but feels like a real academic and career advisor: useful, intelligent, stable, explainable, and ready to be shown in discussion and at the CIS GP Fair.
+
+---
+
+### Day 1 — Friday, 26 June
+
+#### LLM Provider Fix + Full Intent-by-Intent Integration Testing
+
+**Due:** End of 26 June
+
+**Main goal:** Fix the LLM provider issue, then complete full end-to-end testing and fixing for every locked chatbot intent.
+
+**A. LLM provider issue**
+
+- Fix the current QU/Composer provider problem.
+- Decide whether to continue with Groq or switch to Gemini/OpenAI-compatible provider.
+- Ensure QU can run without repeated 429 rate-limit failures, 413 payload/TPM failures, or invalid model failures.
+- Preserve existing Groq compatibility even if Gemini is added.
+- Restart backend and confirm normal chatbot queries work again.
+
+**B. Full intent-by-intent integration testing**
+
+Test and fix all chatbot domains end-to-end:
+
+1. **Student Record** — current level, CGPA, academic standing, completed courses, current courses, failed courses, course status checks, assumptions/reset assumptions.
+2. **Course Info** — course profile, prerequisites, full prerequisite chain, skills taught, courses by skill.
+3. **Policy / RAG** — attendance, grading scale, honors, graduation requirements, retake policy, warning/CGPA below 2, credit limits.
+4. **Career / Role** — role profile, roles by track, skill gap, alignment score, best matching roles, gap-closing courses, alignment improvement, focus courses.
+5. **Track Guidance** — track overview, compare tracks, recommend track for role, recommend track for skill.
+6. **Academic Planning** — course eligibility, semester plan, graduation audit, graduation roadmap, GPA simulation, target GPA solving.
+7. **Control** — clarification_needed, out_of_scope.
+
+**Fixing rule:** Every failed query must be classified by component (QU / KG / Resolver / Orchestrator / ALE / RAG / Composer / Session / Data limitation / UI-API), then fixed only where needed for correct end-to-end behavior.
+
+**Exit condition:** All chatbot intents tested end-to-end at least once; no major logical errors remain in the core academic advising behavior.
+
+---
+
+### Day 2 — Saturday, 27 June
+
+#### Retesting + Real Chatbot Intelligence Upgrade
+
+**Due:** End of 27 June
+
+**Main goal:** Confirm the full intent system is still correct after Day 1 fixes. Then upgrade the chatbot experience so PathFinder feels intelligent, flexible, and conversational — not like a rigid intent demo.
+
+**A. Integration retesting**
+
+- Retest all fixes from Day 1. Confirm every domain still works: Academic Planning, Course Info, Career/Role, Track Guidance, Policy, Student Record, Control intents.
+- Confirm the most important demo paths are stable:
+  - "What is my CGPA?"
+  - "Can I take X?"
+  - "Plan next semester for me."
+  - "Can I graduate?"
+  - "I want to become a Data Scientist. What am I missing?"
+  - "Compare AI and Data Science."
+  - "What is the attendance policy?"
+
+**Exit condition for Part A:** System is not only patched, but retested and confirmed stable after fixes.
+
+**B. Real chatbot intelligence upgrade**
+
+**Objective:** Make PathFinder behave like a real chatbot. Students should not feel that the system only works when they use exact intent phrasing. If the student asks naturally, vaguely, or slightly outside the expected wording, PathFinder should still respond usefully when the request is related to academic advising, curriculum, career guidance, or student progress.
+
+What must be improved:
+
+1. **QU flexibility** — Upgrade Query Understanding to map more natural student phrasing into the correct intents. Focus on: alternative wording, casual phrasing, incomplete-but-understandable questions, multi-intent questions, follow-up style questions, vague but in-domain questions, role/course/track ambiguity, policy + student-context questions, course + eligibility combined, career + course recommendation combined.
+
+   Examples:
+   - "Am I cooked academically?" → academic standing / warning, not out_of_scope.
+   - "What should I do if I want data science?" → career/role guidance, skill gap, or track/role recommendation depending on context.
+   - "Is this course useful for AI?" → use last course if available; answer through skills/role/track relevance.
+   - "I'm lost, what should I take?" → planning/advising, not generic clarification.
+   - "How do I improve my situation?" → academic standing + planning/target GPA if student context supports it.
+   - "What does this course open for me?" → course skills and related career/role usefulness.
+
+2. **Multi-intent handling** — Improve cases where one user question should produce more than one StructuredQuery.
+   - "Can I take Computer Vision and what are its prerequisites?" → get_course_prerequisites + check_course_eligibility.
+   - "Can I graduate and what is left?" → run_graduation_audit + possibly generate_graduation_roadmap.
+   - "I want to become a Data Scientist, what am I missing and what courses should I take?" → compute_skill_gap + recommend_courses_to_close_gap.
+   - "Tell me about AI track and what roles it leads to." → get_track_overview + get_roles_by_track.
+
+3. **Better clarification behavior** — Use targeted clarification only when the system genuinely cannot choose safely. Avoid overusing generic clarification.
+   - Good: "Do you mean Software Engineering as a course, a career role, or the Software Engineering track?"
+   - Bad: "Could you clarify?"
+
+4. **Better Composer behavior** — Answer directly first. Explain briefly. Avoid robotic phrasing and info dumps. Use course names first, avoid raw role/skill IDs. Avoid fake rules. Connect answers to the student's situation when appropriate. Make limitations sound professional, not broken.
+
+5. **Better graceful handling for in-domain unsupported questions** — If the student asks something related to advising but not covered by a direct intent, still be useful: suggest what PathFinder can check, offer nearby supported options, ask a targeted clarification, or explain the available next step. The student should not feel "this chatbot is dumb" just because the wording was different.
+
+6. **Session behavior where it improves the experience** — Support simple references: "it", "that course", "my track", "this role", "can I take it?", "what about this one?", "tell me more about it." Keep practical and demo-safe; no heavy session-memory rebuild unless necessary.
+
+**Exit condition for Part B:** PathFinder feels like a real academic advising chatbot, not a rigid intent classifier. It handles natural phrasing, reasonable ambiguity, multi-intent questions, and helpful fallback behavior without losing academic correctness.
+
+---
+
+### Day 3 — Sunday, 28 June
+
+#### SAE + Real UI Integration
+
+**Due:** End of 28 June
+
+**Main goal:** Complete new integrations and make the current product state feel flawless.
+
+**A. Real UI integration**
+
+Integrate the real UI with the backend. The UI must support:
+- Student login / student selection.
+- Chat view and response rendering.
+- Citation rendering.
+- Chat history or basic session continuity.
+- Loading states and graceful error messages.
+- Clean navigation.
+
+The UI should no longer feel like a temporary engineering test interface.
+
+**B. SAE integration**
+
+Integrate the Student Analytics Engine as a separate dashboard flow. SAE must not overload the normal chatbot pipeline.
+
+Expected flow: dashboard action from UI → SAE receives needed student/curriculum data → SAE returns structured analytics → UI renders visualizations/cards/charts.
+
+Possible dashboard views: academic progress overview, credit accumulation, completed vs. remaining requirements, risk indicators, graduation timeline forecast, GPA/standing analytics, course progress insights.
+
+**C. Product coherence**
+
+Make sure Chatbot + SAE + UI feel like one product:
+- Clear navigation and stable backend communication.
+- Consistent student identity/session handling.
+- No broken screens. No raw internal JSON shown to normal users.
+- Graceful handling if one module is unavailable.
+
+**Exit condition:** By end of Day 3, the integrated product works: chatbot + real UI + SAE dashboard path are connected and demoable.
+
+---
+
+### Day 4 — Monday, 29 June
+
+#### Advanced Auditability + Deployment / Scaling Start
+
+**Due:** End of 29 June
+
+**Main goal:** Use the first half to harden auditability, logging, and explainability. Use the second half to design and begin actual deployment/scaling work.
+
+**First Half: Advanced auditing, logging, and explainability**
+
+Focus on:
+- QU selected intent(s) and extracted/resolved entities.
+- Routing decision, engine called, engine status, result status, Composer status.
+- RAG citations, ALE reason codes.
+- Data limitation vs. system failure.
+- Safe logs with no sensitive student data leakage.
+
+Also prepare explanation material for technical discussion: why the system is decoupled, why KG/RAG/ALE/SAE are separated, why QU and Composer are LLM stages, why academic decisions are deterministic, how hallucination risk is reduced, how the system can be audited.
+
+**Exit condition for first half:** System is explainable and diagnosable enough for technical discussion.
+
+**Second Half: Deployment and scaling start**
+
+Deployment planning must cover: backend hosting, frontend hosting, Neo4j hosting/access, RAG artifacts, dataset access, API keys and environment variables, CORS, startup time, persistent storage, session storage, logs, fallback local demo.
+
+Scaling/technology review must include: whether SQLite is acceptable for demo only, whether PostgreSQL should replace SQLite later, whether Neo4j Aura or hosted Neo4j is needed, whether RAG artifacts should be bundled or rebuilt, whether LLM provider should be Gemini/Groq/other, cost/rate-limit risks, deployment limitations.
+
+**Exit condition for second half:** By end of Day 4, deployment has started, blockers are known, and the scaling strategy is clear.
+
+---
+
+### Day 5 — Tuesday, 30 June
+
+#### Deployment Continuation, Final Verification, Freeze
+
+**Due:** End of 30 June
+
+**Main goal:** Continue deployment, verify the product works correctly, and freeze the final version.
+
+**A. Deployment continuation**
+
+- Continue actual deployment from Day 4.
+- Verify: backend health, frontend can call backend, KG/RAG/data access, environment variables, LLM provider, session storage, citations and UI rendering.
+- If deployment succeeds: test full demo path on deployed version; document deployed URLs and environment requirements.
+- If deployment does not fully succeed: document exact blocker; prepare guaranteed local demo; prepare recorded demo and screenshots; keep deployment roadmap ready for discussion.
+
+**B. Final product verification**
+
+Run the final demo regression: student record, course info, policy, career guidance, track guidance, academic planning, SAE dashboard, real UI navigation, error handling.
+
+**C. Freeze**
+
+After final verification: no new features, no broad refactors, only emergency blocker fixes. Mark final demo version. Prepare final README/run steps and known limitations list.
+
+**Exit condition:** By end of Day 5, PathFinder is ready to be shown live, deployed if possible, run locally as fallback, recorded, explained technically, defended in discussion, and presented at the CIS GP Fair.
+
+---
+
+### Side Tasks Outside This Plan
+
+- Architecture explanation for thesis.
+- Final intent list for supervisor/thesis.
+- Feature framing for documentation.
+- Thesis writing.
+- Banner, commercial video, recorded demo editing, slides.
+
+These are important but parallel. They should not interrupt the engineering plan unless a supervisor deadline requires them immediately.
+
+---
+
+### Priority Rules
+
+**Highest priority:**
+1. LLM provider works.
+2. All intents work correctly end-to-end.
+3. Chatbot feels intelligent and seamless.
+4. SAE and real UI are integrated.
+5. Advanced logs/auditability support technical defense.
+6. Real deployment is attempted and completed if possible.
+7. Local fallback is guaranteed.
+
+**If time becomes tight:** Deployment is higher priority than perfect advanced logging.
+
+**Can be simplified:** Advanced session memory, perfect scalability, complex UI animations, optional analytics views, deep production monitoring, non-demo edge cases.
+
+**Cannot be simplified:** Academic correctness, no fake rules, stable core intents, real UI working, SAE path working, deployment attempt, local fallback, clear README/run steps.
+
+**Final timeline summary:**
+- 26 June: Fix LLM provider, then full intent-by-intent integration testing and fixing.
+- 27 June: Retest fixes, then upgrade chatbot intelligence and natural conversation behavior.
+- 28 June: Integrate SAE and real UI, making the product feel complete.
+- 29 June: Advanced auditability/logging in the first half; deployment and scaling start in the second half.
+- 30 June: Continue deployment, verify everything, freeze final version.
+
+---
+
+> **Note:** Sections below (Phase 3 through Phase 6) were the original planned phases before the Last Battle Plan was established. Their technical details are preserved for reference. The active remaining execution schedule is the Last Battle Plan above.
+
+---
+
 ## Phase 3 — Real Chatbot Behavior and Seamless Experience
+
+> **Status: SUPERSEDED — Absorbed into Last Battle Plan Days 1–2.** Goals from this section are addressed in Day 1 (LLM fix + intent-by-intent integration testing) and Day 2 (chatbot intelligence upgrade). Technical details below are preserved for reference.
 
 ### Goal
 
@@ -2818,6 +3101,8 @@ Always resolved from student's current_semester (StudentContext), not system cal
 
 ## Phase 4 — Advanced Logging, Tracing, Auditability, and Logic Control
 
+> **Status: SUPERSEDED — Absorbed into Last Battle Plan Day 4, First Half.** Advanced auditability, logging, and explainability work is addressed in Day 4 First Half of the Last Battle Plan. Technical details below are preserved for reference.
+
 ### Goal
 
 Upgrade from basic component-level logs (Phase 1) to full request-level traceability across the entire pipeline.
@@ -2867,6 +3152,8 @@ Use: session_id and anonymized counts for tracing
 ---
 
 ## Phase 5 — Scaling, Maintainability, and Production Readiness
+
+> **Status: SUPERSEDED — Absorbed into Last Battle Plan Days 4–5.** Scaling/technology review is in Day 4 Second Half; production concerns and deployment are in Days 4–5 of the Last Battle Plan. Technical details below are preserved for reference.
 
 ### Goal
 
@@ -2990,6 +3277,8 @@ Prepare clean extension points for the Student Analysis Engine:
 
 ## Phase 6 — Deployment Strategy and Execution
 
+> **Status: SUPERSEDED — Absorbed into Last Battle Plan Days 4–5.** Deployment start is in Day 4 Second Half; deployment continuation, final verification, and freeze are in Day 5 of the Last Battle Plan. Technical details below are preserved for reference.
+
 ### Goal
 
 Prepare two deployment tracks:
@@ -3072,28 +3361,26 @@ Phase 1   — Component & Engine Audit                                      COMP
             11 technical documentation files produced. All components locked.
             See Step 12 closure and gateway/Documentation/Phase_1_Final_Review.md.
 
-Phase 1.5 — Integration Readiness Check
-            Verify inter-component contracts before Phase 2.
-            Output: Integration Contract Checklist — no P1 mismatches remaining.
+Phase 1.5 — Integration Readiness Check                             COMPLETE ✅
+            9 contracts verified; 1 mismatch fixed (assumptions_cleared signal);
+            50 new tests; 305 total pass. No P1 contract mismatch remains.
 
-Phase 2   — Integration & Behavioral Testing
-            Intent-by-intent, domain-by-domain, multi-turn, compound queries,
-            API/UI, regression. Verify Phase 0 issues closed.
-            Intent Behavior Matrix used as optional reference artifact.
+Phase 2   — Integration & Behavioral Testing                        PARTIAL COMPLETE ✅
+            D6 enrichment fixed. Behavioral stabilization done (2026-06-25);
+            session-memory patch rolled back; 1037 tests pass.
+            Full intent-by-intent testing and intelligence upgrade → Last Battle Plan.
 
-Phase 3   — Real Chatbot Behavior and Seamless Experience
-            Vague queries, follow-up continuity, helpful fallback, intent-near
-            recovery, relative semester language, natural responses.
+Last Battle Plan  — 26 June to 30 June 2026                        IN PROGRESS
+            Day 1 (26 Jun): LLM provider fix + full intent-by-intent E2E testing.
+            Day 2 (27 Jun): Retest fixes + chatbot intelligence upgrade.
+            Day 3 (28 Jun): SAE + real UI integration.
+            Day 4 (29 Jun): Advanced auditability/logging (AM) + deployment start (PM).
+            Day 5 (30 Jun): Deployment continuation + final verification + freeze.
 
-Phase 4   — Advanced Logging, Tracing, and Auditability
-            Full request-level traceability. (Basic component logs start Phase 1.)
-
-Phase 5   — Scaling, Maintainability, and Production Readiness
-            PostgreSQL, authentication, data lifecycle, performance, failure
-            handling, admin maintainability, SAE extension points.
-
-Phase 6   — Deployment Strategy and Execution
-            Demo deployment (urgent) + production deployment roadmap.
+Phase 3   — Real Chatbot Behavior     SUPERSEDED — absorbed into Last Battle Plan Days 1–2
+Phase 4   — Advanced Logging          SUPERSEDED — absorbed into Last Battle Plan Day 4 AM
+Phase 5   — Scaling / Production      SUPERSEDED — absorbed into Last Battle Plan Days 4–5
+Phase 6   — Deployment Strategy       SUPERSEDED — absorbed into Last Battle Plan Days 4–5
 ```
 
 ---

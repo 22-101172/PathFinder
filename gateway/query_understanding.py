@@ -19,14 +19,26 @@ from gateway.llm_client import get_llm_client, LLMNotConfigured
 from gateway.models.schemas import EntitySet, LastReferenced, SessionOverrides, StructuredQuery
 from gateway.qu_intents import LOCKED_INTENTS
 from gateway.qu_llm_chain import QUModelChain, AllModelsFailedError
+import os
+
 from gateway.qu_preprocessing import (
     COURSE_CODE_RE,
     STRICT_COURSE_CODE_RE,
     PreprocessResult,
+    detect_d6_record_focus,
+    detect_d6_response_style,
+    detect_d2_course_info_verb,
+    detect_d2_prereq_verb,
+    detect_d2_skills_taught_verb,
+    detect_d2_skill_search_verb,
+    extract_d2_course_candidate,
+    extract_d2_skill_candidate,
     detect_policy_signal,
     detect_out_of_scope,
     preprocess,
 )
+
+_TRACE = os.getenv("PATHFINDER_TRACE", "").lower() in ("true", "1", "yes")
 from gateway.qu_prompt import build_system_prompt, build_user_message
 
 logger = logging.getLogger(__name__)
@@ -41,6 +53,18 @@ _VALID_OVERRIDE_ACTIONS = frozenset({"accumulate", "replace", "clear"})
 
 _VALID_SEMESTER_TYPES: dict[str, str] = {"fall": "Fall", "spring": "Spring", "summer": "Summer"}
 _SEMESTER_FORMAT_RE = re.compile(r'^(fall|spring|summer)\s+(\d{4})$', re.IGNORECASE)
+
+_VALID_RECORD_FOCUSES: frozenset[str] = frozenset({
+    "full_record", "progress_summary", "completed_courses", "in_progress_courses",
+    "failed_courses", "failed_course_history", "completed_credits", "cgpa", "last_semester_gpa",
+    "academic_level", "academic_standing", "academic_warnings", "probation_status",
+    "study_status", "track", "current_semester", "course_status_check",
+    "assumption_acknowledgement", "reset_assumptions",
+})
+
+_VALID_RESPONSE_STYLES: frozenset[str] = frozenset({
+    "normal", "concise", "only", "yes_no", "one_sentence",
+})
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -99,6 +123,27 @@ def understand_query(
 
     _log_resolution_summary(sq_count_before, sq_list, resolver is not None)
 
+    if _TRACE:
+        for n, sq in enumerate(sq_list):
+            logger.info(
+                "QU.sq_trace[%d] intent=%s source=%s\n"
+                "  original_text: %s\n"
+                "  entities: course=%s role=%s track=%s skill=%s\n"
+                "  params: %s\n"
+                "  session_overrides: action=%s passed=%s failed=%s added=%s\n"
+                "  student_referential: %s",
+                n, sq.intent, classification_source,
+                (sq.original_text or "")[:120],
+                sq.entities.course_code, sq.entities.role_id,
+                sq.entities.track_id, sq.entities.skill_id,
+                {k: v for k, v in sq.params.items() if k not in ("expected_grades",)},
+                sq.session_overrides.override_action,
+                sq.session_overrides.assumed_passed_courses,
+                sq.session_overrides.assumed_failed_courses,
+                sq.session_overrides.added_courses,
+                sq.student_referential_fallback,
+            )
+
     if not sq_list:
         sq_list = [_clarification("Could you clarify your question?")]
 
@@ -134,7 +179,9 @@ def _classify(
             user_msg=build_user_message(user_text, last_referenced, recent_turns),
             valid_intents=LOCKED_INTENTS,
         )
-        return [_parse_raw_sq(r, user_text) for r in raw_list if r], "llm"
+        sq_list = [_parse_raw_sq(r, user_text) for r in raw_list if r]
+        sq_list = _normalize_structured_queries_after_llm(sq_list, user_text, pre, last_referenced)
+        return sq_list, "llm"
 
     except AllModelsFailedError:
         logger.warning("QU: all LLMs failed — deterministic fallback")
@@ -234,6 +281,12 @@ def _parse_raw_sq(raw: dict[str, Any], fallback_text: str) -> StructuredQuery:
             params["target_semester_text"] = val
         else:
             del params["target_semester_text"]
+    if "record_focus" in params:
+        if params["record_focus"] not in _VALID_RECORD_FOCUSES:
+            del params["record_focus"]
+    if "response_style" in params:
+        if params["response_style"] not in _VALID_RESPONSE_STYLES:
+            del params["response_style"]
 
     ov_raw = raw.get("session_overrides") or {}
     session_overrides = SessionOverrides(
@@ -262,6 +315,101 @@ def _parse_raw_sq(raw: dict[str, Any], fallback_text: str) -> StructuredQuery:
     )
 
 
+# ── Post-LLM Normalization Layer ──────────────────────────────────────────────
+
+_D2_COURSE_INTENTS = frozenset({"get_course_info", "get_course_prerequisites", "get_skills_taught"})
+_D2_SKILL_INTENTS = frozenset({"search_courses_by_skill"})
+
+
+def _normalize_one_sq(
+    sq: StructuredQuery,
+    user_text: str,
+    pre: PreprocessResult,
+    last_referenced: LastReferenced,
+) -> StructuredQuery:
+    """Repair common shape issues in a single LLM-produced StructuredQuery."""
+    try:
+        intent = sq.intent
+        text_for_extraction = sq.original_text or user_text
+
+        # D2: course entity promotion for course-info intents
+        if intent in _D2_COURSE_INTENTS and not sq.entities.course_code:
+            candidate = None
+            # Try entity_candidates first (from LLM — priority order)
+            ec = sq.params.get("entity_candidates")
+            if isinstance(ec, list) and ec:
+                candidate = str(ec[0]).strip()
+            # Then legacy param keys
+            if not candidate:
+                for param_key in ("course_name", "course", "target_course", "entity", "topic"):
+                    if sq.params.get(param_key):
+                        candidate = str(sq.params[param_key]).strip()
+                        break
+            # Fall back to text extraction
+            if not candidate:
+                candidate = extract_d2_course_candidate(text_for_extraction)
+            if candidate:
+                new_entities = sq.entities.model_copy(update={"course_code": candidate})
+                new_params = {**sq.params, "attempted_candidate": candidate}
+                sq = sq.model_copy(update={"entities": new_entities, "params": new_params})
+
+        # D2: skill entity promotion for skill-search intent
+        elif intent in _D2_SKILL_INTENTS and not sq.entities.skill_id:
+            candidate = None
+            # Try skill_candidates first (from LLM)
+            sc = sq.params.get("skill_candidates")
+            if isinstance(sc, list) and sc:
+                candidate = str(sc[0]).strip()
+            # Then entity_candidates
+            if not candidate:
+                ec = sq.params.get("entity_candidates")
+                if isinstance(ec, list) and ec:
+                    candidate = str(ec[0]).strip()
+            # Then legacy param keys
+            if not candidate:
+                for param_key in ("skill_name", "skill", "entity", "topic"):
+                    if sq.params.get(param_key):
+                        candidate = str(sq.params[param_key]).strip()
+                        break
+            if not candidate:
+                candidate = extract_d2_skill_candidate(text_for_extraction)
+            if candidate:
+                new_entities = sq.entities.model_copy(update={"skill_id": candidate})
+                new_params = {**sq.params, "attempted_skill": candidate}
+                sq = sq.model_copy(update={"entities": new_entities, "params": new_params})
+
+        # D6: fill missing record_focus from deterministic detection
+        elif intent == "get_student_record":
+            if not sq.params.get("record_focus"):
+                focus = detect_d6_record_focus(text_for_extraction)
+                if focus and focus in _VALID_RECORD_FOCUSES:
+                    new_params = {**sq.params, "record_focus": focus}
+                    sq = sq.model_copy(update={"params": new_params})
+            if not sq.params.get("response_style"):
+                style = detect_d6_response_style(text_for_extraction)
+                if style and style != "normal":
+                    new_params = {**sq.params, "response_style": style}
+                    sq = sq.model_copy(update={"params": new_params})
+
+    except Exception:
+        pass  # Never crash normalization; return original sq
+    return sq
+
+
+def _normalize_structured_queries_after_llm(
+    sqs: list[StructuredQuery],
+    user_text: str,
+    pre: PreprocessResult,
+    last_referenced: LastReferenced,
+) -> list[StructuredQuery]:
+    """Post-LLM repair: promote entity candidates, fix common shape issues."""
+    result = []
+    for sq in sqs:
+        sq = _normalize_one_sq(sq, user_text, pre, last_referenced)
+        result.append(sq)
+    return result
+
+
 # ── Deterministic Fallback ────────────────────────────────────────────────────
 
 def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[StructuredQuery]:
@@ -273,13 +421,24 @@ def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[Struc
         return [StructuredQuery(intent="out_of_scope", original_text=user_text)]
 
     if pre.reset_signal:
-        from gateway.models.schemas import SessionOverrides
         return [StructuredQuery(
             intent="get_student_record",
             original_text=user_text,
+            params={"record_focus": "reset_assumptions", "response_style": "normal"},
             session_overrides=SessionOverrides(override_action="clear"),
             student_referential_fallback=True,
         )]
+
+    # Assumption-only: override signal present but no follow-up question → acknowledgement
+    if pre.override_signal and not pre.reset_signal:
+        focus = detect_d6_record_focus(user_text)
+        if focus == "assumption_acknowledgement":
+            return [StructuredQuery(
+                intent="get_student_record",
+                original_text=user_text,
+                params={"record_focus": "assumption_acknowledgement", "response_style": "normal"},
+                student_referential_fallback=True,
+            )]
 
     if pre.policy_signal and not pre.override_signal:
         return [StructuredQuery(intent="policy_query", original_text=user_text)]
@@ -301,31 +460,108 @@ def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[Struc
                 entities=EntitySet(course_code=code),
                 params={"depth": depth},
             )]
+        # Course status check when student-referential
+        if pre.student_referential:
+            focus = detect_d6_record_focus(user_text)
+            if focus == "course_status_check":
+                style = detect_d6_response_style(user_text)
+                params: dict = {"record_focus": "course_status_check"}
+                if style != "normal":
+                    params["response_style"] = style
+                return [StructuredQuery(
+                    intent="get_student_record",
+                    original_text=user_text,
+                    entities=EntitySet(course_code=code),
+                    params=params,
+                    student_referential_fallback=True,
+                )]
         return [StructuredQuery(
             intent="get_course_info",
             original_text=user_text,
             entities=EntitySet(course_code=code),
         )]
 
+    # D2: natural language course-info without explicit course code
+    # Guard: skip D2 when the extracted candidate is a student-personal phrase (starts with "my ")
+    # — e.g. "what is my cgpa?" must not route to get_course_info
+    if detect_d2_course_info_verb(lower) or detect_d2_prereq_verb(lower) or detect_d2_skills_taught_verb(lower):
+        candidate = extract_d2_course_candidate(user_text)
+        if candidate and not candidate.lower().startswith("my "):
+            if detect_d2_prereq_verb(lower):
+                depth = "full" if any(kw in lower for kw in ("full", "complete", "entire", "chain", "all prereq", "recursive")) else "direct"
+                return [StructuredQuery(
+                    intent="get_course_prerequisites",
+                    original_text=user_text,
+                    entities=EntitySet(course_code=candidate),
+                    params={"depth": depth, "attempted_candidate": candidate},
+                )]
+            elif detect_d2_skills_taught_verb(lower):
+                return [StructuredQuery(
+                    intent="get_skills_taught",
+                    original_text=user_text,
+                    entities=EntitySet(course_code=candidate),
+                    params={"attempted_candidate": candidate},
+                )]
+            else:
+                return [StructuredQuery(
+                    intent="get_course_info",
+                    original_text=user_text,
+                    entities=EntitySet(course_code=candidate),
+                    params={"attempted_candidate": candidate},
+                )]
+
+    if detect_d2_skill_search_verb(lower):
+        candidate = extract_d2_skill_candidate(user_text)
+        if candidate:
+            return [StructuredQuery(
+                intent="search_courses_by_skill",
+                original_text=user_text,
+                entities=EntitySet(skill_id=candidate),
+                params={"attempted_skill": candidate},
+            )]
+
     if pre.student_referential:
-        if any(kw in lower for kw in ("graduate", "graduation", "how many credits")):
+        if any(kw in lower for kw in ("graduate", "graduation", "how many credits left to graduate")):
             return [StructuredQuery(
                 intent="run_graduation_audit",
                 original_text=user_text,
                 student_referential_fallback=True,
             )]
-        if any(kw in lower for kw in ("plan", "what should i take", "next semester", "recommend courses")):
+        if any(kw in lower for kw in ("plan", "what should i take", "next semester", "recommend courses", "schedule")):
             return [StructuredQuery(
                 intent="plan_semester",
                 original_text=user_text,
                 student_referential_fallback=True,
             )]
-        if any(kw in lower for kw in ("my record", "my progress", "my snapshot", "show my")):
+        # Check for D6 focus
+        focus = detect_d6_record_focus(user_text)
+        if focus or any(kw in lower for kw in ("my record", "my progress", "my snapshot", "show my", "my courses", "my level", "my cgpa", "my gpa", "my standing", "my track", "my semester", "my status")):
+            actual_focus = focus or "progress_summary"
+            style = detect_d6_response_style(user_text)
+            params = {"record_focus": actual_focus}
+            if style != "normal":
+                params["response_style"] = style
             return [StructuredQuery(
                 intent="get_student_record",
                 original_text=user_text,
+                params=params,
                 student_referential_fallback=True,
             )]
+
+    # Even without a student_referential signal, if D6 focus is clearly detectable
+    # (e.g. "only cgpa pls", "what courses have I completed so far?"), route to get_student_record
+    focus = detect_d6_record_focus(user_text)
+    if focus:
+        style = detect_d6_response_style(user_text)
+        params = {"record_focus": focus}
+        if style != "normal":
+            params["response_style"] = style
+        return [StructuredQuery(
+            intent="get_student_record",
+            original_text=user_text,
+            params=params,
+            student_referential_fallback=True,
+        )]
 
     return [_clarification(
         "I couldn't understand your question. Could you clarify? "
@@ -440,10 +676,55 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
     failures: list[str] = []
     failure_info: list[tuple[str, str | None]] = []  # (entity_type, resolver_status)
 
+    # ── Course resolution with entity_candidates fallback ─────────────────────
     course_code, fail, fail_status = _resolve_course(entities.course_code, resolver)
     if fail:
-        failures.append(fail)
-        failure_info.append(("course", fail_status))
+        # Try entity_candidates in priority order before giving up
+        entity_candidates: list[str] = []
+        raw_ec = sq.params.get("entity_candidates")
+        if isinstance(raw_ec, list):
+            entity_candidates = [str(c).strip() for c in raw_ec if c and str(c).strip()]
+        # Skip the primary mention (already tried via _resolve_course)
+        primary_mention = (entities.course_code or "").strip()
+        for cand in entity_candidates:
+            if cand == primary_mention:
+                continue
+            res_cand, fail_cand, _ = _resolve_entity("course", cand, resolver)
+            if res_cand:
+                course_code = res_cand
+                fail = None
+                fail_status = None
+                logger.info(
+                    "QU.resolve_candidate_success intent=%s candidate=%r resolved=%r",
+                    sq.intent, cand, res_cand,
+                )
+                break
+        # If course still failed but intent is course-info — try skill fallback
+        if fail and sq.intent in _D2_COURSE_INTENTS:
+            skill_fallback_mention = primary_mention or (entity_candidates[0] if entity_candidates else None)
+            if skill_fallback_mention:
+                res_skill, fail_skill, _ = _resolve_entity("skill", skill_fallback_mention, resolver)
+                if res_skill:
+                    logger.info(
+                        "QU.topic_fallback intent=%s mention=%r skill=%r -> search_courses_by_skill",
+                        sq.intent, skill_fallback_mention, res_skill,
+                    )
+                    # Reroute: course-intent → search_courses_by_skill with resolved skill
+                    new_entities = EntitySet(skill_id=res_skill)
+                    new_params = {
+                        **sq.params,
+                        "topic_fallback": True,
+                        "original_intent": sq.intent,
+                        "attempted_candidate": primary_mention,
+                    }
+                    return sq.model_copy(update={
+                        "intent": "search_courses_by_skill",
+                        "entities": new_entities,
+                        "params": new_params,
+                    })
+        if fail:
+            failures.append(fail)
+            failure_info.append(("course", fail_status))
 
     role_id, fail, fail_status = _resolve_entity("role", entities.role_id, resolver)
     if fail:
@@ -455,10 +736,31 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
         failures.append(fail)
         failure_info.append(("track", fail_status))
 
+    # ── Skill resolution with skill_candidates fallback ───────────────────────
     skill_id, fail, fail_status = _resolve_entity("skill", entities.skill_id, resolver)
     if fail:
-        failures.append(fail)
-        failure_info.append(("skill", fail_status))
+        # Try skill_candidates in priority order
+        skill_candidates: list[str] = []
+        raw_sc = sq.params.get("skill_candidates")
+        if isinstance(raw_sc, list):
+            skill_candidates = [str(s).strip() for s in raw_sc if s and str(s).strip()]
+        primary_skill = (entities.skill_id or "").strip()
+        for cand in skill_candidates:
+            if cand == primary_skill:
+                continue
+            res_cand, fail_cand, _ = _resolve_entity("skill", cand, resolver)
+            if res_cand:
+                skill_id = res_cand
+                fail = None
+                fail_status = None
+                logger.info(
+                    "QU.resolve_skill_candidate_success intent=%s candidate=%r resolved=%r",
+                    sq.intent, cand, res_cand,
+                )
+                break
+        if fail:
+            failures.append(fail)
+            failure_info.append(("skill", fail_status))
 
     if failures:
         et, st = failure_info[0]
@@ -528,6 +830,24 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
     new_params = sq.params.copy()
     if new_grades or "expected_grades" in new_params:
         new_params["expected_grades"] = new_grades
+
+    # Multi-skill: for search_courses_by_skill, resolve all skill_candidates and store resolved IDs
+    if sq.intent == "search_courses_by_skill":
+        raw_sc = sq.params.get("skill_candidates")
+        if isinstance(raw_sc, list) and raw_sc:
+            resolved_skill_ids: list[str] = []
+            if skill_id:
+                resolved_skill_ids.append(skill_id)
+            primary_skill = (entities.skill_id or "").strip()
+            for cand in raw_sc:
+                cand = str(cand).strip()
+                if not cand or cand == primary_skill:
+                    continue
+                res_cand, _, _ = _resolve_entity("skill", cand, resolver)
+                if res_cand and res_cand not in resolved_skill_ids:
+                    resolved_skill_ids.append(res_cand)
+            if resolved_skill_ids:
+                new_params["resolved_skill_ids"] = resolved_skill_ids
 
     return sq.model_copy(update={
         "entities": new_entities,

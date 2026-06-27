@@ -7,6 +7,8 @@ from typing import Callable, Optional
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+_TRACE = os.getenv("PATHFINDER_TRACE", "").lower() in ("true", "1", "yes")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -142,9 +144,42 @@ async def chat(request: QueryRequest):
     if not ctx:
         raise HTTPException(status_code=404, detail=f"Student {request.student_id!r} not found")
 
-    session, _ = get_or_create_session(
+    session, session_is_new = get_or_create_session(
         request.session_id, request.student_id, ctx, request.user_text,
     )
+
+    if _TRACE:
+        ov = session.overrides
+        lr = session.last_referenced
+        logger.info(
+            "=== PathFinder Turn Start ===\n"
+            "student: %s\n"
+            "session: %s\n"
+            "session_state: %s\n"
+            "query: \"%s\"\n"
+            "last_refs_before:\n"
+            "  course_code: %s\n"
+            "  role_id: %s\n"
+            "  track_id: %s\n"
+            "  skill_id: %s\n"
+            "overrides_before:\n"
+            "  assumed_passed_courses: %s\n"
+            "  assumed_failed_courses: %s\n"
+            "  added_courses: %s\n"
+            "  target_role: %s",
+            _mask_student_id(request.student_id),
+            session.session_id[:8],
+            "new" if session_is_new else "reused",
+            (request.user_text or "")[:120],
+            lr.course_code if lr else None,
+            lr.role_id if lr else None,
+            lr.track_id if lr else None,
+            lr.skill_id if lr else None,
+            len(ov.assumed_passed_courses) if ov.assumed_passed_courses else [],
+            len(ov.assumed_failed_courses) if ov.assumed_failed_courses else [],
+            len(ov.added_courses) if ov.added_courses else [],
+            ov.target_role,
+        )
 
     # 2–4. QU → Orchestrator → Composer pipeline
     try:
@@ -184,6 +219,19 @@ async def chat(request: QueryRequest):
         new_last_referenced=new_last_ref,
         replace_overrides=had_clear,
     )
+
+    if _TRACE:
+        logger.info(
+            "=== PathFinder Turn End ===\n"
+            "sq_intents: %s\n"
+            "sq_statuses: %s\n"
+            "qr_status: %s\n"
+            "answer_len: %d",
+            [r.intent for r in tw.results],
+            [r.status for r in tw.results],
+            qr.status,
+            len(qr.answer_text),
+        )
 
     intent_statuses = {r.intent: r.status for r in tw.results}
     logger.info(

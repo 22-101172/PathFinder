@@ -30,7 +30,12 @@ OUTPUT FORMAT — always a JSON object with a "queries" array:
         "track": "<second track for compare_tracks, else null>",
         "skill": null
       },
-      "params": {},
+      "params": {
+        "entity_type_hint": "<course|skill|role|track — the type the entity is expected to be, based on intent>",
+        "raw_entity_mention": "<the exact phrase the student used to refer to the entity>",
+        "entity_candidates": ["<normalized candidate 1>", "<normalized candidate 2>"],
+        "skill_candidates": ["<skill name 1>", "<skill name 2>"]
+      },
       "session_overrides": {
         "added_courses": [],
         "assumed_passed_courses": [],
@@ -43,6 +48,20 @@ OUTPUT FORMAT — always a JSON object with a "queries" array:
     }
   ]
 }
+
+ENTITY TYPE HINTS — include entity_type_hint in params based on intent:
+- get_course_info / get_course_prerequisites / get_skills_taught / course_status_check → entity_type_hint="course"
+- search_courses_by_skill → entity_type_hint="skill"
+- get_role_profile / compute_skill_gap / compute_alignment_score / recommend_courses_to_close_gap / estimate_alignment_improvement → entity_type_hint="role"
+- get_roles_by_track / get_track_overview / recommend_track_for_role → entity_type_hint="track"
+Always populate entity_type_hint — it helps the resolver try the correct type first.
+
+ENTITY CANDIDATES — use when the surface form needs normalization or the entity is conceptual:
+- Include raw_entity_mention = the exact phrase the student used.
+- Include entity_candidates = normalized candidate strings the resolver should try in priority order.
+- For skill-search intents with multiple possible skills, include skill_candidates list.
+- NEVER include final resolved IDs (C-XXYYYY, RL_*, SK_*, track IDs) as candidates — those belong in entities.
+- The resolver will confirm official IDs from these candidates; do not invent final IDs.
 
 LOCKED INTENTS — use ONLY these 26:
 Academic Planning: plan_semester | generate_graduation_roadmap | run_graduation_audit | \
@@ -67,9 +86,19 @@ INTENT GUIDE (critical mappings):
 - "can I take X / am I eligible for X" → check_course_eligibility (NOT check_eligibility)
 - "prerequisites for X / what do I need before X" → get_course_prerequisites with params.depth="direct" (NOT get_prerequisites)
 - "FULL prerequisites / all prerequisites / complete prerequisite chain / entire prereq tree for X" → get_course_prerequisites with params.depth="full"
-- "courses in AI track / what is in the track" → get_track_overview (NOT get_courses_in_track)
-- "careers in AI track / jobs from track" → get_roles_by_track
+- "tell me about <X> / talk to me about <X> / what about <X> / give me info about <X> / explain <X> / what is <X> / is <X> a course / how many credits is <X>" → get_course_info; extract X as course entity (name or code); NOT clarification_needed when a subject/course name is present
+- "prerequisites of <X> / prereq of <X> / what do I need before <X> / complete prereq chain of <X> / show full prerequisites of <X>" → get_course_prerequisites; extract X as course entity; depth="full" when "full/complete/entire/chain" present, else "direct"
+- "skills does <X> teach / skills taught by <X> / what will I learn in <X>" → get_skills_taught; extract X as course entity
+- "which courses teach <X> / what courses teach <X> / courses for <X> / where can I learn <X> / what courses make me better at <X>" → search_courses_by_skill; extract X as skill entity; NOT get_course_info
+- "courses in X track / what is in the track" → get_track_overview (NOT get_courses_in_track)
+- "careers in X track / jobs from track" → get_roles_by_track
 - "what courses teach X / which courses cover X / courses that teach databases / courses for learning X" → search_courses_by_skill; extract skill entity = X (NOT get_course_info; NOT get_roles_by_skill)
+- "can I take <X> / am I eligible for <X>" → check_course_eligibility; this is D1, NOT D2
+- course-info verb + OOP/web dev/statistics/NLP/AI etc. → resolve as course name; do NOT treat as skill
+- skill-search verb + X → resolve as skill; do NOT treat as course code
+- For follow-ups: "it" / "that course" / "its prerequisites" → use last_course from context (only if last_course is a course, not a skill)
+- Short entity-only follow-ups like "statistics", "oop course", "web programming" when previous context was course-info → attempt course resolution
+- "all courses I failed ever / failed history / failed at some point / even if I retook them" → get_student_record, params.record_focus="failed_course_history"
 - "what roles need Python / roles for a skill" → clarification_needed (no locked intent maps skill→roles; do NOT use search_courses_by_skill, NOT get_roles_by_skill)
 - "focus/core/key/important courses for [role/track]" (general wording, no personal pronouns) → get_focus_courses_for_target; student_referential_fallback=false; NEVER clarification_needed when a clear role or track is mentioned
 - "what focus/important courses should I still take / which focus courses have I not completed / what focus courses are left for me / based on my courses, what focus courses should I prioritize" → get_focus_courses_for_target; student_referential_fallback=true; personal trigger words: "still", "remaining", "left", "not completed", "haven't taken", "based on my"; NEVER clarification_needed when role/track is clear
@@ -80,6 +109,22 @@ INTENT GUIDE (critical mappings):
 - "if I get A in X and B in Y, can my GPA reach 2.0?" → simulate_gpa_forward (specific grades given + target check, NOT solve_target_gpa); put grades in params.expected_grades; student_referential_fallback=true
 - "what grades do I need to reach 3.5 / 2.0 gpa / can I reach 3.7 / is it possible to achieve GPA X" → solve_target_gpa; MUST include the target as params.target_gpa (numeric, e.g. 2.0 or 3.5); student_referential_fallback=true
 - "show my record / my progress" → get_student_record
+- "what is my level / academic level / what year am I" → get_student_record, params.record_focus="academic_level" (NOT clarification_needed — "level" in student context always means academic year)
+- "what is my CGPA / GPA / only my cgpa" → get_student_record, params.record_focus="cgpa"; if user says "only/just", also params.response_style="only"
+- "Assume I failed X." (standalone, no follow-up question) → get_student_record, params.record_focus="assumption_acknowledgement", assumed_failed_courses:[X], course_override_type:"assumed_failed"; (with follow-up "what should I take next / what happens to my plan" → plan_semester as before)
+- "Assume I passed X." (standalone) → get_student_record, params.record_focus="assumption_acknowledgement", assumed_passed_courses:[X], course_override_type:"assumed_passed"
+- "did I take X / am I taking X / did I pass X / did I fail X" → get_student_record, params.record_focus="course_status_check"; if user says "just yes or no" → also params.response_style="yes_no"
+- "what courses am I taking now / current courses" → get_student_record, params.record_focus="in_progress_courses"
+- "what courses did I complete / completed so far / what have I passed" → get_student_record, params.record_focus="completed_courses"
+- "did I fail anything / what did I fail / my failed courses" → get_student_record, params.record_focus="failed_courses"
+- "my academic standing / am I in good standing / am I in danger / am I cooked academically" → get_student_record, params.record_focus="academic_standing"
+- "am I on probation / academic probation" → get_student_record, params.record_focus="probation_status"
+- "how many warnings / any academic warnings" → get_student_record, params.record_focus="academic_warnings"
+- "how many credits have I completed / credit hours earned" → get_student_record, params.record_focus="completed_credits"
+- "my last semester GPA / GPA last semester" → get_student_record, params.record_focus="last_semester_gpa"
+- "my track / what track am I in" → get_student_record, params.record_focus="track"
+- "current semester / what semester am I in" → get_student_record, params.record_focus="current_semester"
+- response_style: add to params when clear → "only/just [field]" → response_style="only"; "yes or no" → response_style="yes_no"; "one sentence" → response_style="one_sentence"; "briefly/quick" → response_style="concise"
 - "am I on probation / in academic danger / at risk academically / am I failing?" → get_student_record (student_referential_fallback=true) — academic_standing field will show warning/good
 - "how many credits can I register / take next semester (with my GPA)?" → TWO queries: [get_student_record, policy_query]; get_student_record gives their CGPA; policy_query original_text="What is the maximum credit hours a student can register based on CGPA?" — combining both lets the Composer give a personalized credit-limit answer
 - "assume I failed X, what happens to my plan / what now / what should I do" → plan_semester or generate_graduation_roadmap with assumed_failed_courses:[X], course_override_type:"assumed_failed" — NOT policy_query; policy_query is only for explicit rule/regulation questions
@@ -201,6 +246,73 @@ Input: "what are the full prerequisites of Data Structures?"
 
 Input: "what courses teach databases?"
 {"queries":[{"intent":"search_courses_by_skill","original_text":"what courses teach databases?","entities":{"course_code":null,"role":null,"track":null,"skill":"database"},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "what is my level?"
+{"queries":[{"intent":"get_student_record","original_text":"What is my academic level?","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"record_focus":"academic_level"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "only cgpa pls"
+{"queries":[{"intent":"get_student_record","original_text":"Only tell me my CGPA.","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"record_focus":"cgpa","response_style":"only"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "Assume I failed Programming Fundamentals."
+{"queries":[{"intent":"get_student_record","original_text":"Assume I failed Programming Fundamentals.","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"record_focus":"assumption_acknowledgement"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":["Programming Fundamentals"],"target_role":null,"course_override_type":"assumed_failed","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "just answer yes or no: am I taking Advanced Physics now?"
+{"queries":[{"intent":"get_student_record","original_text":"Am I taking Advanced Physics now?","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"record_focus":"course_status_check","response_style":"yes_no"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "what courses am I taking now?"
+{"queries":[{"intent":"get_student_record","original_text":"What courses am I taking now?","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"record_focus":"in_progress_courses"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "am i cooked academically?"
+{"queries":[{"intent":"get_student_record","original_text":"Am I in academic danger?","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"record_focus":"academic_standing"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "tell me about Advanced Programming"
+{"queries":[{"intent":"get_course_info","original_text":"Tell me about Advanced Programming","entities":{"course_code":"Advanced Programming","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "tell me about intro to statistics"
+{"queries":[{"intent":"get_course_info","original_text":"Tell me about Intro to Statistics","entities":{"course_code":"Intro to Statistics","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "Give me info about Digital Logic."
+{"queries":[{"intent":"get_course_info","original_text":"Give me info about Digital Logic.","entities":{"course_code":"Digital Logic","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "Is Technical Writing a course?"
+{"queries":[{"intent":"get_course_info","original_text":"Is Technical Writing a course?","entities":{"course_code":"Technical Writing","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "show the complete prerequisite chain of NLP"
+{"queries":[{"intent":"get_course_prerequisites","original_text":"Show the complete prerequisite chain of NLP","entities":{"course_code":"NLP","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"depth":"full"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "What skills does Intro to Machine Learning teach?"
+{"queries":[{"intent":"get_skills_taught","original_text":"What skills does Intro to Machine Learning teach?","entities":{"course_code":"Intro to Machine Learning","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "Which courses teach machine learning?"
+{"queries":[{"intent":"search_courses_by_skill","original_text":"Which courses teach machine learning?","entities":{"course_code":null,"role":null,"track":null,"skill":"machine learning"},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "Where can I learn NLP?"
+{"queries":[{"intent":"search_courses_by_skill","original_text":"Where can I learn NLP?","entities":{"course_code":null,"role":null,"track":null,"skill":"NLP"},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "Can I take Advanced Programming?"
+{"queries":[{"intent":"check_course_eligibility","original_text":"Can I take Advanced Programming?","entities":{"course_code":"Advanced Programming","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "all courses I failed even if I retook and succeeded"
+{"queries":[{"intent":"get_student_record","original_text":"All courses I failed even if I retook and succeeded","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"record_focus":"failed_course_history"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "what skills does the probability & statistics course teach?"
+{"queries":[{"intent":"get_skills_taught","original_text":"what skills does the probability & statistics course teach?","entities":{"course_code":"probability and statistics","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"entity_type_hint":"course","raw_entity_mention":"probability & statistics","entity_candidates":["probability and statistics","intro to probability and statistics","probability and statistics course"]},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "talk to me about the course that teaches us how machine learns"
+{"queries":[{"intent":"get_course_info","original_text":"talk to me about the course that teaches us how machine learns","entities":{"course_code":"machine learning","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"entity_type_hint":"course","raw_entity_mention":"course that teaches us how machine learns","entity_candidates":["machine learning","intro to machine learning","introduction to machine learning"]},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "what courses teach how machines learn?"
+{"queries":[{"intent":"search_courses_by_skill","original_text":"what courses teach how machines learn?","entities":{"course_code":null,"role":null,"track":null,"skill":"machine learning"},"secondary_entities":null,"params":{"entity_type_hint":"skill","raw_entity_mention":"how machines learn","skill_candidates":["machine learning"]},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "what courses teach oop?"
+{"queries":[{"intent":"search_courses_by_skill","original_text":"what courses teach oop?","entities":{"course_code":null,"role":null,"track":null,"skill":"object-oriented programming"},"secondary_entities":null,"params":{"entity_type_hint":"skill","raw_entity_mention":"oop","skill_candidates":["object-oriented programming","oop"]},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "tell me about software engineering"
+{"queries":[{"intent":"clarification_needed","original_text":"tell me about software engineering","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"ambiguity_type":"entity_type","raw_mention":"software engineering","candidate_types":["course","track","role"],"clarification_prompt":"Are you asking about Software Engineering as an academic track, a course in the curriculum, or a career role?"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "talk to me about oop"
+{"queries":[{"intent":"get_course_info","original_text":"talk to me about oop","entities":{"course_code":"object-oriented programming","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"entity_type_hint":"course","raw_entity_mention":"oop","entity_candidates":["object-oriented programming","oop"]},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
 """
 
 

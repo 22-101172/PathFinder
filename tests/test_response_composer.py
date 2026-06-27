@@ -37,6 +37,7 @@ from gateway.response_composer import (
     _fmt_skill_label,
     _fmt_track_label,
     _map_turn_status,
+    _render_course_detail,
 )
 
 
@@ -1358,3 +1359,483 @@ class TestComposerLogging:
         msg = result_logs[0].message
         assert "llm_used=False" in msg
         assert "fallback_reason=llm_disabled" in msg
+
+
+# ── D6 student-record course enrichment rendering (Phase 2) ──────────────────
+
+class TestDomain6CourseDetailRendering:
+    """Verify Composer renders enriched course details name-first."""
+
+    def test_render_course_detail_name_present(self):
+        d = {"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}
+        assert _render_course_detail(d) == "Programming Fundamentals (C-CS112)"
+
+    def test_render_course_detail_name_none_graceful_label(self):
+        # course_name=None means KG profile lookup failed — expect graceful label, not raw None
+        d = {"course_code": "C-CS112", "course_name": None, "credits": 3}
+        result = _render_course_detail(d)
+        assert "C-CS112" in result
+        assert "not available" in result
+
+    def test_render_course_detail_name_empty_string_falls_back_to_code(self):
+        d = {"course_code": "HUM111", "course_name": "", "credits": 2}
+        assert _render_course_detail(d) == "HUM111"
+
+    def test_extract_student_record_picks_up_detail_fields(self):
+        details = [{"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}]
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={
+                "cgpa": 3.48,
+                "track_id": "AI",
+                "completed_course_details": details,
+                "in_progress_course_details": [],
+                "failed_course_details": [],
+            },
+        )
+        p = _extract_packet(r)
+        assert "completed_course_details" in p
+        assert p["completed_course_details"] == details
+
+    def test_deterministic_renders_completed_name_first(self):
+        details = [
+            {"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3},
+            {"course_code": "HUM111", "course_name": "Humanities I", "credits": 2},
+        ]
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"cgpa": 3.48, "track_id": "AI", "completed_course_details": details},
+        )
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "Programming Fundamentals (C-CS112)" in answer
+        assert "Humanities I (HUM111)" in answer
+        # code-only form must NOT appear without name
+        assert "• C-CS112" not in answer
+        assert "• HUM111" not in answer
+
+    def test_deterministic_renders_in_progress_name_first(self):
+        details = [
+            {"course_code": "C-MA112", "course_name": "Calculus II", "credits": 3},
+            {"course_code": "C-PH112", "course_name": "Advanced Physics", "credits": 3},
+        ]
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"cgpa": 3.48, "track_id": "SWE", "in_progress_course_details": details},
+        )
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "Calculus II (C-MA112)" in answer
+        assert "Advanced Physics (C-PH112)" in answer
+
+    def test_deterministic_renders_failed_name_first(self):
+        details = [{"course_code": "C-CS111", "course_name": "Intro to CS", "credits": 3}]
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"cgpa": 1.80, "track_id": "AI", "failed_course_details": details},
+        )
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "Intro to CS (C-CS111)" in answer
+
+    def test_deterministic_code_only_fallback_when_name_none(self):
+        """When course_name is None, code must appear in the list without fabricated name."""
+        details = [{"course_code": "C-CS999", "course_name": None, "credits": None}]
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"cgpa": 3.0, "track_id": "AI", "completed_course_details": details},
+        )
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "C-CS999" in answer
+        # Must not invent a name
+        assert "(" not in answer or "C-CS999" in answer
+
+    def test_deterministic_falls_back_to_raw_codes_if_no_details(self):
+        """If only completed_courses (not details) is present, still shows count."""
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"cgpa": 3.0, "track_id": "AI", "completed_courses": ["C-CS111", "C-CS112"]},
+        )
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "2" in answer or "course" in answer.lower()
+
+    def test_no_generic_filler_in_deterministic_answer(self):
+        """Deterministic student-record answer must not append 'Let me know' filler."""
+        details = [{"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}]
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"cgpa": 3.48, "track_id": "AI", "in_progress_course_details": details},
+        )
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "let me know" not in answer.lower()
+        assert "if you need" not in answer.lower()
+        assert "further details" not in answer.lower()
+
+    def test_no_raw_dict_in_answer(self):
+        """Course detail dicts must never appear as raw Python repr in the answer."""
+        details = [{"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}]
+        r = PerSQResult(
+            sq_index=0, intent="get_student_record", status="success",
+            data={"cgpa": 3.48, "track_id": "AI", "completed_course_details": details},
+        )
+        answer = _deterministic_answer([_extract_packet(r)])
+        assert "{'course_code'" not in answer
+        assert '"course_code"' not in answer
+
+
+class TestD6FocusNarration:
+    """Verify focus-aware deterministic narration for get_student_record."""
+
+    def _make_packet(self, **kwargs) -> dict:
+        defaults = {
+            "intent": "get_student_record",
+            "status": "success",
+            "cgpa": 3.48,
+            "track_id": "SWE",
+            "level": 2,
+            "level_display": "Sophomore",
+            "academic_standing": "good",
+            "current_semester": "Spring 2026",
+            "total_credit_hours_earned": 16,
+            "consecutive_warnings": 0,
+            "total_warnings": 0,
+            "study_status": "Studying",
+            "completed_course_details": [],
+            "in_progress_course_details": [],
+            "failed_course_details": [],
+            "completed_courses": [],
+            "in_progress_courses": [],
+            "failed_courses": [],
+            "assumed_failed_courses": [],
+            "assumed_passed_courses": [],
+            "record_focus": "full_record",
+            "response_style": "normal",
+        }
+        defaults.update(kwargs)
+        return defaults
+
+    def _answer(self, **kwargs) -> str:
+        packet = self._make_packet(**kwargs)
+        return _deterministic_answer([packet])
+
+    def test_cgpa_focus_shows_only_cgpa(self):
+        answer = self._answer(record_focus="cgpa")
+        assert "3.48" in answer
+
+    def test_cgpa_focus_does_not_show_full_record(self):
+        answer = self._answer(record_focus="cgpa")
+        assert "Completed" not in answer
+        assert "In-progress" not in answer
+
+    def test_academic_level_focus_shows_level_display(self):
+        answer = self._answer(record_focus="academic_level")
+        assert "Level 2" in answer
+        assert "Sophomore" in answer
+
+    def test_academic_level_none_shows_not_available(self):
+        answer = self._answer(record_focus="academic_level", level=None, level_display=None)
+        assert "not available" in answer.lower()
+
+    def test_academic_standing_good_shows_not_in_danger(self):
+        answer = self._answer(record_focus="academic_standing")
+        assert "good" in answer.lower()
+
+    def test_academic_standing_warning_shows_warning(self):
+        answer = self._answer(record_focus="academic_standing", academic_standing="warning")
+        assert "warning" in answer.lower()
+
+    def test_last_semester_gpa_focus_shows_gpa(self):
+        answer = self._answer(record_focus="last_semester_gpa", last_semester_gpa=3.75)
+        assert "3.75" in answer
+
+    def test_last_semester_gpa_missing_shows_not_available(self):
+        answer = self._answer(record_focus="last_semester_gpa", last_semester_gpa=None)
+        assert "not available in our records" in answer.lower()
+        assert "packet" not in answer.lower()
+
+    def test_assumption_acknowledgement_shows_ack_message(self):
+        answer = self._answer(
+            record_focus="assumption_acknowledgement",
+            assumed_failed_courses=["C-CS112"],
+            failed_course_details=[{"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}],
+        )
+        assert "what-if assumption" in answer.lower()
+        assert "official academic record is unchanged" in answer.lower()
+        assert "Programming Fundamentals" in answer
+
+    def test_assumption_acknowledgement_does_not_show_full_record(self):
+        answer = self._answer(
+            record_focus="assumption_acknowledgement",
+            assumed_failed_courses=["C-CS112"],
+        )
+        assert "CGPA" not in answer or "3.48" not in answer
+
+    def test_reset_assumptions_cleared_shows_exact_wording(self):
+        answer = self._answer(
+            record_focus="reset_assumptions",
+            assumptions_cleared=True,
+            message="I cleared your what-if assumptions. You are back to your official academic record.",
+        )
+        assert "I cleared your what-if assumptions." in answer
+        assert "You are back to your official academic record." in answer
+        assert "Completed" not in answer  # no full record dump
+
+    def test_completed_courses_focus_shows_name_first(self):
+        details = [{"course_code": "C-CS111", "course_name": "Intro to CS", "credits": 3}]
+        answer = self._answer(
+            record_focus="completed_courses",
+            completed_course_details=details,
+            completed_courses=["C-CS111"],
+        )
+        assert "Intro to CS (C-CS111)" in answer
+
+    def test_in_progress_courses_focus_shows_name_first(self):
+        details = [{"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}]
+        answer = self._answer(
+            record_focus="in_progress_courses",
+            in_progress_course_details=details,
+            in_progress_courses=["C-CS112"],
+        )
+        assert "Programming Fundamentals (C-CS112)" in answer
+
+    def test_failed_courses_no_fails_shows_none_message(self):
+        answer = self._answer(record_focus="failed_courses", failed_course_details=[], failed_courses=[])
+        assert "no failed courses" in answer.lower()
+
+    def test_completed_credits_focus_shows_credits(self):
+        answer = self._answer(record_focus="completed_credits", total_credit_hours_earned=16)
+        assert "16" in answer
+        assert "credit" in answer.lower()
+
+    def test_track_focus_shows_track(self):
+        answer = self._answer(record_focus="track")
+        assert "Software Engineering" in answer or "SWE" in answer
+
+    def test_no_internal_terms_in_answer(self):
+        """Composer must never expose internal terms like 'packet' in user-facing output."""
+        for focus in ["cgpa", "academic_level", "last_semester_gpa", "full_record"]:
+            answer = self._answer(record_focus=focus)
+            assert "packet" not in answer.lower(), f"'packet' found in {focus} answer"
+            assert "orchestrator" not in answer.lower()
+
+    def test_friendly_ending_suppressed_for_only_style(self):
+        details = [{"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}]
+        answer = self._answer(
+            record_focus="in_progress_courses",
+            response_style="only",
+            in_progress_course_details=details,
+            in_progress_courses=["C-CS112"],
+        )
+        assert "let me know" not in answer.lower()
+        assert "if you need" not in answer.lower()
+        assert "good luck" not in answer.lower()
+
+    def test_full_record_shows_level_display(self):
+        answer = self._answer(record_focus="full_record")
+        assert "Sophomore" in answer or "Level 2" in answer
+
+    def test_official_vs_whatsif_shown_when_assumptions_active(self):
+        answer = self._answer(
+            record_focus="full_record",
+            override_state_active=True,
+            assumed_failed_courses=["C-CS112"],
+            assumed_passed_courses=[],
+            failed_course_details=[{"course_code": "C-CS112", "course_name": "Programming Fundamentals", "credits": 3}],
+            failed_courses=["C-CS112"],
+        )
+        assert "what-if" in answer.lower()
+
+    def test_scenario_credits_shown_when_different(self):
+        answer = self._answer(
+            record_focus="completed_credits",
+            total_credit_hours_earned=16,
+            scenario_completed_credits=19,
+        )
+        assert "16" in answer
+        assert "19" in answer
+
+
+# ── Phase 2 Behavioral Stabilization Tests ─────────────────────────────────────
+
+
+class TestPhase2D3RolesByTrackShape:
+    """D3 Composer: get_roles_by_track handles KG result shape (results vs roles, track vs track_name)."""
+
+    def _extract(self, kg_data: dict) -> dict:
+        r = PerSQResult(sq_index=0, intent="get_roles_by_track", status="success", data=kg_data)
+        return _extract_packet(r)
+
+    def test_roles_key_passed_through(self):
+        data = {"track_id": "AI", "track_name": "Artificial Intelligence", "roles": [
+            {"role_id": "RL_Data_Scientist", "name": "Data Scientist"}
+        ]}
+        packet = self._extract(data)
+        assert packet["roles"]
+        assert packet["track_id"] == "AI"
+
+    def test_results_key_normalized_to_roles(self):
+        """KG returning 'results' instead of 'roles' must be normalized."""
+        data = {"track_id": "AI", "track": "AI", "total_results": 2, "results": [
+            {"role_id": "RL_Data_Scientist", "name": "Data Scientist"},
+            {"role_id": "RL_ML_Engineer", "name": "ML Engineer"},
+        ]}
+        packet = self._extract(data)
+        assert "roles" in packet
+        assert len(packet["roles"]) == 2
+        assert packet["total_results"] == 2
+
+    def test_track_key_normalized_to_track_name(self):
+        """KG returning 'track' instead of 'track_name' must be normalized."""
+        data = {"track_id": "DSE", "track": "DSE", "results": [
+            {"role_id": "RL_Data_Engineer", "name": "Data Engineer"}
+        ]}
+        packet = self._extract(data)
+        assert packet.get("track_name") == "DSE"
+
+    def test_narration_never_says_no_roles_when_results_present(self):
+        """Never say 'no roles found' when results/roles is non-empty."""
+        data = {"track_id": "AI", "track": "AI", "results": [
+            {"role_id": "RL_Data_Scientist", "name": "Data Scientist"},
+        ]}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        assert "no roles" not in answer.lower()
+        assert "Data Scientist" in answer
+
+    def test_narration_uses_track_name_when_track_key(self):
+        data = {"track_id": "SWE", "track": "SWE", "results": [
+            {"role_id": "RL_Software_Engineer", "name": "Software Engineer"},
+        ]}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        # Should mention software engineer role
+        assert "Software Engineer" in answer
+
+
+class TestPhase2D3RoleProfileShape:
+    """D3 Composer: get_role_profile handles both 'name' and 'role_name' from KG."""
+
+    def _extract(self, kg_data: dict) -> dict:
+        r = PerSQResult(sq_index=0, intent="get_role_profile", status="success", data=kg_data)
+        return _extract_packet(r)
+
+    def test_name_field_used_directly(self):
+        data = {"role_id": "RL_Data_Scientist", "name": "Data Scientist",
+                "description": "Works with data."}
+        packet = self._extract(data)
+        assert packet["name"] == "Data Scientist"
+
+    def test_role_name_normalized_to_name(self):
+        """KG returning 'role_name' instead of 'name' must be normalized."""
+        data = {"role_id": "RL_Data_Scientist", "role_name": "Data Scientist",
+                "description": "Works with data."}
+        packet = self._extract(data)
+        assert packet.get("name") == "Data Scientist"
+
+    def test_narration_shows_role_name(self):
+        data = {"role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+                "description": "Builds ML models."}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        assert "ML Engineer" in answer
+
+    def test_no_raw_rl_ids_in_narration(self):
+        data = {"role_id": "RL_Data_Scientist", "role_name": "Data Scientist"}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        # Friendly name shown, not raw RL_* ID
+        assert "Data Scientist" in answer
+
+
+class TestPhase2EstimateAlignmentImprovement:
+    """estimate_alignment_improvement never outputs 'is ready' without actual data."""
+
+    def _extract(self, data: dict) -> dict:
+        r = PerSQResult(sq_index=0, intent="estimate_alignment_improvement",
+                        status="success", data=data)
+        return _extract_packet(r)
+
+    def test_shows_actual_values_when_present(self):
+        data = {"role_id": "RL_Data_Scientist", "role_name": "Data Scientist",
+                "current_alignment": 0.4, "new_alignment": 0.65}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        assert "40%" in answer or "0.4" in answer or "40" in answer
+        assert "65%" in answer or "0.65" in answer or "65" in answer
+        assert "ready" not in answer.lower()
+
+    def test_no_ready_when_values_missing(self):
+        data = {"role_id": "RL_Data_Scientist", "role_name": "Data Scientist"}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        assert "ready" not in answer.lower()
+        # Should explain cannot compute
+        assert any(w in answer.lower() for w in ("could not", "cannot", "make sure", "identified"))
+
+    def test_no_ready_when_message_contains_ready(self):
+        data = {"role_id": "RL_Data_Scientist", "role_name": "Data Scientist",
+                "message": "Alignment improvement estimate is ready."}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        assert "ready" not in answer.lower()
+
+    def test_delta_shown_in_improvement(self):
+        data = {"role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+                "current_alignment": 0.3, "new_alignment": 0.7}
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        # Should show both values and a delta
+        assert "30%" in answer or "0.3" in answer
+        assert "70%" in answer or "0.7" in answer
+
+
+class TestPhase2MissingCourseKGProfile:
+    """Completed-course list handles missing KG profiles gracefully."""
+
+    def test_render_missing_profile_shows_code_and_message(self):
+        """_render_course_detail with course_name=None shows graceful label."""
+        detail = {"course_code": "C-GP411", "course_name": None, "credits": None}
+        result = _render_course_detail(detail)
+        assert "C-GP411" in result
+        assert "not available" in result
+
+    def test_render_normal_profile_unchanged(self):
+        detail = {"course_code": "C-CS111", "course_name": "Intro to CS", "credits": 3}
+        result = _render_course_detail(detail)
+        assert "Intro to CS" in result
+        assert "C-CS111" in result
+
+    def test_render_empty_name_returns_code(self):
+        """Empty string course_name (no KG entry) returns just the code."""
+        detail = {"course_code": "C-CS999", "course_name": "", "credits": None}
+        result = _render_course_detail(detail)
+        assert "C-CS999" in result
+        # No "not available" label for empty string — that's not a KG error
+        assert "not available" not in result
+
+
+class TestPhase2CoursesBySkillTopicFallback:
+    """search_courses_by_skill shows topic fallback explanation when course intent rerouted."""
+
+    def _extract(self, data: dict) -> dict:
+        r = PerSQResult(sq_index=0, intent="search_courses_by_skill",
+                        status="success", data=data)
+        return _extract_packet(r)
+
+    def test_topic_fallback_flag_triggers_reroute_explanation(self):
+        data = {
+            "skill_id": "SK_OOP", "skill_name": "Object-Oriented Programming",
+            "courses": [{"course_code": "C-CS219", "name": "Advanced Programming"}],
+            "topic_fallback": True,
+            "original_mention": "oop",
+        }
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        assert "oop" in answer.lower() or "not see" in answer.lower() or "don't see" in answer.lower()
+
+    def test_no_fallback_flag_normal_narration(self):
+        data = {
+            "skill_id": "SK_ML", "skill_name": "Machine Learning",
+            "courses": [{"course_code": "C-AI301", "name": "Intro to Machine Learning"}],
+        }
+        packet = self._extract(data)
+        answer = _deterministic_answer([packet])
+        assert "Machine Learning" in answer
+        assert "don't see" not in answer.lower()

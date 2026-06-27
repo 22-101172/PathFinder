@@ -191,3 +191,342 @@ def extract_expected_grades(text: str) -> dict[str, str]:
         course = m.group(2).upper()
         grades[course] = grade
     return grades
+
+
+# ── D2 Course Candidate Extraction ────────────────────────────────────────────
+
+# Verb patterns that strongly suggest "tell me about <course>" intent
+_D2_COURSE_INFO_VERBS_RE = re.compile(
+    r'(?:tell\s+me\s+about|talk\s+(?:to\s+me\s+)?about|'
+    r'what\s+(?:about|is)\s+|give\s+me\s+info(?:rmation)?\s+(?:about|on)|'
+    r'inform\s+me\s+(?:about|on)|explain\s+|describe\s+|'
+    r'is\s+\w+\s+a\s+course|'
+    r'how\s+many\s+credits\s+is\s+|what\s+level\s+is\s+|'
+    r'course\s+description\s+for\s+|'
+    r'what\s+will\s+i\s+learn\s+in\s+)',
+    re.IGNORECASE,
+)
+
+# Verb patterns for prerequisites
+_D2_PREREQ_VERBS_RE = re.compile(
+    r'(?:prerequisites?\s+(?:of|for)|prereqs?\s+(?:of|for)|'
+    r'what\s+do\s+i\s+need\s+(?:before|for)|before\s+taking|'
+    r'(?:complete\s+)?prerequisite\s+chain\s+(?:of|for)|'
+    r'full\s+prereqs?\s+(?:of|for)|'
+    r'what\s+(?:courses?\s+)?do\s+i\s+need\s+(?:to\s+take\s+)?before)',
+    re.IGNORECASE,
+)
+
+# Verb patterns for skills taught
+_D2_SKILLS_TAUGHT_VERBS_RE = re.compile(
+    r'(?:skills?\s+(?:does|do|taught\s+by|in)|'
+    r'what\s+will\s+i\s+learn\s+in|'
+    r'what\s+do\s+i\s+learn\s+(?:in|from)|'
+    r'what\s+skills?\s+(?:will|does|can)\s+(?:i\s+)?(?:learn|get|gain)\s+(?:in|from)|'
+    r'what\s+(?:is|are)\s+taught\s+(?:in|by))',
+    re.IGNORECASE,
+)
+
+# Verb patterns for skill search (which courses teach X)
+_D2_SKILL_SEARCH_VERBS_RE = re.compile(
+    r'(?:which\s+courses?\s+teach|what\s+courses?\s+teach|'
+    r'courses?\s+that\s+teach|courses?\s+for\s+|'
+    r'where\s+can\s+i\s+learn|what\s+teaches|'
+    r'what\s+courses?\s+cover|subjects?\s+that?\s+teach|'
+    r'what\s+courses?\s+make\s+me\s+better\s+at)',
+    re.IGNORECASE,
+)
+
+# Extract the course/subject name after a D2 info verb
+_D2_COURSE_AFTER_VERB_RE = re.compile(
+    r'(?:tell\s+me\s+about|talk\s+(?:to\s+me\s+)?about|'
+    r'what\s+about|give\s+me\s+info(?:rmation)?\s+(?:about|on)|'
+    r'inform\s+me\s+(?:about|on)|explain\s+|describe\s+|'
+    r'what\s+is\s+|'
+    r'how\s+many\s+credits\s+is\s+|what\s+level\s+is\s+|'
+    r'course\s+description\s+for\s+|'
+    r'what\s+will\s+i\s+learn\s+in\s+|'
+    r'is\s+(.+?)\s+a\s+course)'
+    r'\s*([^?!,\n]{2,60})',
+    re.IGNORECASE,
+)
+
+# Extract skill candidate from "courses for X / where can I learn X / which courses teach X"
+_D2_SKILL_AFTER_VERB_RE = re.compile(
+    r'(?:which\s+courses?\s+teach|what\s+courses?\s+teach|'
+    r'courses?\s+(?:that\s+teach|for)|'
+    r'where\s+can\s+i\s+learn|what\s+teaches|'
+    r'what\s+courses?\s+cover|subjects?\s+(?:that\s+)?teach|'
+    r'what\s+courses?\s+make\s+me\s+better\s+at)'
+    r'\s+([^?!,\n]{2,60})',
+    re.IGNORECASE,
+)
+
+# Extract course name from "prerequisites of X / prereq of X / complete prereq chain of X"
+_D2_PREREQ_AFTER_VERB_RE = re.compile(
+    r'(?:prerequisites?\s+(?:of|for)|prereqs?\s+(?:of|for)|'
+    r'(?:complete\s+)?prerequisite\s+chain\s+(?:of|for)|'
+    r'full\s+prereqs?\s+(?:of|for)|'
+    r'what\s+do\s+i\s+need\s+before\s+taking\s+|before\s+taking\s+)'
+    r'\s*([^?!,\n]{2,60})',
+    re.IGNORECASE,
+)
+
+# Extract course name from "skills does X teach / skills taught by X"
+_D2_SKILLS_COURSE_AFTER_VERB_RE = re.compile(
+    r'(?:skills?\s+(?:does|do)\s+|skills?\s+(?:taught|given)\s+by\s+|'
+    r'what\s+(?:will\s+i\s+)?learn\s+(?:in|from)\s+|'
+    r'what\s+(?:is|are)\s+taught\s+(?:in|by)\s+)'
+    r'([^?!,\n]{2,60})',
+    re.IGNORECASE,
+)
+
+
+def detect_d2_course_info_verb(text: str) -> bool:
+    """Return True if text contains a course-info request verb pattern."""
+    return bool(_D2_COURSE_INFO_VERBS_RE.search(text))
+
+
+def detect_d2_prereq_verb(text: str) -> bool:
+    """Return True if text contains a prerequisite-request verb pattern."""
+    return bool(_D2_PREREQ_VERBS_RE.search(text))
+
+
+def detect_d2_skills_taught_verb(text: str) -> bool:
+    """Return True if text contains a skills-taught verb pattern."""
+    return bool(_D2_SKILLS_TAUGHT_VERBS_RE.search(text))
+
+
+def detect_d2_skill_search_verb(text: str) -> bool:
+    """Return True if text contains a skill-search (which-courses-teach) verb pattern."""
+    return bool(_D2_SKILL_SEARCH_VERBS_RE.search(text))
+
+
+def extract_d2_course_candidate(text: str) -> str | None:
+    """
+    Extract a course name/mention candidate from D2 course-info patterns.
+    Returns the candidate string or None.
+    """
+    # Try skills-taught pattern first ("what does X teach", "skills taught by X")
+    m = _D2_SKILLS_COURSE_AFTER_VERB_RE.search(text)
+    if m:
+        candidate = m.group(1).strip().rstrip(".,?!")
+        if candidate and len(candidate) > 1:
+            return candidate
+
+    # Try prereq pattern ("prereq of X", "before X")
+    m = _D2_PREREQ_AFTER_VERB_RE.search(text)
+    if m:
+        candidate = m.group(1).strip().rstrip(".,?!")
+        if candidate and len(candidate) > 1:
+            return candidate
+
+    # Try general course-info verb pattern ("tell me about X")
+    m = _D2_COURSE_AFTER_VERB_RE.search(text)
+    if m:
+        # group 2 is the extracted name (group 1 is the "is X a course" special case)
+        candidate = (m.group(2) or m.group(1) or "").strip().rstrip(".,?!")
+        if candidate and len(candidate) > 1:
+            return candidate
+
+    return None
+
+
+def extract_d2_skill_candidate(text: str) -> str | None:
+    """
+    Extract a skill name/mention candidate from D2 skill-search patterns.
+    Returns the candidate string or None.
+    """
+    m = _D2_SKILL_AFTER_VERB_RE.search(text)
+    if m:
+        candidate = m.group(1).strip().rstrip(".,?!")
+        if candidate and len(candidate) > 1:
+            return candidate
+    return None
+
+
+# ── D6 Record Focus Detection ─────────────────────────────────────────────────
+
+_D6_ASSUMPTION_ONLY_RE = re.compile(
+    r'^(?:assume|pretend|suppose|let\'s say|say i|imagine|hypothetically)[,\s]+'
+    r'(?:i|that i)\s+(?:failed|passed|took|completed)\b',
+    re.IGNORECASE,
+)
+
+_D6_FOLLOWUP_SIGNALS: frozenset[str] = frozenset({
+    "what should", "what will", "what happens", "what now", "plan",
+    "schedule", "roadmap", "graduate", "graduation", "recommend",
+    "suggest", "affect my", "impact my", "can i take", "register",
+})
+
+_D6_COURSE_STATUS_KEYWORDS: frozenset[str] = frozenset({
+    "did i take", "did i pass", "did i fail", "did i complete",
+    "am i taking", "have i taken", "have i passed", "have i completed",
+    "is it in my courses", "just yes or no", "yes or no:",
+    "am i enrolled in",
+})
+
+_D6_LAST_SEM_GPA_KEYWORDS: frozenset[str] = frozenset({
+    "last semester gpa", "gpa last semester", "previous semester gpa",
+    "last term gpa", "last semester grade", "last semester result",
+    "gpa this past semester",
+})
+
+_D6_CGPA_KEYWORDS: frozenset[str] = frozenset({
+    "my cgpa", "my gpa", "what is my cgpa", "what is my gpa",
+    "what's my cgpa", "what's my gpa",
+    "tell me my gpa", "tell me my cgpa", "only cgpa", "only gpa",
+    "cgpa only", "gpa only",
+})
+
+_D6_LEVEL_KEYWORDS: frozenset[str] = frozenset({
+    "my level", "academic level", "what is my level", "what's my level",
+    "what level am i", "which level am i", "what year am i",
+    "am i freshman", "am i sophomore", "am i junior", "am i senior",
+})
+
+_D6_STANDING_KEYWORDS: frozenset[str] = frozenset({
+    "academic standing", "academic status", "good standing",
+    "academic danger", "at risk academically", "in trouble academically",
+    "am i in danger", "am i failing academically", "am i cooked",
+    "cooked academically",
+})
+
+_D6_PROBATION_KEYWORDS: frozenset[str] = frozenset({
+    "probation", "on probation", "academic probation",
+})
+
+_D6_WARNINGS_KEYWORDS: frozenset[str] = frozenset({
+    "academic warning", "number of warnings", "how many warnings",
+    "warning count", "consecutive warnings", "total warnings", "any warnings",
+    "have i been warned",
+})
+
+_D6_COMPLETED_KEYWORDS: frozenset[str] = frozenset({
+    "completed courses", "finished courses", "passed courses",
+    "courses i completed", "courses i passed", "courses i finished",
+    "courses i took", "courses i have taken", "what did i complete",
+    "what did i pass", "what did i finish", "what courses have i done",
+    "what have i completed", "what have i passed", "courses completed",
+    "done so far", "completed so far", "courses so far",
+})
+
+_D6_IN_PROGRESS_KEYWORDS: frozenset[str] = frozenset({
+    "current courses", "in progress courses", "in-progress courses",
+    "courses i am taking", "courses i'm taking", "currently taking",
+    "currently enrolled", "what am i taking", "what courses am i taking",
+    "enrolled courses", "taking now", "courses now", "taking this semester",
+    "enrolled this semester",
+})
+
+_D6_FAILED_KEYWORDS: frozenset[str] = frozenset({
+    "failed courses", "courses i failed", "what did i fail",
+    "what have i failed", "do i have fails", "any fails",
+    "have i failed", "my fails",
+})
+
+_D6_FAILED_HISTORY_KEYWORDS: frozenset[str] = frozenset({
+    "all courses i failed", "courses i ever failed", "failed before",
+    "even if i retook", "even if retook", "failed history",
+    "historically failed", "ever failed", "failed at some point",
+    "failed at least once", "courses that i failed even",
+})
+
+_D6_CREDITS_KEYWORDS: frozenset[str] = frozenset({
+    "credit hours", "credits earned", "credits completed",
+    "how many credits", "total credits", "completed credits",
+    "credit hours earned", "credits i have",
+})
+
+_D6_TRACK_KEYWORDS: frozenset[str] = frozenset({
+    "my track", "what track", "which track", "my program",
+    "what program", "which program", "my track id",
+})
+
+_D6_CURRENT_SEM_KEYWORDS: frozenset[str] = frozenset({
+    "current semester", "what semester am i in", "which semester am i in",
+    "what semester is it", "my current semester", "current term",
+})
+
+_D6_STUDY_STATUS_KEYWORDS: frozenset[str] = frozenset({
+    "study status", "am i still studying", "am i graduated",
+    "am i on leave",
+})
+
+# ── D6 Response Style Detection ───────────────────────────────────────────────
+
+_D6_YES_NO_RE = re.compile(
+    r'\b(?:yes or no|yes/no|just a yes or no|answer (?:yes or no|with yes|with no))\b',
+    re.IGNORECASE,
+)
+
+_D6_ONE_SENTENCE_RE = re.compile(
+    r'\b(?:one sentence|in one sentence|single sentence)\b',
+    re.IGNORECASE,
+)
+
+_D6_ONLY_RE = re.compile(
+    r'^(?:only|just)\b|'
+    r'\b(?:only|just)\s+(?:tell|show|give|the|my)\b|'
+    r'\btell\s+me\s+only\b|'
+    r'\bno summary\b|\bnothing else\b',
+    re.IGNORECASE,
+)
+
+_D6_CONCISE_RE = re.compile(
+    r'\b(?:briefly|quick(?:ly)?|concise(?:ly)?|short answer|in short|in brief)\b',
+    re.IGNORECASE,
+)
+
+
+def detect_d6_record_focus(text: str) -> str | None:
+    """Return a record_focus string for D6 student-record queries, or None if undetermined."""
+    lower = text.lower()
+    # Assumption-only check (standalone "Assume I failed X" with no follow-up intent)
+    if _D6_ASSUMPTION_ONLY_RE.match(text.strip()):
+        if not any(kw in lower for kw in _D6_FOLLOWUP_SIGNALS):
+            return "assumption_acknowledgement"
+    if any(kw in lower for kw in _D6_FAILED_HISTORY_KEYWORDS):
+        return "failed_course_history"
+    if any(kw in lower for kw in _D6_LAST_SEM_GPA_KEYWORDS):
+        return "last_semester_gpa"
+    if any(kw in lower for kw in _D6_CGPA_KEYWORDS):
+        return "cgpa"
+    if any(kw in lower for kw in _D6_LEVEL_KEYWORDS):
+        return "academic_level"
+    if any(kw in lower for kw in _D6_STANDING_KEYWORDS):
+        return "academic_standing"
+    if any(kw in lower for kw in _D6_PROBATION_KEYWORDS):
+        return "probation_status"
+    if any(kw in lower for kw in _D6_WARNINGS_KEYWORDS):
+        return "academic_warnings"
+    if any(kw in lower for kw in _D6_COMPLETED_KEYWORDS):
+        return "completed_courses"
+    if any(kw in lower for kw in _D6_IN_PROGRESS_KEYWORDS):
+        return "in_progress_courses"
+    if any(kw in lower for kw in _D6_FAILED_KEYWORDS):
+        return "failed_courses"
+    if any(kw in lower for kw in _D6_CREDITS_KEYWORDS):
+        return "completed_credits"
+    if any(kw in lower for kw in _D6_TRACK_KEYWORDS):
+        return "track"
+    if any(kw in lower for kw in _D6_CURRENT_SEM_KEYWORDS):
+        return "current_semester"
+    if any(kw in lower for kw in _D6_STUDY_STATUS_KEYWORDS):
+        return "study_status"
+    if any(kw in lower for kw in _D6_COURSE_STATUS_KEYWORDS):
+        return "course_status_check"
+    return None
+
+
+def detect_d6_response_style(text: str) -> str:
+    """Return response_style for a D6 query."""
+    if _D6_YES_NO_RE.search(text):
+        return "yes_no"
+    if _D6_ONE_SENTENCE_RE.search(text):
+        return "one_sentence"
+    if _D6_ONLY_RE.search(text):
+        return "only"
+    if _D6_CONCISE_RE.search(text):
+        return "concise"
+    return "normal"

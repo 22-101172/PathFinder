@@ -30,6 +30,8 @@ import os
 import time
 from typing import Optional
 
+_TRACE = os.getenv("PATHFINDER_TRACE", "").lower() in ("true", "1", "yes")
+
 from gateway.llm_client import LLMClient, LLMError, LLMNotConfigured, get_llm_client
 from gateway.models.schemas import Citation, PerSQResult, QueryResponse, TurnWrapper
 
@@ -49,6 +51,13 @@ _TRACK_DISPLAY_MAP: dict[str, str] = {
     "SWE": "Software Engineering (SWE)",
     "GEN": "General Program (GEN)",
 }
+
+_LEVEL_DISPLAY: dict[int, str] = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
+
+_D6_INTERNAL_TERMS = frozenset({
+    "packet", "payload", "orchestrator", "composer", "kg", "ale", "rag",
+    "engine", "structured result", "sq ", "the sq", "intent",
+})
 
 # ── Display formatting helpers ────────────────────────────────────────────────
 
@@ -90,6 +99,19 @@ def _fmt_track_label(track_id: str, name: str = "") -> str:
     if name:
         return f"{name} ({track_id})" if track_id and track_id not in name else name
     return _TRACK_DISPLAY_MAP.get(track_id, track_id or "")
+
+
+def _render_course_detail(detail: dict) -> str:
+    """Render a course detail dict as 'Course Name (CODE)' or gracefully when KG profile missing."""
+    code = detail.get("course_code", "")
+    name_val = detail.get("course_name")  # None means KG profile lookup failed
+    name = name_val or ""
+    if name:
+        return _fmt_course_label(code, name)
+    # Explicitly None (set by _enrich_course_details on KG error) → graceful label
+    if "course_name" in detail and name_val is None and code:
+        return f"{code} (details not available in catalogue)"
+    return code or ""
 
 
 def _load_composer_timeout() -> float:
@@ -167,9 +189,12 @@ because of their current study status (e.g. Transferred Out, Suspended). Be fact
 "already_completed" → the student has already passed/completed this course. \
 "retake_cap_exceeded" → the retake cap has been reached. \
 Only then use eligible=True ("you are eligible") or eligible=False (list missing prerequisites).
-23. NEVER ask the student for information. You already have everything you need in the narration \
-packet. NEVER write phrases like "please share your courses", "I'll need more details", \
-"could you provide your GPA", "please tell me your completed courses", or any similar request. \
+23. NEVER ask the student for information about their academic record — you already have it in \
+the packet. If the packet data shows a not-found result with attempted_candidate, tell the student \
+what you couldn't find using that candidate name, then stop. Do NOT ask which course/skill they \
+meant unless clarification_prompt is explicitly in the packet. NEVER write phrases like \
+"please share your courses", "I'll need more details", "could you provide your GPA", \
+"please tell me your completed courses", or any similar request. \
 If the packet data is insufficient, say so ("details not available") and stop — do not prompt.
 24. If academic_standing is "warning" and the student asks about academic danger or probation, \
 confirm directly: "Based on your CGPA of X, you are currently on academic warning." \
@@ -190,6 +215,18 @@ Do not narrate focus/gap courses as registration plans.
 28. When what-if assumptions are cleared, say exactly: \
 "I cleared your what-if assumptions. You are back to your official academic record." \
 Never write "Your academic record has been updated" or anything implying registrar data changed.
+29. For D2 course-info answers: include semester offering and track when present in the packet. \
+Do NOT mention eligibility unless user asked "can I take". Do NOT invent missing fields.
+30. For skills answers: show readable skill names (convert SK_* → readable: \
+SK_Machine_Learning → "Machine Learning"). If no skills found, say \
+"I couldn't find mapped skills for this course in the current curriculum data." \
+NOT generic "details unavailable."
+31. For skill-search answers: show course names first ("Course Name (CODE)"). \
+Show the matched skill name. If skill not found, include the attempted skill name in the response.
+32. If packet contains attempted_candidate or attempted_skill, mention it in the not-found \
+response so the student knows what was searched.
+33. For D6 failed_course_history: show all historically failed attempts, note that some may \
+have been retaken and passed. This is different from current failed_courses (unresolved fails only).
 """
 
 # ── Narration packet — per-PerSQResult extraction ─────────────────────────────
@@ -450,15 +487,20 @@ def _extract_plan(packet: dict, data: dict) -> None:
 
 
 def _extract_course_info(packet: dict, data: dict) -> None:
-    for k in ("course_code", "name", "credits", "level", "description", "track"):
+    for k in (
+        "course_code", "name", "credits", "level", "description",
+        "semester_offering", "tracks", "credit_threshold",
+        "error", "attempted_candidate",
+    ):
         if k in data:
             packet[k] = data[k]
 
 
 def _extract_prereqs(packet: dict, data: dict) -> None:
     for k in (
-        "course_code", "direct_prerequisites",
-        "transitive_prerequisites", "non_course_prerequisites", "error",
+        "course_code", "name", "direct_prerequisites",
+        "transitive_prerequisites", "non_course_prerequisites",
+        "full_prerequisite_tree", "error", "attempted_candidate",
     ):
         if k in data:
             val = data[k]
@@ -468,39 +510,61 @@ def _extract_prereqs(packet: dict, data: dict) -> None:
 
 
 def _extract_skills_taught(packet: dict, data: dict) -> None:
-    for k in ("course_code", "skills", "error"):
+    for k in ("course_code", "name", "skills_taught", "skills", "error", "attempted_candidate"):
         if k in data:
             val = data[k]
             if isinstance(val, list):
                 val = _cap_list(val, 25)
             packet[k] = val
+    # Normalize: skills_taught may be the actual KG field name
+    if "skills_taught" in packet and "skills" not in packet:
+        packet["skills"] = packet["skills_taught"]
 
 
 def _extract_courses_by_skill(packet: dict, data: dict) -> None:
-    for k in ("skill_id", "skill_name", "courses", "error"):
+    for k in ("skill_id", "skill_name", "courses", "results", "error", "attempted_skill",
+              "topic_fallback", "original_mention"):
         if k in data:
             val = data[k]
             if isinstance(val, list):
                 val = _cap_list(val, 20)
             packet[k] = val
+    # Normalize: results may be the KG field, courses is the display field
+    if "results" in packet and "courses" not in packet:
+        packet["courses"] = packet["results"]
+    # Expose attempted_skill if no skill_name
+    if "attempted_skill" in packet and not packet.get("skill_name"):
+        packet["skill_display"] = packet["attempted_skill"]
 
 
 def _extract_role_profile(packet: dict, data: dict) -> None:
-    for k in ("role_id", "name", "description", "required_skills", "recommended_tracks", "error"):
+    for k in ("role_id", "name", "role_name", "description", "required_skills", "recommended_tracks", "error"):
         if k in data:
             val = data[k]
             if isinstance(val, list):
                 val = _cap_list(val, 20)
             packet[k] = val
+    # KG may return "role_name" instead of "name" — normalize for Composer display
+    if "name" not in packet and "role_name" in packet:
+        packet["name"] = packet["role_name"]
 
 
 def _extract_roles_by_track(packet: dict, data: dict) -> None:
-    for k in ("track_id", "track_name", "roles", "error"):
+    for k in ("track_id", "track_name", "roles", "error", "total_results"):
         if k in data:
             val = data[k]
             if isinstance(val, list):
                 val = _cap_list(val, 20)
             packet[k] = val
+    # KG may return "results" instead of "roles" — normalize
+    if "roles" not in packet and "results" in data:
+        val = data["results"]
+        if isinstance(val, list):
+            val = _cap_list(val, 20)
+        packet["roles"] = val
+    # KG may return "track" instead of "track_name" — normalize
+    if "track_name" not in packet and "track" in data:
+        packet["track_name"] = data["track"]
 
 
 def _extract_career(packet: dict, data: dict, intent: str) -> None:
@@ -545,10 +609,15 @@ def _extract_policy(packet: dict, data: dict) -> None:
 
 def _extract_student_record(packet: dict, data: dict) -> None:
     for k in (
-        "track_id", "level", "cgpa", "academic_standing",
-        "study_status", "total_credit_hours_earned",
+        "record_focus", "response_style",
+        "track_id", "program", "level", "level_display", "cgpa",
+        "last_semester_gpa", "last_semester_chs", "last_semester_cps",
+        "academic_standing", "study_status", "total_credit_hours_earned",
         "current_semester", "consecutive_warnings", "total_warnings",
         "completed_courses", "in_progress_courses", "failed_courses",
+        "completed_course_details", "in_progress_course_details", "failed_course_details",
+        "failed_history_codes", "failed_history_details",
+        "scenario_completed_credits", "assumed_failed_courses", "assumed_passed_courses",
         "assumptions_cleared", "message",
     ):
         if k in data:
@@ -861,27 +930,59 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             lines.append(f"Warning: {w}")
 
     elif intent == "get_course_info":
+        # Handle not-found with candidate
+        if p.get("error"):
+            candidate = p.get("attempted_candidate")
+            if candidate:
+                lines.append(f"I couldn't find a course named '{candidate}' in the current CIS catalogue.")
+            else:
+                lines.append("Course details are not available.")
+            return
         code = p.get("course_code", "")
         name = p.get("name", "")
-        # Name-first: "Course Name (CODE)"
         label = _fmt_course_label(code, name) if (code and name) else (name or code)
         if label:
             lines.append(label)
         credits = p.get("credits")
         if credits is not None:
             lines.append(f"Credits: {credits}")
+        level = p.get("level")
+        if level is not None:
+            lines.append(f"Level: {level}")
+        semester_offering = p.get("semester_offering")
+        if semester_offering:
+            lines.append(f"Offered: {semester_offering}")
+        tracks = p.get("tracks")
+        if tracks:
+            if isinstance(tracks, list):
+                lines.append(f"Tracks: {', '.join(str(t) for t in tracks)}")
+            else:
+                lines.append(f"Track: {tracks}")
+        credit_threshold = p.get("credit_threshold")
+        if credit_threshold is not None:
+            lines.append(f"Credit threshold required: {credit_threshold}")
         desc = p.get("description", "")
         if desc:
             lines.append(desc)
 
     elif intent == "get_course_prerequisites":
+        # Handle not-found with candidate — show what was searched
+        if p.get("error"):
+            candidate = p.get("attempted_candidate")
+            if candidate:
+                lines.append(f"I couldn't find prerequisite information for '{candidate}'. The course may not be in the current CIS catalogue.")
+            else:
+                lines.append("Prerequisite information is not available for this course.")
+            return
         code = p.get("course_code", "the course")
+        name = p.get("name", "")
+        course_label = _fmt_course_label(code, name) if (code and name) else (name or code or "the course")
         direct = p.get("direct_prerequisites") or []
         non_course = p.get("non_course_prerequisites") or []
         if not direct and not non_course:
-            lines.append(f"{code} has no prerequisites.")
+            lines.append(f"{course_label} has no prerequisites.")
         else:
-            lines.append(f"Prerequisites for {code}:")
+            lines.append(f"Prerequisites for {course_label}:")
             for pr in direct:
                 c = pr.get("course_code", pr) if isinstance(pr, dict) else pr
                 lines.append(f"  • {c}")
@@ -890,33 +991,56 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                     lines.append(f"  • {nc.get('description', nc)}")
 
     elif intent == "get_skills_taught":
-        code = p.get("course_code", "the course")
-        skills = p.get("skills") or []
+        code = p.get("course_code", "")
+        name = p.get("name", "")
+        course_label = _fmt_course_label(code, name) if (code and name) else (name or code)
+        skills = p.get("skills") or p.get("skills_taught") or []
+        if p.get("error"):
+            candidate = p.get("attempted_candidate")
+            if candidate:
+                lines.append(f"I couldn't find mapped skills for '{candidate}'. The course may not be in the current curriculum data.")
+            else:
+                lines.append(f"No skill data found for {course_label or 'this course'}.")
+            return
         if skills:
-            lines.append(f"Skills taught in {code}:")
+            lines.append(f"Skills taught in {course_label or code}:")
             for s in skills[:15]:
                 if isinstance(s, dict):
-                    skill_name = _fmt_skill_label(s.get("skill_id", ""), s.get("name", ""))
+                    skill_name = _fmt_skill_label(s.get("skill_id", ""), s.get("name", "") or s.get("skill_name", ""))
                 else:
                     skill_name = _fmt_skill_label(str(s))
                 lines.append(f"  • {skill_name}")
         else:
-            lines.append(f"No skill data found for {code}.")
+            lines.append(f"I couldn't find mapped skills for {course_label or code} in the current curriculum data.")
 
     elif intent == "search_courses_by_skill":
         raw_skill_id = p.get("skill_id", "")
-        skill_name = p.get("skill_name", "")
-        # Prefer explicit name; fall back to cleaned-up ID
+        skill_name = p.get("skill_name", "") or p.get("skill_display", "")
         skill_display = _fmt_skill_label(raw_skill_id, skill_name) if raw_skill_id else skill_name
         if not skill_display:
-            skill_display = "that skill"
-        courses = p.get("courses") or []
-        if courses:
+            skill_display = p.get("attempted_skill", "that skill")
+        courses = p.get("courses") or p.get("results") or []
+        if p.get("error"):
+            attempted = p.get("attempted_skill") or skill_display
+            lines.append(f"I couldn't find a skill matching '{attempted}' in the current curriculum data.")
+            return
+        # Topic fallback: course intent rerouted to skill search — explain the shift
+        if p.get("topic_fallback"):
+            original = p.get("original_mention", "")
+            if original:
+                lines.append(
+                    f"I don't see a course literally named '{original}' in the catalogue, "
+                    f"but {skill_display} is a topic/skill in the curriculum. "
+                    f"Courses that cover it:"
+                )
+            else:
+                lines.append(f"Courses covering {skill_display} as a topic/skill:")
+        elif courses:
             lines.append(f"Courses covering {skill_display}:")
-            for c in courses[:15]:
-                label = _safe_code_name(c, "course_code", "name") if isinstance(c, dict) else str(c)
-                lines.append(f"  • {label}")
-        else:
+        for c in courses[:15]:
+            label = _safe_code_name(c, "course_code", "name") if isinstance(c, dict) else str(c)
+            lines.append(f"  • {label}")
+        if not courses:
             lines.append(f"No courses found for skill: {skill_display}.")
 
     elif intent == "get_role_profile":
@@ -1016,9 +1140,18 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
         curr = p.get("current_alignment")
         new = p.get("new_alignment") or p.get("projected_improvement")
         if isinstance(curr, (int, float)) and isinstance(new, (int, float)):
-            lines.append(f"Curriculum alignment with {role_display}: {curr:.0%} → {new:.0%}")
+            delta = new - curr
+            delta_str = f"{'+' if delta >= 0 else ''}{delta:.0%}"
+            lines.append(f"Curriculum alignment with {role_display}: {curr:.0%} → {new:.0%} ({delta_str})")
         else:
-            lines.append(p.get("message") or f"Alignment improvement estimate for {role_display} is ready.")
+            msg = p.get("message") or ""
+            if msg and "ready" not in msg.lower():
+                lines.append(msg)
+            else:
+                lines.append(
+                    f"Could not compute alignment improvement for {role_display}. "
+                    "Make sure the planned courses are identified (resolved course codes) and try again."
+                )
 
     elif intent == "get_focus_courses_for_target":
         role_name = p.get("role_name", "")
@@ -1111,20 +1244,275 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                 p.get("message")
                 or "I cleared your what-if assumptions. You are back to your official academic record."
             )
-            # fall through to show the refreshed record below
+            # Do not dump full record after reset unless focus is full_record
+            record_focus = p.get("record_focus") or "reset_assumptions"
+            if record_focus in ("reset_assumptions", "assumption_acknowledgement"):
+                return
 
+        record_focus = p.get("record_focus") or "full_record"
+        response_style = p.get("response_style") or "normal"
         cgpa = p.get("cgpa")
         track_id = p.get("track_id", "")
+        program = p.get("program", "")
         level = p.get("level")
+        level_display = p.get("level_display") or (_LEVEL_DISPLAY.get(level) if level is not None else None)
         standing = p.get("academic_standing", "")
         chs = p.get("total_credit_hours_earned")
+        scenario_credits = p.get("scenario_completed_credits")
+        last_sem_gpa = p.get("last_semester_gpa")
+        current_sem = p.get("current_semester", "")
+        consecutive_warnings = p.get("consecutive_warnings") or 0
+        total_warnings = p.get("total_warnings") or 0
+        study_status = p.get("study_status", "")
+        completed_details = p.get("completed_course_details") or []
+        in_progress_details = p.get("in_progress_course_details") or []
+        failed_details = p.get("failed_course_details") or []
         completed = p.get("completed_courses") or []
         in_progress = p.get("in_progress_courses") or []
         failed = p.get("failed_courses") or []
+        assumed_failed = p.get("assumed_failed_courses") or []
+        assumed_passed = p.get("assumed_passed_courses") or []
+        override_active = bool(p.get("override_state_active"))
+
+        # Assumption acknowledgement: not a full record display
+        if record_focus == "assumption_acknowledgement":
+            parts_ack: list[str] = []
+            if assumed_failed:
+                for code in assumed_failed:
+                    # Find display name from failed_details or use code
+                    detail = next((d for d in failed_details if d.get("course_code") == code), None)
+                    label = _render_course_detail(detail) if detail else code
+                    parts_ack.append(
+                        f"I added a what-if assumption for this session: "
+                        f"{label} is treated as failed. "
+                        f"Your official academic record is unchanged."
+                    )
+            if assumed_passed:
+                for code in assumed_passed:
+                    detail = next((d for d in completed_details if d.get("course_code") == code), None)
+                    label = _render_course_detail(detail) if detail else code
+                    parts_ack.append(
+                        f"I added a what-if assumption for this session: "
+                        f"{label} is treated as passed. "
+                        f"Your official academic record is unchanged."
+                    )
+            if not parts_ack:
+                parts_ack.append("Assumption noted. Your official academic record is unchanged.")
+            lines.extend(parts_ack)
+            return
+
+        # Build what-if preamble when assumptions are active (non-acknowledgement focus)
+        if override_active and (assumed_failed or assumed_passed):
+            scenario_parts: list[str] = []
+            for code in assumed_failed:
+                detail = next((d for d in failed_details if d.get("course_code") == code), None)
+                label = _render_course_detail(detail) if detail else code
+                scenario_parts.append(f"{label} treated as failed")
+            for code in assumed_passed:
+                detail = next((d for d in completed_details if d.get("course_code") == code), None)
+                label = _render_course_detail(detail) if detail else code
+                scenario_parts.append(f"{label} treated as passed")
+            if scenario_parts:
+                lines.append(
+                    f"Note: This is a what-if view. Active assumptions: "
+                    + ", ".join(scenario_parts)
+                    + ". Your official academic record is unchanged."
+                )
+
+        # ── Focus-specific narration ───────────────────────────────────────────
+
+        if record_focus == "cgpa":
+            if cgpa is not None:
+                answer = f"Your current CGPA is {cgpa:.2f}."
+            else:
+                answer = "Your CGPA is not available in our records."
+            lines.append(answer)
+            return
+
+        if record_focus == "last_semester_gpa":
+            if last_sem_gpa is not None:
+                lines.append(f"Your last-semester GPA is {last_sem_gpa:.2f}.")
+            else:
+                lines.append("Your last-semester GPA is not available in our records.")
+            return
+
+        if record_focus == "academic_level":
+            if level_display:
+                lines.append(f"Your academic level is Level {level} ({level_display}).")
+            elif level is not None:
+                lines.append(f"Your academic level is Level {level}.")
+            else:
+                lines.append("Your academic level is not available in our records.")
+            return
+
+        if record_focus == "academic_standing":
+            if standing == "good":
+                cgpa_note = f" (CGPA: {cgpa:.2f})" if cgpa is not None else ""
+                warn_note = ""
+                if total_warnings == 0:
+                    warn_note = " and no academic warnings recorded"
+                lines.append(f"No — you are in good academic standing{cgpa_note}{warn_note}.")
+            elif standing == "warning":
+                cgpa_note = f" (CGPA: {cgpa:.2f})" if cgpa is not None else ""
+                lines.append(f"You are under academic warning{cgpa_note}.")
+            else:
+                lines.append("Your academic standing is not available in our records.")
+            return
+
+        if record_focus == "probation_status":
+            if standing == "warning":
+                lines.append("Yes — you are under academic warning, which may lead to probation if unresolved.")
+            elif standing == "good":
+                lines.append("No — you are not on academic probation. You are in good standing.")
+            else:
+                lines.append("Your probation status is not available in our records.")
+            return
+
+        if record_focus == "academic_warnings":
+            if consecutive_warnings > 0:
+                lines.append(
+                    f"You have {consecutive_warnings} consecutive warning(s) "
+                    f"and {total_warnings} total warning(s) on record."
+                )
+            else:
+                lines.append("You have no academic warnings on record.")
+            return
+
+        if record_focus == "completed_credits":
+            if chs is not None:
+                lines.append(f"You have completed {chs} credit hours.")
+                if scenario_credits is not None and scenario_credits != chs:
+                    lines.append(
+                        f"In your active what-if scenario, completed-course credits total {scenario_credits}."
+                    )
+            else:
+                lines.append("Your completed credit hours are not available in our records.")
+            return
+
+        if record_focus == "track":
+            if track_id:
+                lines.append(f"You are in the {_fmt_track_label(track_id)} track.")
+                if program:
+                    lines.append(f"Program: {program}.")
+            else:
+                lines.append("Your track information is not available in our records.")
+            return
+
+        if record_focus == "current_semester":
+            if current_sem:
+                lines.append(f"You are currently in {current_sem}.")
+            else:
+                lines.append("Your current semester is not available in our records.")
+            return
+
+        if record_focus == "study_status":
+            if study_status:
+                lines.append(f"Your study status is: {study_status}.")
+            else:
+                lines.append("Your study status is not available in our records.")
+            return
+
+        if record_focus == "completed_courses":
+            if completed_details:
+                lines.append(f"Completed courses ({len(completed_details)}):")
+                for d in completed_details[:30]:
+                    lines.append(f"  • {_render_course_detail(d)}")
+            elif completed:
+                lines.append(f"You have completed {len(completed)} course(s).")
+            else:
+                lines.append("No completed courses found in your record.")
+            if response_style == "normal" and standing == "good" and not override_active:
+                lines.append("Keep it up!")
+            return
+
+        if record_focus == "in_progress_courses":
+            if in_progress_details:
+                sem_note = f" — {current_sem}" if current_sem else ""
+                lines.append(f"In-progress courses ({len(in_progress_details)}){sem_note}:")
+                for d in in_progress_details[:30]:
+                    lines.append(f"  • {_render_course_detail(d)}")
+            elif in_progress:
+                lines.append(f"You are currently enrolled in {len(in_progress)} course(s).")
+            else:
+                lines.append("No in-progress courses found in your record.")
+            if response_style == "normal" and not override_active:
+                lines.append("Good luck with your studies!")
+            return
+
+        if record_focus == "failed_courses":
+            if failed_details:
+                lines.append(f"Failed courses ({len(failed_details)}):")
+                for d in failed_details[:30]:
+                    lines.append(f"  • {_render_course_detail(d)}")
+                if override_active and assumed_failed:
+                    lines.append(
+                        "Note: The list above reflects your active what-if scenario. "
+                        "Officially, your failed courses may differ."
+                    )
+            elif failed:
+                if override_active and assumed_failed:
+                    lines.append(
+                        f"In your active what-if scenario: {len(failed)} course(s) treated as failed. "
+                        f"Officially, you have no failed courses recorded."
+                    )
+                else:
+                    lines.append(f"You have {len(failed)} failed course(s) on record.")
+            else:
+                if override_active and assumed_failed:
+                    for code in assumed_failed:
+                        lines.append(
+                            f"Officially, you have no failed courses recorded. "
+                            f"In your active what-if scenario, {code} is treated as failed."
+                        )
+                else:
+                    lines.append("You have no failed courses on record.")
+            return
+
+        if record_focus == "failed_course_history":
+            failed_history = p.get("failed_history_details") or []
+            failed_history_codes_list = p.get("failed_history_codes") or []
+            if failed_history:
+                lines.append(f"Courses you have failed at least once historically ({len(failed_history)}):")
+                for d in failed_history[:30]:
+                    lines.append(f"  • {_render_course_detail(d)}")
+                lines.append("Note: This includes courses you may have later retaken and passed.")
+            elif failed_history_codes_list:
+                lines.append(f"Historically failed courses: {', '.join(str(c) for c in failed_history_codes_list[:15])}")
+            else:
+                lines.append("No historically failed courses found in your record.")
+            return
+
+        if record_focus == "course_status_check":
+            # Focus on enriched target course details only
+            if in_progress_details:
+                for d in in_progress_details[:5]:
+                    lines.append(f"Yes — {_render_course_detail(d)} is in your current courses.")
+                return
+            if completed_details:
+                for d in completed_details[:5]:
+                    lines.append(f"Yes — you have completed {_render_course_detail(d)}.")
+                return
+            if failed_details:
+                for d in failed_details[:5]:
+                    lines.append(f"{_render_course_detail(d)} appears in your failed courses.")
+                return
+            # Fallback: show all current courses if no specific target was enriched
+            if in_progress:
+                sem_note = f" in {current_sem}" if current_sem else ""
+                lines.append(f"Your current courses{sem_note}:")
+                for c in in_progress[:10]:
+                    lines.append(f"  • {c}")
+            if completed:
+                lines.append(f"Completed: {len(completed)} course(s)")
+            return
+
+        # ── Full record / progress summary (default) ──────────────────────────
         record_parts: list[str] = []
         if track_id:
             record_parts.append(f"Track: {_fmt_track_label(track_id)}")
-        if level is not None:
+        if level_display:
+            record_parts.append(f"Level: {level} ({level_display})")
+        elif level is not None:
             record_parts.append(f"Level: {level}")
         if cgpa is not None:
             record_parts.append(f"CGPA: {cgpa:.2f}")
@@ -1132,14 +1520,40 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             record_parts.append(f"Standing: {standing}")
         if chs is not None:
             record_parts.append(f"Credit hours earned: {chs}")
+        if current_sem:
+            record_parts.append(f"Semester: {current_sem}")
         if record_parts:
             lines.append(" | ".join(record_parts))
-        if completed:
+
+        if last_sem_gpa is not None:
+            lines.append(f"Last semester GPA: {last_sem_gpa:.2f}")
+
+        if completed_details:
+            lines.append(f"Completed courses ({len(completed_details)}):")
+            for d in completed_details[:30]:
+                lines.append(f"  • {_render_course_detail(d)}")
+        elif completed:
             lines.append(f"Completed: {len(completed)} course(s)")
-        if in_progress:
-            lines.append(f"In progress: {', '.join(in_progress[:10])}")
-        if failed:
+
+        if in_progress_details:
+            lines.append(f"In-progress courses ({len(in_progress_details)}):")
+            for d in in_progress_details[:30]:
+                lines.append(f"  • {_render_course_detail(d)}")
+        elif in_progress:
+            lines.append(f"In progress: {', '.join(str(c) for c in in_progress[:10])}")
+
+        if failed_details:
+            lines.append(f"Failed courses ({len(failed_details)}):")
+            for d in failed_details[:30]:
+                lines.append(f"  • {_render_course_detail(d)}")
+        elif failed:
             lines.append(f"Failed: {len(failed)} course(s)")
+
+        if scenario_credits is not None and scenario_credits != chs:
+            lines.append(
+                f"Official earned credits: {chs}. "
+                f"In this what-if scenario, completed-course credits total {scenario_credits}."
+            )
 
     else:
         msg = p.get("message") or p.get("answer") or p.get("result", "")
@@ -1337,8 +1751,39 @@ class ResponseComposer:
         # QueryResponse.status mapping
         qr_status = _map_turn_status(turn)
 
+        if _TRACE:
+            d6_focuses = [p.get("record_focus") for p in packets if p.get("intent") == "get_student_record"]
+            d6_styles = [p.get("response_style") for p in packets if p.get("intent") == "get_student_record"]
+            has_course_details = any(
+                p.get("course_code") or p.get("courses") or p.get("skills")
+                for p in packets
+            )
+            logger.info(
+                "Composer.packet_trace session=%s\n"
+                "  packet_count: %d\n"
+                "  intents: %s\n"
+                "  statuses: %s\n"
+                "  d6_focuses: %s\n"
+                "  d6_styles: %s\n"
+                "  has_course_details: %s",
+                safe_sid,
+                len(packets),
+                [p.get("intent") for p in packets],
+                [p.get("status") for p in packets],
+                d6_focuses, d6_styles, has_course_details,
+            )
+
         # LLM NLG (primary) → deterministic fallback
         answer_text, gen_meta = self._generate(user_text, packets, qr_status)
+
+        if _TRACE:
+            logger.info(
+                "Composer.generate_trace llm_used=%s model=%s fallback=%s deterministic_used=%s",
+                gen_meta["llm_used"],
+                gen_meta["model_used"],
+                gen_meta["fallback_reason"],
+                not gen_meta["llm_used"],
+            )
 
         logger.info(
             "Composer.compose result session=%s qr_status=%s llm_used=%s model=%s "

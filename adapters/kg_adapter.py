@@ -4,6 +4,7 @@ All 18 KG operations callable via call(operation, params).
 """
 from __future__ import annotations
 import logging
+import os
 import time
 from typing import Any
 
@@ -11,6 +12,8 @@ from engines.kg.neo4j_client import Neo4jClient
 import engines.kg.queries as Q
 
 logger = logging.getLogger(__name__)
+
+_TRACE = os.getenv("PATHFINDER_TRACE", "").lower() in ("true", "1", "yes")
 
 _ADAPTER_ERRORS = {"kg_unavailable", "unknown_operation", "bad_params", "kg_error"}
 
@@ -118,6 +121,14 @@ class KGAdapter:
     def call(self, operation: str, params: dict) -> dict:
         start = time.perf_counter()
         safe_params = _summarize_params(params)
+
+        if _TRACE:
+            param_lines = "\n".join(f"    {k}: {v}" for k, v in safe_params.items())
+            logger.info(
+                "KGAdapter.trace operation=%s\n  params:\n%s",
+                operation, param_lines or "    (none)",
+            )
+
         logger.info(
             "KGAdapter.call start operation=%s params=%s",
             operation,

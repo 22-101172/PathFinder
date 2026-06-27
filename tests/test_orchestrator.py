@@ -426,6 +426,200 @@ class TestDomain6StudentRecord:
         result = orch.execute_turn(sqs, session, bundles)
         assert result.results[0].data["academic_standing"] == "unknown"
 
+    # ── D6 enrichment tests (Phase 2) ────────────────────────────────────────
+
+    def test_student_record_includes_completed_course_details(self):
+        """completed_course_details must be present when completed courses exist."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-CS301", "name": "Operating Systems", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-CS301"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        data = result.results[0].data
+        assert "completed_course_details" in data
+        assert isinstance(data["completed_course_details"], list)
+        assert len(data["completed_course_details"]) == 1
+
+    def test_student_record_includes_in_progress_course_details(self):
+        """in_progress_course_details must be present when in-progress courses exist."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-CS112", "name": "Programming Fundamentals", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(in_progress=["C-CS112"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        data = result.results[0].data
+        assert "in_progress_course_details" in data
+        assert len(data["in_progress_course_details"]) == 1
+
+    def test_student_record_includes_failed_course_details(self):
+        """failed_course_details must be present when failed courses exist."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-MA111", "name": "Calculus I", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(failed=["C-MA111"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        data = result.results[0].data
+        assert "failed_course_details" in data
+        assert len(data["failed_course_details"]) == 1
+
+    def test_student_record_kg_called_for_course_profiles(self):
+        """KG get_course_profile must be called for each course in the student's lists."""
+        kg = MagicMock()
+        kg.call.return_value = {"name": "Some Course", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(
+            completed=["C-CS301"],
+            in_progress=["C-CS112"],
+            failed=["C-MA111"],
+        ))
+        orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        called_ops = [call[0][0] for call in kg.call.call_args_list]
+        assert "get_course_profile" in called_ops
+
+    def test_student_record_detail_contains_name_and_credits_from_kg(self):
+        """When KG returns a valid profile, course_name and credits must be populated."""
+        kg = MagicMock()
+        kg.call.return_value = {"course_code": "C-CS301", "name": "Operating Systems", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-CS301"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        detail = result.results[0].data["completed_course_details"][0]
+        assert detail["course_code"] == "C-CS301"
+        assert detail["course_name"] == "Operating Systems"
+        assert detail["credits"] == 3
+
+    def test_student_record_kg_failure_does_not_fail_result(self):
+        """A KG adapter error during enrichment must not fail the student record result."""
+        kg = MagicMock()
+        kg.call.return_value = {"error": "kg_unavailable"}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-CS301"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        assert result.results[0].status == "success"
+
+    def test_student_record_kg_failure_uses_fallback_detail(self):
+        """KG adapter error → fallback detail with course_name=None and credits=None."""
+        kg = MagicMock()
+        kg.call.return_value = {"error": "kg_unavailable"}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-CS301"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        detail = result.results[0].data["completed_course_details"][0]
+        assert detail["course_code"] == "C-CS301"
+        assert detail["course_name"] is None
+        assert detail["credits"] is None
+
+    def test_student_record_course_not_found_uses_fallback_detail(self):
+        """KG 'error' key for unknown course → fallback detail with None name/credits."""
+        kg = MagicMock()
+        kg.call.return_value = {"error": "course_not_found"}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-UNKNOWN999"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        detail = result.results[0].data["completed_course_details"][0]
+        assert detail["course_code"] == "C-UNKNOWN999"
+        assert detail["course_name"] is None
+
+    def test_student_record_raw_codes_still_present(self):
+        """completed_courses (raw codes) must still be in snapshot for backward compat."""
+        kg = MagicMock()
+        kg.call.return_value = {"name": "Some Course", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-CS301", "HUM111"]))
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        data = result.results[0].data
+        assert "C-CS301" in data["completed_courses"]
+        assert "HUM111" in data["completed_courses"]
+
+    def test_student_record_scalar_focus_skips_kg_enrichment(self):
+        """Scalar focus (cgpa) must not call get_course_profile."""
+        kg = MagicMock()
+        kg.call.return_value = {"name": "Some Course", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-CS301"], in_progress=["C-CS112"]))
+        result = orch.execute_turn(
+            [_sq("get_student_record", params={"record_focus": "cgpa"})],
+            session, _make_bundles()
+        )
+        assert result.results[0].status == "success"
+        profile_calls = [c for c in kg.call.call_args_list if c[0][0] == "get_course_profile"]
+        assert len(profile_calls) == 0, "Should not call get_course_profile for scalar cgpa focus"
+
+    def test_student_record_completed_focus_only_enriches_completed(self):
+        """completed_courses focus must only enrich completed list, not in_progress."""
+        kg = MagicMock()
+        kg.call.return_value = {"name": "Some Course", "credits": 3}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(_make_student(completed=["C-CS301"], in_progress=["C-CS112"]))
+        result = orch.execute_turn(
+            [_sq("get_student_record", params={"record_focus": "completed_courses"})],
+            session, _make_bundles()
+        )
+        data = result.results[0].data
+        assert len(data["completed_course_details"]) == 1
+        assert data["in_progress_course_details"] == []
+
+    def test_student_record_level_display_included(self):
+        """Snapshot must include level_display derived from level."""
+        orch = _make_orchestrator()
+        # _make_student uses level=3 → Junior
+        session = _make_session(_make_student())
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        data = result.results[0].data
+        assert "level_display" in data
+        assert data["level_display"] == "Junior"
+
+    def test_student_record_level_display_sophomore(self):
+        """Snapshot must show Sophomore for level=2."""
+        orch = _make_orchestrator()
+        student = StudentContext(
+            student_id="S001", name="Test Student", program="AI",
+            track_id="AI", level=2, first_semester="Fall 2023",
+            study_status="Studying", cgpa=3.0,
+            cumulative_chs=40, cumulative_cps=120.0,
+            total_credit_hours_earned=40,
+            current_semester="Spring 2026",
+        )
+        session = _make_session(student)
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        data = result.results[0].data
+        assert data["level_display"] == "Sophomore"
+
+    def test_student_record_last_semester_gpa_included(self):
+        """Snapshot must include last_semester_gpa when set on StudentContext."""
+        orch = _make_orchestrator()
+        student = StudentContext(
+            student_id="S001", name="Test Student", program="AI",
+            track_id="AI", level=3, first_semester="Fall 2022",
+            study_status="Studying", cgpa=3.0,
+            cumulative_chs=60, cumulative_cps=180.0,
+            total_credit_hours_earned=60,
+            current_semester="Spring 2026",
+            last_semester_gpa=3.1,
+        )
+        session = _make_session(student)
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        data = result.results[0].data
+        assert "last_semester_gpa" in data
+        assert data["last_semester_gpa"] == 3.1
+
+    def test_student_record_program_field_included(self):
+        """Snapshot must include program field."""
+        orch = _make_orchestrator()
+        session = _make_session(_make_student())
+        result = orch.execute_turn([_sq("get_student_record")], session, _make_bundles())
+        assert "program" in result.results[0].data
+
+    def test_student_record_record_focus_in_snapshot(self):
+        """record_focus from params must be passed through in the snapshot."""
+        orch = _make_orchestrator()
+        session = _make_session(_make_student())
+        result = orch.execute_turn(
+            [_sq("get_student_record", params={"record_focus": "academic_level"})],
+            session, _make_bundles()
+        )
+        assert result.results[0].data.get("record_focus") == "academic_level"
+
 
 # ── T07: Multi-SQ ordered execution ──────────────────────────────────────────
 

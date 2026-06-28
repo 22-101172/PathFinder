@@ -1,6 +1,8 @@
 from __future__ import annotations
 import logging
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Callable, Optional
 
@@ -132,8 +134,12 @@ async def chat(request: QueryRequest):
         )
         raise HTTPException(status_code=503, detail="Service not ready — startup may have failed")
 
+    trace_id = str(uuid.uuid4())[:8]
+    _t0 = time.monotonic()
+
     logger.info(
-        "POST /chat | student=%s session=%s query_len=%d",
+        "POST /chat | trace_id=%s student=%s session=%s query_len=%d",
+        trace_id,
         _mask_student_id(request.student_id),
         (request.session_id or "")[:8] or "new",
         len(request.user_text or ""),
@@ -183,24 +189,35 @@ async def chat(request: QueryRequest):
 
     # 2–4. QU → Orchestrator → Composer pipeline
     try:
+        _qu_t0 = time.monotonic()
         sqs = understand_query(
             user_text=request.user_text,
             last_referenced=session.last_referenced,
             recent_turns=list(session.turn_history[-QU_CONTEXT_TURNS:]),
             resolver=_resolver,
+            trace_id=trace_id,
         )
-        tw = _orchestrator.execute_turn(sqs, session, _rule_bundles)
+        _qu_ms = int((time.monotonic() - _qu_t0) * 1000)
+
+        _orch_t0 = time.monotonic()
+        tw = _orchestrator.execute_turn(sqs, session, _rule_bundles, trace_id=trace_id)
+        _orch_ms = int((time.monotonic() - _orch_t0) * 1000)
+
+        _comp_t0 = time.monotonic()
         qr = _composer.compose(
             user_text=request.user_text,
             turn=tw,
             session_id=session.session_id,
             session_name=session.session_name,
+            trace_id=trace_id,
         )
+        _comp_ms = int((time.monotonic() - _comp_t0) * 1000)
     except HTTPException:
         raise
     except Exception as exc:
         logger.error(
-            "POST /chat pipeline error | student=%s session=%s error=%s",
+            "POST /chat pipeline error | trace_id=%s student=%s session=%s error=%s",
+            trace_id,
             _mask_student_id(request.student_id),
             session.session_id[:8],
             type(exc).__name__,
@@ -220,13 +237,17 @@ async def chat(request: QueryRequest):
         replace_overrides=had_clear,
     )
 
+    _total_ms = int((time.monotonic() - _t0) * 1000)
+
     if _TRACE:
         logger.info(
             "=== PathFinder Turn End ===\n"
+            "trace_id: %s\n"
             "sq_intents: %s\n"
             "sq_statuses: %s\n"
             "qr_status: %s\n"
             "answer_len: %d",
+            trace_id,
             [r.intent for r in tw.results],
             [r.status for r in tw.results],
             qr.status,
@@ -235,12 +256,22 @@ async def chat(request: QueryRequest):
 
     intent_statuses = {r.intent: r.status for r in tw.results}
     logger.info(
-        "POST /chat done | student=%s session=%s qr_status=%s intent_statuses=%s answer_len=%d",
+        "POST /chat done | trace_id=%s student=%s session=%s session_state=%s "
+        "query_len=%d sq_intents=%s turn_status=%s qr_status=%s answer_len=%d "
+        "qu_ms=%d orch_ms=%d comp_ms=%d total_ms=%d",
+        trace_id,
         _mask_student_id(request.student_id),
         session.session_id[:8],
+        "new" if session_is_new else "existing",
+        len(request.user_text or ""),
+        [r.intent for r in tw.results],
+        tw.turn_status,
         qr.status,
-        intent_statuses,
         len(qr.answer_text),
+        _qu_ms,
+        _orch_ms,
+        _comp_ms,
+        _total_ms,
     )
 
     return qr

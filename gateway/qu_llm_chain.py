@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 from gateway.llm_client import LLMClient, LLMError, parse_json_object
@@ -26,6 +27,24 @@ class AllModelsFailedError(Exception):
 
 class IntentValidationError(Exception):
     """Raised when the LLM output contains an unrecognized intent."""
+
+
+def _classify_failure(exc: Exception) -> str:
+    """Classify a QU chain failure into a diagnostic category."""
+    if isinstance(exc, IntentValidationError):
+        return "intent_validation"
+    if isinstance(exc, LLMError):
+        msg = str(exc).lower()
+        if "timed out" in msg or "timeout" in msg:
+            return "timeout"
+        if "http 429" in msg:
+            return "rate_limit"
+        if "http 413" in msg:
+            return "payload_too_large"
+        if "not a json object" in msg or "not valid json" in msg or "expected str" in msg:
+            return "invalid_json"
+        return "llm_error"
+    return "unknown"
 
 
 def _load_qu_timeout() -> float:
@@ -72,10 +91,26 @@ class QUModelChain:
         system: str,
         user_msg: str,
         valid_intents: frozenset[str],
+        trace_id: str = "",
     ) -> list[dict[str, Any]]:
         last_error: Exception | None = None
+        n_models = len(self._models)
+        est_tokens_per_call = (len(system) + len(user_msg) + 3) // 4
+        total_tokens_sent = 0
+        tokens_per_attempt: list[int] = []
+        _chain_t0 = time.perf_counter()
 
-        for model in self._models:
+        for attempt_idx, model in enumerate(self._models):
+            _attempt_t0 = time.perf_counter()
+            logger.info(
+                "QU.model_attempt trace_id=%s attempt=%d/%d model=%s "
+                "timeout=%.1fs estimated_tokens=%d",
+                trace_id, attempt_idx + 1, n_models, model,
+                self._timeout, est_tokens_per_call,
+            )
+            total_tokens_sent += est_tokens_per_call
+            tokens_per_attempt.append(est_tokens_per_call)
+
             try:
                 raw = self._client.chat(
                     system=system,
@@ -88,17 +123,44 @@ class QUModelChain:
                 data = parse_json_object(raw)
                 sq_list = _extract_sq_list(data)
                 _validate_intents(sq_list, valid_intents)
-                logger.info("QU: model %s succeeded (%d SQs)", model, len(sq_list))
+                _attempt_ms = int((time.perf_counter() - _attempt_t0) * 1000)
+                logger.info(
+                    "QU.model_attempt_result trace_id=%s attempt=%d/%d model=%s "
+                    "result=success raw_len=%d sq_count=%d duration_ms=%d",
+                    trace_id, attempt_idx + 1, n_models, model,
+                    len(raw), len(sq_list), _attempt_ms,
+                )
+                _chain_ms = int((time.perf_counter() - _chain_t0) * 1000)
+                logger.info(
+                    "QU.model_chain_summary trace_id=%s final_status=success "
+                    "models_attempted=%d winning_model=%s "
+                    "tokens_per_attempt=%s total_estimated_tokens=%d "
+                    "chain_duration_ms=%d exact_token_usage=not_available",
+                    trace_id, attempt_idx + 1, model,
+                    tokens_per_attempt, total_tokens_sent, _chain_ms,
+                )
                 return sq_list
 
-            except IntentValidationError as exc:
-                logger.warning("QU: model %s returned invalid intent: %s", model, exc)
+            except (IntentValidationError, LLMError) as exc:
+                _attempt_ms = int((time.perf_counter() - _attempt_t0) * 1000)
+                fail_cat = _classify_failure(exc)
+                logger.warning(
+                    "QU.model_attempt_result trace_id=%s attempt=%d/%d model=%s "
+                    "result=failed error_type=%s error_category=%s "
+                    "error=%s duration_ms=%d",
+                    trace_id, attempt_idx + 1, n_models, model,
+                    type(exc).__name__, fail_cat,
+                    _safe_error_msg(exc)[:120], _attempt_ms,
+                )
                 last_error = exc
 
-            except LLMError as exc:
-                logger.warning("QU: model %s failed: %s", model, _safe_error_msg(exc))
-                last_error = exc
-
+        _chain_ms = int((time.perf_counter() - _chain_t0) * 1000)
+        logger.warning(
+            "QU.model_chain_summary trace_id=%s final_status=all_failed "
+            "models_attempted=%d tokens_per_attempt=%s total_estimated_tokens=%d "
+            "chain_duration_ms=%d exact_token_usage=not_available",
+            trace_id, n_models, tokens_per_attempt, total_tokens_sent, _chain_ms,
+        )
         raise AllModelsFailedError(
             f"All QU models exhausted. Last error: {_safe_error_msg(last_error)}"
         )

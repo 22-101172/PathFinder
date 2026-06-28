@@ -284,6 +284,7 @@ class Orchestrator:
         sqs: list[StructuredQuery],
         session: SessionState,
         rule_bundles: dict,
+        trace_id: str = "",
     ) -> TurnWrapper:
         """
         Execute an ordered list of StructuredQuery objects and return a TurnWrapper.
@@ -313,17 +314,17 @@ class Orchestrator:
 
         _session_short = session.session_id[:8] if session.session_id else "unknown"
         logger.info(
-            "Orchestrator.turn_start session=%s sq_count=%d assumptions_active=%s "
-            "had_clear=%s base_context=%s effective_context=%s",
-            _session_short, len(sqs), has_active, had_clear,
+            "Orchestrator.turn_start trace_id=%s session=%s sq_count=%d "
+            "assumptions_active=%s had_clear=%s base_context=%s effective_context=%s",
+            trace_id, _session_short, len(sqs), has_active, had_clear,
             base_context is not None, effective_context is not None,
         )
 
         results: list[PerSQResult] = []
         for idx, sq in enumerate(sqs):
             logger.info(
-                "Orchestrator.sq_start index=%d intent=%s entity=%s",
-                idx, sq.intent,
+                "Orchestrator.sq_start trace_id=%s index=%d intent=%s entity=%s",
+                trace_id, idx, sq.intent,
                 sq.entities.course_code or sq.entities.role_id or sq.entities.track_id or "-",
             )
             _sq_t0 = time.monotonic()
@@ -337,6 +338,7 @@ class Orchestrator:
                     rule_bundles=rule_bundles,
                     caches=caches,
                     execution_overrides=execution_overrides,
+                    trace_id=trace_id,
                 )
             except Exception as exc:
                 logger.exception("Orchestrator: unhandled error SQ[%d] intent=%s", idx, sq.intent)
@@ -344,9 +346,9 @@ class Orchestrator:
                               f"Unexpected error: {type(exc).__name__}")
             _sq_ms = int((time.monotonic() - _sq_t0) * 1000)
             logger.info(
-                "Orchestrator.sq_result index=%d intent=%s status=%s "
+                "Orchestrator.sq_result trace_id=%s index=%d intent=%s status=%s "
                 "error_code=%s error_category=%s has_data=%s citations=%d duration_ms=%d",
-                idx, sq.intent, result.status,
+                trace_id, idx, sq.intent, result.status,
                 result.error_code, result.error_category,
                 result.data is not None, len(result.citations or []),
                 _sq_ms,
@@ -356,8 +358,9 @@ class Orchestrator:
         wrapper = _build_turn_wrapper(turn_id, session.session_id, timestamp, results)
         _turn_ms = int((time.monotonic() - _turn_t0) * 1000)
         logger.info(
-            "Orchestrator.turn_result status=%s results=%d error=%s clarification=%s soft=%s duration_ms=%d",
-            wrapper.turn_status, wrapper.result_count,
+            "Orchestrator.turn_result trace_id=%s status=%s results=%d "
+            "error=%s clarification=%s soft_no_evidence=%s duration_ms=%d",
+            trace_id, wrapper.turn_status, wrapper.result_count,
             wrapper.has_error, wrapper.has_clarification, wrapper.has_soft_no_evidence,
             _turn_ms,
         )
@@ -389,6 +392,7 @@ class Orchestrator:
         rule_bundles: dict,
         caches: _TurnCaches,
         execution_overrides: Optional[SessionOverrides] = None,
+        trace_id: str = "",
     ) -> PerSQResult:
         intent = sq.intent
 
@@ -433,12 +437,12 @@ class Orchestrator:
             )
             _engine, _operation = _INTENT_ENGINE_OP.get(intent, ("KG", intent))
             logger.info(
-                "Orchestrator.route_trace[%d] intent=%s context_mode=%s\n"
+                "Orchestrator.route_trace[%d] trace_id=%s intent=%s context_mode=%s\n"
                 "  entity: %s\n"
                 "  record_focus: %s\n"
                 "  engine: %s operation: %s\n"
                 "  assumptions_active: %s",
-                sq_index, intent, _ctx_mode,
+                sq_index, trace_id, intent, _ctx_mode,
                 entity_display, record_focus, _engine, _operation, has_active_assumptions,
             )
 

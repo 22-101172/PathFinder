@@ -124,6 +124,7 @@ class RAGAdapter:
         self,
         sub_query: str,
         student_context: Optional[Any] = None,  # intentionally ignored — never forwarded to RAG
+        trace_id: str = "",
     ) -> dict[str, Any]:
         """
         Run the RAG pipeline for one free-text handbook policy question.
@@ -140,15 +141,15 @@ class RAGAdapter:
         """
         start = time.perf_counter()
         logger.info(
-            "RAGAdapter.execute start query_len=%d query_preview=%r",
-            len(sub_query or ""),
-            _safe_preview(sub_query, 100),
+            "RAGAdapter.execute start trace_id=%s query_len=%d query_preview=%r",
+            trace_id, len(sub_query or ""), _safe_preview(sub_query, 100),
         )
 
         if not sub_query or not sub_query.strip():
             logger.info(
-                "RAGAdapter.execute result found=False facts=0 citations=0 error=empty_query duration_ms=%d",
-                _duration_ms(start),
+                "RAGAdapter.execute result trace_id=%s found=False facts=0 citations=0 "
+                "error=empty_query duration_ms=%d",
+                trace_id, _duration_ms(start),
             )
             return {
                 "found":           False,
@@ -160,8 +161,9 @@ class RAGAdapter:
 
         if self.extract_facts is None:
             logger.warning(
-                "RAGAdapter.execute result found=False facts=0 citations=0 error=rag_unavailable duration_ms=%d",
-                _duration_ms(start),
+                "RAGAdapter.execute result trace_id=%s found=False facts=0 citations=0 "
+                "error=rag_unavailable duration_ms=%d",
+                trace_id, _duration_ms(start),
             )
             return {
                 "found":           False,
@@ -176,8 +178,9 @@ class RAGAdapter:
         except Exception:
             logger.exception("RAGAdapter.execute: unexpected error for query %r", sub_query)
             logger.warning(
-                "RAGAdapter.execute result found=False facts=0 citations=0 error=rag_adapter_error duration_ms=%d",
-                _duration_ms(start),
+                "RAGAdapter.execute result trace_id=%s found=False facts=0 citations=0 "
+                "error=rag_adapter_error duration_ms=%d",
+                trace_id, _duration_ms(start),
             )
             return {
                 "found":           False,
@@ -191,9 +194,9 @@ class RAGAdapter:
         if "error" in result:
             error_code = result["error"]
             logger.warning(
-                "RAGAdapter.execute result found=False facts=0 citations=0 error=%s duration_ms=%d",
-                error_code,
-                _duration_ms(start),
+                "RAGAdapter.execute result trace_id=%s found=False facts=0 citations=0 "
+                "error=%s duration_ms=%d",
+                trace_id, error_code, _duration_ms(start),
             )
             return {
                 "found":           False,
@@ -210,12 +213,10 @@ class RAGAdapter:
         answer    = " ".join(facts) if found else _ANSWER_NOT_FOUND
 
         logger.info(
-            "RAGAdapter.execute result found=%s facts=%d citations=%d answer_preview=%r duration_ms=%d",
-            found,
-            len(facts),
-            len(citations),
-            _safe_preview(answer, 220),
-            _duration_ms(start),
+            "RAGAdapter.execute result trace_id=%s found=%s facts=%d citations=%d "
+            "answer_preview=%r duration_ms=%d",
+            trace_id, found, len(facts), len(citations),
+            _safe_preview(answer, 220), _duration_ms(start),
         )
         return {
             "found":           found,

@@ -74,6 +74,7 @@ def understand_query(
     last_referenced: LastReferenced,
     recent_turns: list[dict],
     resolver: Resolver | None = None,
+    trace_id: str = "",
 ) -> list[StructuredQuery]:
     """
     Parse user_text into an ordered list[StructuredQuery].
@@ -90,7 +91,9 @@ def understand_query(
     """
     _t0 = time.perf_counter()
     logger.info(
-        "QU.start query_len=%d resolver_enabled=%s recent_turns=%d last_refs=%s",
+        "QU.start trace_id=%s query_len=%d resolver_enabled=%s "
+        "recent_turns=%d last_refs=%s",
+        trace_id,
         len(user_text),
         resolver is not None,
         len(recent_turns),
@@ -100,8 +103,11 @@ def understand_query(
 
     pre = preprocess(user_text)
     logger.info(
-        "QU.preprocess course_codes=%d policy=%s oos=%s student_ref=%s semester=%s "
-        "target_cgpa=%s override=%s reset=%s expected_grades=%d",
+        "QU.preprocess trace_id=%s detected_course_codes_count=%d policy=%s "
+        "out_of_scope_signal=%s student_referential_signal=%s semester_signal=%s "
+        "target_cgpa_signal=%s what_if_signal=%s reset_assumptions_signal=%s "
+        "expected_grade_pairs_count=%d",
+        trace_id,
         len(pre.course_codes),
         pre.policy_signal,
         pre.out_of_scope_signal,
@@ -113,7 +119,30 @@ def understand_query(
         len(pre.expected_grades),
     )
 
-    sq_list, classification_source = _classify(user_text, last_referenced, recent_turns, pre)
+    # Build prompts once for size diagnostics and chain call
+    _system_prompt = build_system_prompt()
+    _user_message = build_user_message(user_text, last_referenced, recent_turns)
+    _sys_chars = len(_system_prompt)
+    _user_chars = len(_user_message)
+    _total_chars = _sys_chars + _user_chars
+    _est_tokens = (_total_chars + 3) // 4
+    logger.info(
+        "QU.prompt_size trace_id=%s system_prompt_chars=%d user_message_chars=%d "
+        "total_prompt_chars=%d estimated_input_tokens=%d "
+        "recent_turns_count=%d has_recent_turns=%s "
+        "last_refs_present={course=%s role=%s track=%s skill=%s} "
+        "resolver_enabled=%s",
+        trace_id, _sys_chars, _user_chars, _total_chars, _est_tokens,
+        len(recent_turns), bool(recent_turns),
+        bool(last_referenced.course_code), bool(last_referenced.role_id),
+        bool(last_referenced.track_id), bool(last_referenced.skill_id),
+        resolver is not None,
+    )
+
+    sq_list, classification_source = _classify(
+        user_text, last_referenced, recent_turns, pre, trace_id,
+        system=_system_prompt, user_msg=_user_message,
+    )
     sq_count_before = len(sq_list)
 
     if resolver is not None:
@@ -121,22 +150,25 @@ def understand_query(
     else:
         sq_list = _filter_unresolved(sq_list)
 
-    _log_resolution_summary(sq_count_before, sq_list, resolver is not None)
+    _log_resolution_summary(sq_count_before, sq_list, resolver is not None, trace_id)
 
     if _TRACE:
         for n, sq in enumerate(sq_list):
+            eg = sq.params.get("expected_grades", {})
             logger.info(
-                "QU.sq_trace[%d] intent=%s source=%s\n"
+                "QU.sq_trace[%d] trace_id=%s intent=%s source=%s\n"
                 "  original_text: %s\n"
                 "  entities: course=%s role=%s track=%s skill=%s\n"
                 "  params: %s\n"
+                "  expected_grades_count: %d\n"
                 "  session_overrides: action=%s passed=%s failed=%s added=%s\n"
                 "  student_referential: %s",
-                n, sq.intent, classification_source,
+                n, trace_id, sq.intent, classification_source,
                 (sq.original_text or "")[:120],
                 sq.entities.course_code, sq.entities.role_id,
                 sq.entities.track_id, sq.entities.skill_id,
                 {k: v for k, v in sq.params.items() if k not in ("expected_grades",)},
+                len(eg) if isinstance(eg, dict) else 0,
                 sq.session_overrides.override_action,
                 sq.session_overrides.assumed_passed_courses,
                 sq.session_overrides.assumed_failed_courses,
@@ -149,7 +181,9 @@ def understand_query(
 
     duration_ms = int((time.perf_counter() - _t0) * 1000)
     logger.info(
-        "QU.result sq_count=%d intents=%s source=%s resolver_enabled=%s duration_ms=%d",
+        "QU.result trace_id=%s sq_count=%d intents=%s source=%s "
+        "resolver_enabled=%s duration_ms=%d",
+        trace_id,
         len(sq_list),
         [sq.intent for sq in sq_list],
         classification_source,
@@ -166,6 +200,9 @@ def _classify(
     last_referenced: LastReferenced,
     recent_turns: list[dict],
     pre: PreprocessResult,
+    trace_id: str = "",
+    system: str | None = None,
+    user_msg: str | None = None,
 ) -> tuple[list[StructuredQuery], str]:
     source = "deterministic_fallback_unexpected_error"
     try:
@@ -173,11 +210,17 @@ def _classify(
         if not client.is_configured():
             raise LLMNotConfigured("LLM not configured")
 
+        if system is None:
+            system = build_system_prompt()
+        if user_msg is None:
+            user_msg = build_user_message(user_text, last_referenced, recent_turns)
+
         chain = QUModelChain(client)
         raw_list = chain.call(
-            system=build_system_prompt(),
-            user_msg=build_user_message(user_text, last_referenced, recent_turns),
+            system=system,
+            user_msg=user_msg,
             valid_intents=LOCKED_INTENTS,
+            trace_id=trace_id,
         )
         sq_list = [_parse_raw_sq(r, user_text) for r in raw_list if r]
         sq_list = _normalize_structured_queries_after_llm(sq_list, user_text, pre, last_referenced)
@@ -579,6 +622,7 @@ def _log_resolution_summary(
     sq_count_before: int,
     sq_list: list[StructuredQuery],
     resolver_enabled: bool,
+    trace_id: str = "",
 ) -> None:
     clar_count = sum(1 for sq in sq_list if sq.intent == "clarification_needed")
     oos_count = sum(1 for sq in sq_list if sq.intent == "out_of_scope")
@@ -601,10 +645,14 @@ def _log_resolution_summary(
         if sq.session_overrides.override_action != "accumulate"
     })
     logger.info(
-        "QU.resolve resolver=%s sq_before=%d sq_after=%d clarification=%d oos=%d "
-        "entities={course=%d role=%d track=%d skill=%d} params_keys=%s "
+        "QU.resolve trace_id=%s resolver=%s "
+        "structured_queries_before_resolution=%d structured_queries_after_resolution=%d "
+        "clarification=%d out_of_scope_count=%d "
+        "resolved_entity_counts={course=%d role=%d track=%d skill=%d} "
+        "structured_query_param_keys=%s "
         "overrides_active=%s override_actions=%s",
-        resolver_enabled, sq_count_before, len(sq_list), clar_count, oos_count,
+        trace_id, resolver_enabled,
+        sq_count_before, len(sq_list), clar_count, oos_count,
         course_count, role_count, track_count, skill_count,
         params_keys, overrides_active, override_actions,
     )

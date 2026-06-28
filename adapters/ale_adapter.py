@@ -180,13 +180,14 @@ def call(
     rule_bundles: dict,
     kg_data: dict | None = None,
     params: dict | None = None,
+    trace_id: str = "",
 ) -> dict:
     start = time.perf_counter()
     kg_data = kg_data or {}
     params = params or {}
     logger.info(
-        "ALEAdapter.call start operation=%s params=%s kg_data=%s",
-        operation,
+        "ALEAdapter.call start trace_id=%s operation=%s params=%s kg_data=%s",
+        trace_id, operation,
         _summarize_params(params),
         _summarize_kg_data(kg_data),
     )
@@ -196,11 +197,9 @@ def call(
         summary = _summarize_result(result)
         log = logger.warning if status in {"cannot_compute", "error"} else logger.info
         log(
-            "ALEAdapter.call result operation=%s status=%s summary=%s duration_ms=%d",
-            operation,
-            status,
-            summary,
-            _duration_ms(start),
+            "ALEAdapter.call result trace_id=%s operation=%s status=%s "
+            "summary=%s duration_ms=%d",
+            trace_id, operation, status, summary, _duration_ms(start),
         )
         return result
     except ValidationError as exc:
@@ -216,24 +215,25 @@ def call(
             "operation": operation,
         }
         logger.warning(
-            "ALEAdapter.call result operation=%s status=cannot_compute reason_codes=%s duration_ms=%d",
-            operation, ["invalid_input"], _duration_ms(start),
+            "ALEAdapter.call result trace_id=%s operation=%s status=cannot_compute "
+            "reason_codes=%s duration_ms=%d",
+            trace_id, operation, ["invalid_input"], _duration_ms(start),
         )
         return result
     except ValueError as exc:
         logger.error("ALEAdapter.call operation=%s: bad value or unknown operation: %s", operation, exc)
         result = {"status": "error", "message": str(exc), "operation": operation}
         logger.warning(
-            "ALEAdapter.call result operation=%s status=error duration_ms=%d",
-            operation, _duration_ms(start),
+            "ALEAdapter.call result trace_id=%s operation=%s status=error duration_ms=%d",
+            trace_id, operation, _duration_ms(start),
         )
         return result
     except Exception as exc:
         logger.error("ALEAdapter.call operation=%s failed unexpectedly: %s", operation, exc)
         result = {"status": "error", "message": str(exc), "operation": operation}
         logger.warning(
-            "ALEAdapter.call result operation=%s status=error duration_ms=%d",
-            operation, _duration_ms(start),
+            "ALEAdapter.call result trace_id=%s operation=%s status=error duration_ms=%d",
+            trace_id, operation, _duration_ms(start),
         )
         return result
 
@@ -628,5 +628,5 @@ def _generate_graduation_roadmap(sc: StudentContext, rule_bundles: dict, kg_data
 
 class ALEAdapter:
     """Thin class wrapper — delegates to the module-level call() function."""
-    def call(self, operation, student_context, rule_bundles, kg_data=None, params=None):
-        return call(operation, student_context, rule_bundles, kg_data or {}, params or {})
+    def call(self, operation, student_context, rule_bundles, kg_data=None, params=None, trace_id=""):
+        return call(operation, student_context, rule_bundles, kg_data or {}, params or {}, trace_id=trace_id)

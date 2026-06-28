@@ -1625,17 +1625,46 @@ def _strip_fabricated_sources(text: str) -> str:
     return text.strip()
 
 
+def _classify_composer_failure(exc: Exception) -> str:
+    """Classify a Composer chain failure into a diagnostic category."""
+    if isinstance(exc, LLMError):
+        msg = str(exc).lower()
+        if "timed out" in msg or "timeout" in msg:
+            return "timeout"
+        if "http 429" in msg:
+            return "rate_limit"
+        if "http 413" in msg:
+            return "payload_too_large"
+        if "not valid json" in msg or "not a json object" in msg:
+            return "invalid_json"
+        return "llm_error"
+    return "unknown"
+
+
 def _try_llm_chain(
     llm: LLMClient,
     user_msg: str,
     primary: str,
     fallbacks: list[str],
     timeout_seconds: float,
+    trace_id: str = "",
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Try primary then fallback models. Returns (answer, model_used, failure_reason)."""
+    all_models = [primary] + fallbacks
+    n_models = len(all_models)
+    sys_chars = len(_SYSTEM_PROMPT)
+    user_chars = len(user_msg)
+    est_tokens = (sys_chars + user_chars + 3) // 4
     had_error = False
     had_empty = False
-    for model in [primary] + fallbacks:
+
+    for attempt_idx, model in enumerate(all_models):
+        _attempt_t0 = time.monotonic()
+        logger.info(
+            "Composer.model_attempt trace_id=%s attempt=%d/%d model=%s "
+            "timeout=%.1fs estimated_tokens=%d",
+            trace_id, attempt_idx + 1, n_models, model, timeout_seconds, est_tokens,
+        )
         try:
             answer = llm.chat(
                 system=_SYSTEM_PROMPT,
@@ -1645,26 +1674,45 @@ def _try_llm_chain(
                 timeout_seconds=timeout_seconds,
             )
             answer = _strip_think_tags(answer or "")
+            _attempt_ms = int((time.monotonic() - _attempt_t0) * 1000)
             if answer:
                 logger.info(
-                    "Composer LLM: model=%s result=success answer_len=%d",
-                    model, len(answer),
+                    "Composer.model_attempt_result trace_id=%s attempt=%d/%d model=%s "
+                    "result=success answer_len=%d duration_ms=%d "
+                    "exact_token_usage=not_available",
+                    trace_id, attempt_idx + 1, n_models, model,
+                    len(answer), _attempt_ms,
                 )
                 return answer, model, None
-            logger.warning("Composer LLM: model=%s result=empty trying_next", model)
+            logger.warning(
+                "Composer.model_attempt_result trace_id=%s attempt=%d/%d model=%s "
+                "result=empty duration_ms=%d trying_next",
+                trace_id, attempt_idx + 1, n_models, model, _attempt_ms,
+            )
             had_empty = True
         except LLMNotConfigured:
-            logger.info("Composer LLM: result=not_configured — skipping LLM path.")
+            logger.info(
+                "Composer.model_attempt_result trace_id=%s result=not_configured "
+                "— skipping LLM path.",
+                trace_id,
+            )
             return None, None, "llm_not_configured"
         except LLMError as exc:
+            _attempt_ms = int((time.monotonic() - _attempt_t0) * 1000)
+            fail_cat = _classify_composer_failure(exc)
             logger.warning(
-                "Composer LLM: model=%s result=failed error=%s trying_next",
-                model, type(exc).__name__,
+                "Composer.model_attempt_result trace_id=%s attempt=%d/%d model=%s "
+                "result=failed error_type=%s error_category=%s "
+                "error=%s duration_ms=%d trying_next",
+                trace_id, attempt_idx + 1, n_models, model,
+                type(exc).__name__, fail_cat, str(exc)[:120], _attempt_ms,
             )
             had_error = True
+
     failure_reason = "all_models_failed" if had_error else "empty_response"
     logger.warning(
-        "Composer LLM: failure_reason=%s — using deterministic fallback.", failure_reason,
+        "Composer.model_chain failure_reason=%s trace_id=%s — using deterministic fallback.",
+        failure_reason, trace_id,
     )
     return None, None, failure_reason
 
@@ -1730,13 +1778,14 @@ class ResponseComposer:
         turn: TurnWrapper,
         session_id: str,
         session_name: str,
+        trace_id: str = "",
     ) -> QueryResponse:
         """Narrate a TurnWrapper into a student-facing QueryResponse."""
         start = time.monotonic()
         safe_sid = _safe_session_id(session_id)
         logger.info(
-            "Composer.compose start session=%s turn_status=%s results=%d",
-            safe_sid, turn.turn_status, turn.result_count,
+            "Composer.compose start trace_id=%s session=%s turn_status=%s results=%d",
+            trace_id, safe_sid, turn.turn_status, turn.result_count,
         )
 
         # Ordered by sq_index so multi-SQ answers follow the original query order
@@ -1752,33 +1801,35 @@ class ResponseComposer:
         qr_status = _map_turn_status(turn)
 
         if _TRACE:
-            d6_focuses = [p.get("record_focus") for p in packets if p.get("intent") == "get_student_record"]
-            d6_styles = [p.get("response_style") for p in packets if p.get("intent") == "get_student_record"]
+            student_record_focuses = [p.get("record_focus") for p in packets if p.get("intent") == "get_student_record"]
+            student_record_response_styles = [p.get("response_style") for p in packets if p.get("intent") == "get_student_record"]
             has_course_details = any(
                 p.get("course_code") or p.get("courses") or p.get("skills")
                 for p in packets
             )
             logger.info(
-                "Composer.packet_trace session=%s\n"
+                "Composer.packet_trace trace_id=%s session=%s\n"
                 "  packet_count: %d\n"
                 "  intents: %s\n"
                 "  statuses: %s\n"
-                "  d6_focuses: %s\n"
-                "  d6_styles: %s\n"
+                "  student_record_focuses: %s\n"
+                "  student_record_response_styles: %s\n"
                 "  has_course_details: %s",
-                safe_sid,
+                trace_id, safe_sid,
                 len(packets),
                 [p.get("intent") for p in packets],
                 [p.get("status") for p in packets],
-                d6_focuses, d6_styles, has_course_details,
+                student_record_focuses, student_record_response_styles, has_course_details,
             )
 
         # LLM NLG (primary) → deterministic fallback
-        answer_text, gen_meta = self._generate(user_text, packets, qr_status)
+        answer_text, gen_meta = self._generate(user_text, packets, qr_status, trace_id=trace_id)
 
         if _TRACE:
             logger.info(
-                "Composer.generate_trace llm_used=%s model=%s fallback=%s deterministic_used=%s",
+                "Composer.generate_trace trace_id=%s llm_used=%s model=%s "
+                "fallback=%s deterministic_used=%s",
+                trace_id,
                 gen_meta["llm_used"],
                 gen_meta["model_used"],
                 gen_meta["fallback_reason"],
@@ -1786,9 +1837,10 @@ class ResponseComposer:
             )
 
         logger.info(
-            "Composer.compose result session=%s qr_status=%s llm_used=%s model=%s "
-            "fallback_reason=%s answer_len=%d citations=%d duration_ms=%d packet_summary=%s",
-            safe_sid,
+            "Composer.compose result trace_id=%s session=%s turn_status=%s "
+            "qr_status=%s llm_used=%s winning_model=%s fallback_reason=%s "
+            "answer_len=%d citations=%d duration_ms=%d packet_summary=%s",
+            trace_id, safe_sid, turn.turn_status,
             qr_status,
             gen_meta["llm_used"],
             gen_meta["model_used"],
@@ -1810,7 +1862,8 @@ class ResponseComposer:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _generate(
-        self, user_text: str, packets: list[dict], qr_status: str = "ok"
+        self, user_text: str, packets: list[dict], qr_status: str = "ok",
+        trace_id: str = "",
     ) -> tuple[str, dict]:
         """Returns (answer_text, gen_meta). gen_meta: llm_used, model_used, fallback_reason."""
         gen_meta: dict = {"llm_used": False, "model_used": None, "fallback_reason": None}
@@ -1820,8 +1873,20 @@ class ResponseComposer:
                 f"Narration packet:\n"
                 f"{json.dumps(packets, indent=2, default=str)}"
             )
+            _sys_chars = len(_SYSTEM_PROMPT)
+            _user_chars = len(user_msg)
+            _narr_chars = len(json.dumps(packets, default=str))
+            _est_tokens = (_sys_chars + _user_chars + 3) // 4
+            logger.info(
+                "Composer.prompt_size trace_id=%s result_count=%d "
+                "narration_packet_chars=%d system_prompt_chars=%d "
+                "user_message_chars=%d estimated_input_tokens=%d "
+                "exact_token_usage=not_available",
+                trace_id, len(packets), _narr_chars, _sys_chars, _user_chars, _est_tokens,
+            )
             answer, model_used, failure_reason = _try_llm_chain(
                 self._llm, user_msg, self._primary, self._fallbacks, self._timeout,
+                trace_id=trace_id,
             )
             if answer:
                 has_real_citations = any(p.get("citations") for p in packets)

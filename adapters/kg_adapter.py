@@ -118,28 +118,27 @@ class KGAdapter:
         if self._client is not None:
             self._client.close()
 
-    def call(self, operation: str, params: dict) -> dict:
+    def call(self, operation: str, params: dict, trace_id: str = "") -> dict:
         start = time.perf_counter()
         safe_params = _summarize_params(params)
 
         if _TRACE:
             param_lines = "\n".join(f"    {k}: {v}" for k, v in safe_params.items())
             logger.info(
-                "KGAdapter.trace operation=%s\n  params:\n%s",
-                operation, param_lines or "    (none)",
+                "KGAdapter.trace trace_id=%s operation=%s\n  params:\n%s",
+                trace_id, operation, param_lines or "    (none)",
             )
 
         logger.info(
-            "KGAdapter.call start operation=%s params=%s",
-            operation,
-            safe_params,
+            "KGAdapter.call start trace_id=%s operation=%s params=%s",
+            trace_id, operation, safe_params,
         )
 
         if self._client is None:
             logger.warning(
-                "KGAdapter.call result operation=%s status=adapter_error error=kg_unavailable duration_ms=%d",
-                operation,
-                _duration_ms(start),
+                "KGAdapter.call result trace_id=%s operation=%s status=adapter_error "
+                "error=kg_unavailable duration_ms=%d",
+                trace_id, operation, _duration_ms(start),
             )
             return {
                 "error": "kg_unavailable",
@@ -169,9 +168,9 @@ class KGAdapter:
         fn = dispatch.get(operation)
         if fn is None:
             logger.warning(
-                "KGAdapter.call result operation=%s status=adapter_error error=unknown_operation duration_ms=%d",
-                operation,
-                _duration_ms(start),
+                "KGAdapter.call result trace_id=%s operation=%s status=adapter_error "
+                "error=unknown_operation duration_ms=%d",
+                trace_id, operation, _duration_ms(start),
             )
             return {"error": f"unknown_operation", "detail": operation}
 
@@ -180,27 +179,25 @@ class KGAdapter:
             status, summary = _summarize_result(result)
             log = logger.warning if status != "success" else logger.info
             log(
-                "KGAdapter.call result operation=%s status=%s summary=%s duration_ms=%d",
-                operation,
-                status,
-                summary,
-                _duration_ms(start),
+                "KGAdapter.call result trace_id=%s operation=%s status=%s "
+                "summary=%s duration_ms=%d",
+                trace_id, operation, status, summary, _duration_ms(start),
             )
             return result
         except TypeError as exc:
             logger.error("KGAdapter.call(%r) bad params: %s", operation, exc)
             logger.warning(
-                "KGAdapter.call result operation=%s status=adapter_error error=bad_params duration_ms=%d",
-                operation,
-                _duration_ms(start),
+                "KGAdapter.call result trace_id=%s operation=%s status=adapter_error "
+                "error=bad_params duration_ms=%d",
+                trace_id, operation, _duration_ms(start),
             )
             return {"error": "bad_params", "detail": str(exc)}
         except Exception as exc:
             logger.exception("KGAdapter.call(%r) failed", operation)
             logger.warning(
-                "KGAdapter.call result operation=%s status=adapter_error error=kg_error duration_ms=%d",
-                operation,
-                _duration_ms(start),
+                "KGAdapter.call result trace_id=%s operation=%s status=adapter_error "
+                "error=kg_error duration_ms=%d",
+                trace_id, operation, _duration_ms(start),
             )
             return {"error": "kg_error", "detail": str(exc)}
 

@@ -37,6 +37,8 @@ PathFinder supports several advising workflows:
 - `GET /sessions/{student_id}` returns previous chat sessions for a student
 - `GET /students/{student_id}/sessions/{session_id}/history` returns conversation history with ownership verification
 - `DELETE /students/{student_id}/sessions/{session_id}` deletes a specific session owned by the student
+- `DELETE /dev/students/{student_id}/sessions` deletes all sessions for one student; available only in dev mode
+- `DELETE /dev/sessions` deletes all sessions globally; available only in dev mode
 - `GET /health` returns a basic health response
 - `GET /session/{session_id}/history` — **deprecated, returns 410 Gone**; clients must use the ownership-safe endpoint above
 
@@ -394,6 +396,122 @@ python -m streamlit run ui/streamlit_app.py
 ```
 
 UI: `http://localhost:8501`
+
+## Session Deletion And Developer Cleanup
+
+PathFinder stores chat sessions in SQLite (`SESSION_DB_PATH`). There are two deletion workflows:
+
+- Student/UI deletion: delete one session at a time from the Streamlit sidebar, or call `DELETE /students/{student_id}/sessions/{session_id}`
+- Developer cleanup: call the dev-only bulk delete endpoints directly against the backend; the Streamlit UI is not required
+
+### Student-Safe Single Session Delete
+
+Use this when you want to remove one specific chat session for a student:
+
+- Endpoint: `DELETE /students/{student_id}/sessions/{session_id}`
+- Ownership check: yes; the backend verifies that the session belongs to the given student
+- Typical use: the trash button in the Streamlit sidebar calls this endpoint
+
+### Developer Bulk Delete For One Student
+
+Use this when you want to clear all old sessions for one student before testing, without affecting other students.
+
+**Prerequisite:** dev mode must be enabled for the backend process.
+
+- Set `APP_ENV=dev` in `.env`, or set `DEV_MODE=true`
+- Restart the backend after changing `.env`
+- If dev mode is not enabled, the endpoint returns `403 Forbidden`
+
+**Step-by-step:**
+
+1. Start the backend:
+
+```bash
+python -m uvicorn main:app --reload
+```
+
+2. In a second terminal, optionally list the student's current sessions:
+
+```powershell
+Invoke-RestMethod -Method Get http://localhost:8000/sessions/STU000001
+```
+
+3. Delete all sessions for that student:
+
+```powershell
+Invoke-RestMethod -Method Delete http://localhost:8000/dev/students/STU000001/sessions
+```
+
+4. Verify that the session list is now empty:
+
+```powershell
+Invoke-RestMethod -Method Get http://localhost:8000/sessions/STU000001
+```
+
+Expected delete response:
+
+```json
+{
+  "deleted": true,
+  "student_id": "STU000001",
+  "count": 12
+}
+```
+
+Notes:
+
+- This deletes only rows whose `student_id` matches the requested student
+- It does not delete student Excel data, KG data, RAG data, or any other student sessions
+- This is the recommended fast cleanup flow for Phase 2 testing of one student
+
+### Developer Global Session Reset
+
+Use this only when you intentionally want to wipe every stored chat session for every student.
+
+- Endpoint: `DELETE /dev/sessions`
+
+PowerShell example:
+
+```powershell
+Invoke-RestMethod -Method Delete http://localhost:8000/dev/sessions
+```
+
+Expected response:
+
+```json
+{
+  "deleted": true,
+  "count": 57
+}
+```
+
+Notes:
+
+- Requires dev mode, just like the per-student bulk delete endpoint
+- Deletes all session rows from the SQLite session store
+- Does not delete Excel data, KG data, RAG data, or code
+- Use with caution; this is a full session reset for the whole app
+
+### Direct SQLite Cleanup
+
+If the backend is unavailable, a developer can delete session rows directly from the SQLite database file referenced by `SESSION_DB_PATH`.
+
+- Default DB path: `pathfinder_sessions.db`
+- Example repo-local DB path: `gateway/session_store/pathfinder_sessions.db`
+
+Typical scoped SQL for one student:
+
+```sql
+SELECT session_id, session_name, last_updated
+FROM sessions
+WHERE student_id = 'STU000001'
+ORDER BY last_updated DESC;
+
+DELETE FROM sessions
+WHERE student_id = 'STU000001';
+```
+
+Use direct DB deletion only when necessary, because it bypasses the API's normal guards and logging.
 
 ## Example Questions
 

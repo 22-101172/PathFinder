@@ -282,6 +282,50 @@ _D2_SKILLS_COURSE_AFTER_VERB_RE = re.compile(
 )
 
 
+# ── Prerequisite Depth Detection ──────────────────────────────────────────────
+
+# Matches "full prerequisites", "all prereqs", "complete prerequisite chain", etc.
+_PREREQ_FULL_DEPTH_RE = re.compile(
+    r'\b(?:full|all|complete|entire|whole|recursive)\s+'
+    r'(?:prerequisites?|prereqs?|prerequisite\s+(?:chain|tree)|prereq\s+(?:chain|tree))\b'
+    r'|'
+    r'\b(?:full|complete|entire|whole)\s+(?:chain|tree)\s+(?:of|for)\b'
+    r'|'
+    r'\bfull\s+prereq(?:s|uisite)?\b',
+    re.IGNORECASE,
+)
+
+# Matches clear prerequisite request patterns (but NOT generic mentions of the word)
+_PREREQ_INTENT_RE = re.compile(
+    r'\b(?:'
+    r'prerequisites?\s+(?:of|for|to)'
+    r'|prereqs?\s+(?:of|for|to)'
+    r'|what\s+do\s+i\s+need\s+(?:before|for)'
+    r'|before\s+taking\b'
+    r'|prerequisite\s+(?:chain|tree)\s+(?:of|for)'
+    r'|prereq\s+(?:chain|tree)\s+(?:of|for)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+
+def detect_prereq_full_depth(text: str) -> bool:
+    """Return True if query clearly requests full/all/complete prerequisite tree.
+
+    High-confidence signal: safe to patch depth="full" when LLM also outputs
+    get_course_prerequisites. Does NOT force the prerequisite intent itself.
+    """
+    return bool(_PREREQ_FULL_DEPTH_RE.search(text))
+
+
+def detect_prereq_intent(text: str) -> bool:
+    """Return True if query is a clear prerequisite request (not just mentioning the word).
+
+    Use as a supporting signal; never override LLM intent based on this alone.
+    """
+    return bool(_PREREQ_INTENT_RE.search(text))
+
+
 def detect_d2_course_info_verb(text: str) -> bool:
     """Return True if text contains a course-info request verb pattern."""
     return bool(_D2_COURSE_INFO_VERBS_RE.search(text))
@@ -530,3 +574,86 @@ def detect_d6_response_style(text: str) -> str:
     if _D6_CONCISE_RE.search(text):
         return "concise"
     return "normal"
+
+
+# ── Turn Memory Follow-up Helpers ─────────────────────────────────────────────
+
+_ORDINAL_RE = re.compile(
+    r'\b(?:the\s+)?(?P<ordinal>first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+one\b',
+    re.IGNORECASE,
+)
+
+_ORDINAL_MAP: dict[str, int] = {
+    "first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4,
+    "1st": 0, "2nd": 1, "3rd": 2, "4th": 3, "5th": 4,
+}
+
+_SUBSET_REF_RE = re.compile(r'\b(?:these|those|them|they)\b', re.IGNORECASE)
+
+_SUBSET_STATUS_WORDS: dict[str, str] = {
+    "complete": "completed", "completed": "completed",
+    "pass": "completed", "passed": "completed",
+    "fail": "failed", "failed": "failed",
+    "taking": "in_progress", "enrolled": "in_progress",
+    "in_progress": "in_progress", "current": "in_progress", "currently": "in_progress",
+}
+
+# list-type focuses that should never use one_sentence style
+_D6_LIST_FOCUSES: frozenset[str] = frozenset({
+    "in_progress_courses", "completed_courses", "failed_courses",
+    "failed_course_history", "full_record", "progress_summary",
+})
+
+# phrases that imply a list answer (incompatible with one_sentence)
+_D6_LIST_PHRASE_RE = re.compile(
+    r'\b(?:show\s+me\s+all|list\s+all|all\s+(?:the\s+)?courses?|what\s+courses?)\b',
+    re.IGNORECASE,
+)
+
+# yes/no patterns for student-status questions
+_D6_STATUS_YES_NO_RE = re.compile(
+    r'\b(?:did\s+i\s+(?:pass|fail|take|complete|finish)|'
+    r'have\s+i\s+(?:taken|passed|failed|completed)|'
+    r'am\s+i\s+(?:taking|enrolled(?:\s+in)?)|'
+    r'is\s+(?:it|this|that)\s+(?:in\s+my|on\s+my))\b',
+    re.IGNORECASE,
+)
+
+
+def detect_ordinal_reference(text: str) -> tuple[str, int] | None:
+    """Return (ordinal_word, 0-based index) if an ordinal reference is found, else None."""
+    m = _ORDINAL_RE.search(text)
+    if m:
+        word = m.group("ordinal").lower()
+        idx = _ORDINAL_MAP.get(word)
+        if idx is not None:
+            return word, idx
+    return None
+
+
+def detect_subset_reference(text: str) -> bool:
+    """Return True if text contains a pronoun reference to a previous list."""
+    return bool(_SUBSET_REF_RE.search(text))
+
+
+def detect_subset_status_filter(text: str) -> str | None:
+    """Return a status_filter string for subset course queries, or None."""
+    lower = text.lower()
+    for keyword, status in _SUBSET_STATUS_WORDS.items():
+        if keyword in lower:
+            return status
+    return None
+
+
+def is_list_incompatible_style(text: str, record_focus: str | None) -> bool:
+    """Return True when one_sentence style is inappropriate for this query."""
+    if record_focus in _D6_LIST_FOCUSES:
+        return True
+    if _D6_LIST_PHRASE_RE.search(text):
+        return True
+    return False
+
+
+def detect_status_yes_no(text: str) -> bool:
+    """Return True for 'did I pass/fail/take/am I taking' style status checks."""
+    return bool(_D6_STATUS_YES_NO_RE.search(text))

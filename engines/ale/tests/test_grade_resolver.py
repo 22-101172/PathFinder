@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from engines.ale.schemas import GradingScaleRules, PercentageRange, StudentLevelRules
+from engines.ale.ale_schemas import GradingScaleRules, PercentageRange, StudentLevelRules
 from engines.ale.utils.grade_resolver import GradeResolutionError, derive_level, resolve_grade
 
 

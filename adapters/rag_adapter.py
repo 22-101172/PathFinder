@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     RetakeRules, CreditLimitRules, SummerSemesterRules,
     GraduationRequirementRules, AcademicWarningRules,
     HonorsRules, GradingScaleRules, StudentLevelRules,

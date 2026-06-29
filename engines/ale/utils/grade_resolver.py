@@ -16,7 +16,7 @@ String inputs are normalized before lookup:
 
 import math
 
-from engines.ale.schemas import GradingScaleRules, StudentLevelRules
+from engines.ale.ale_schemas import GradingScaleRules, StudentLevelRules
 
 
 class GradeResolutionError(Exception):

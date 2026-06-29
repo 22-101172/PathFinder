@@ -8,7 +8,7 @@ No GPA math, no grade resolution. Pure eligibility logic against prerequisites,
 credit thresholds, retake rules, and in-progress state.
 """
 
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     CheckCourseEligibilityInput,
     CheckCourseEligibilityOutput,
     RetakeRules,

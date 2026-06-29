@@ -7,7 +7,7 @@ phase by phase.
 
 from dataclasses import dataclass
 
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     CourseTarget,
     GradeOverride,
     GradingScaleRules,

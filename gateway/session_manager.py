@@ -8,7 +8,7 @@ from typing import Optional
 from gateway.models.schemas import (
     LastReferenced, QUContext, SessionOverrides,
     SessionState, SessionSummary, SessionHistoryResponse,
-    StudentContext, StudentSessionsResponse, StructuredQuery,
+    StudentContext, StudentSessionsResponse, StructuredQuery, TurnMemory,
 )
 from gateway.session_store import SQLiteSessionStore
 
@@ -314,6 +314,7 @@ def update_session_after_turn(
     new_overrides: Optional[SessionOverrides] = None,
     new_last_referenced: Optional[LastReferenced] = None,
     replace_overrides: bool = False,
+    turn_memory: Optional[TurnMemory] = None,
 ) -> None:
     """
     Persist turn result to the session store.
@@ -324,6 +325,8 @@ def update_session_after_turn(
 
     last_referenced is MERGED (not replaced) so that entities from prior turns
     are preserved when the new turn only references one entity type.
+
+    turn_memory: structured TurnMemory for the next turn's QU context injection.
     """
     session = _store.load(session_id)
     if session is None:
@@ -345,11 +348,15 @@ def update_session_after_turn(
             new_last_referenced.model_dump(),
         )
 
+    if turn_memory is not None:
+        session.last_turn_memory = turn_memory
+
     _store.save(session)
     logger.debug(
-        "SessionManager: saved turn %d for session %s",
+        "SessionManager: saved turn %d for session %s (turn_memory=%s)",
         len(session.turn_history),
         session_id,
+        turn_memory is not None,
     )
 
 

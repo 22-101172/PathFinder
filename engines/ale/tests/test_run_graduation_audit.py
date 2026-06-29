@@ -30,7 +30,7 @@ Coverage:
 import pytest
 
 from engines.ale.functions.run_graduation_audit import run_graduation_audit
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     AcademicWarningRules,
     CourseHistoryEntry,
     GraduationRequirementRules,

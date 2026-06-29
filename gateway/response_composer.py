@@ -227,6 +227,15 @@ Show the matched skill name. If skill not found, include the attempted skill nam
 response so the student knows what was searched.
 33. For D6 failed_course_history: show all historically failed attempts, note that some may \
 have been retaken and passed. This is different from current failed_courses (unresolved fails only).
+34. RESPONSE STYLE CONTRACT: When response_style is "only" in the narration packet, respond with \
+EXACTLY the value of the requested field and nothing else. One sentence only — no warnings, \
+no last-semester GPA, no academic standing, no extra context. \
+Example: for record_focus=cgpa + response_style=only, produce only "Your current CGPA is 2.41." \
+and stop. Any extra sentence violates this rule.
+35. For academic warning (academic_standing="warning") WITHOUT a policy citation in the packet, \
+state the fact in measured terms ("you are currently on academic warning") but do NOT speculate \
+about consequences such as suspension, dismissal, or probation timelines. \
+Only add consequence language when the packet contains explicit RAG policy citations.
 """
 
 # ── Narration packet — per-PerSQResult extraction ─────────────────────────────
@@ -607,7 +616,33 @@ def _extract_policy(packet: dict, data: dict) -> None:
             packet[k] = val
 
 
+_SCALAR_ONLY_FIELDS: dict[str, list[str]] = {
+    "cgpa": ["cgpa"],
+    "last_semester_gpa": ["last_semester_gpa"],
+    "academic_level": ["level", "level_display"],
+    "academic_standing": ["academic_standing", "cgpa"],
+    "probation_status": ["academic_standing", "cgpa"],
+    "academic_warnings": ["consecutive_warnings", "total_warnings"],
+    "completed_credits": ["total_credit_hours_earned"],
+    "track": ["track_id", "program"],
+    "current_semester": ["current_semester"],
+    "study_status": ["study_status"],
+}
+
+
 def _extract_student_record(packet: dict, data: dict) -> None:
+    record_focus = data.get("record_focus", "full_record")
+    response_style = data.get("response_style", "normal")
+
+    # response_style="only": send the LLM only the single requested scalar — no extras
+    if response_style == "only":
+        scalar_fields = _SCALAR_ONLY_FIELDS.get(record_focus)
+        if scalar_fields:
+            for f in ["record_focus", "response_style"] + scalar_fields:
+                if f in data:
+                    packet[f] = data[f]
+            return
+
     for k in (
         "record_focus", "response_style",
         "track_id", "program", "level", "level_display", "cgpa",
@@ -619,6 +654,10 @@ def _extract_student_record(packet: dict, data: dict) -> None:
         "failed_history_codes", "failed_history_details",
         "scenario_completed_credits", "assumed_failed_courses", "assumed_passed_courses",
         "assumptions_cleared", "message",
+        # multi-course status check metadata
+        "checked_course_codes", "status_filter",
+        # display enrichment labels from Orchestrator
+        "course_display_labels",
     ):
         if k in data:
             val = data[k]
@@ -1483,7 +1522,57 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             return
 
         if record_focus == "course_status_check":
-            # Focus on enriched target course details only
+            checked_codes: list[str] = p.get("checked_course_codes") or []
+            _status_filter: str = p.get("status_filter") or ""
+            display_labels: dict[str, str] = p.get("course_display_labels") or {}
+
+            if checked_codes:
+                # Multi-course status check: report matched vs unmatched per category
+                found_completed = {d.get("course_code") for d in completed_details if isinstance(d, dict)}
+                found_in_progress = {d.get("course_code") for d in in_progress_details if isinstance(d, dict)}
+                found_failed = {d.get("course_code") for d in failed_details if isinstance(d, dict)}
+
+                def _cl(code: str) -> str:
+                    for dl in list(completed_details) + list(in_progress_details) + list(failed_details):
+                        if isinstance(dl, dict) and dl.get("course_code") == code:
+                            return _render_course_detail(dl)
+                    return display_labels.get(code) or code
+
+                matched_completed = [c for c in checked_codes if c in found_completed]
+                matched_in_progress = [c for c in checked_codes if c in found_in_progress]
+                matched_failed = [c for c in checked_codes if c in found_failed]
+                matched_any = set(matched_completed) | set(matched_in_progress) | set(matched_failed)
+                not_matched = [c for c in checked_codes if c not in matched_any]
+
+                if _status_filter == "completed":
+                    if matched_completed:
+                        lines.append(f"Of those, you have completed: {', '.join(_cl(c) for c in matched_completed)}.")
+                    if not_matched:
+                        lines.append(f"Not found in your completed courses: {', '.join(_cl(c) for c in not_matched)}.")
+                    if not matched_completed and not not_matched:
+                        lines.append("None of those courses were found in your completed courses.")
+                elif _status_filter == "in_progress":
+                    if matched_in_progress:
+                        lines.append(f"You are currently enrolled in: {', '.join(_cl(c) for c in matched_in_progress)}.")
+                    if not_matched:
+                        lines.append(f"Not currently in progress: {', '.join(_cl(c) for c in not_matched)}.")
+                elif _status_filter == "failed":
+                    if matched_failed:
+                        lines.append(f"Failed courses from that list: {', '.join(_cl(c) for c in matched_failed)}.")
+                    if not_matched:
+                        lines.append(f"Not in your failed courses: {', '.join(_cl(c) for c in not_matched)}.")
+                else:
+                    if matched_completed:
+                        lines.append(f"Completed: {', '.join(_cl(c) for c in matched_completed)}.")
+                    if matched_in_progress:
+                        lines.append(f"In progress: {', '.join(_cl(c) for c in matched_in_progress)}.")
+                    if matched_failed:
+                        lines.append(f"Failed: {', '.join(_cl(c) for c in matched_failed)}.")
+                    if not_matched:
+                        lines.append(f"Not found in your record: {', '.join(_cl(c) for c in not_matched)}.")
+                return
+
+            # Single-course or unenriched fallback (original behavior)
             if in_progress_details:
                 for d in in_progress_details[:5]:
                     lines.append(f"Yes — {_render_course_detail(d)} is in your current courses.")

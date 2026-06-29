@@ -10,7 +10,7 @@ No GPA math or grade resolution — all inputs are pre-computed by the orchestra
 
 from itertools import groupby
 
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     AcademicWarningRules,
     AuditCheck,
     CourseHistoryEntry,

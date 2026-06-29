@@ -10,7 +10,7 @@ Design rule:
 
 from engines.ale.functions.generate_semester_plan import generate_semester_plan
 from engines.ale.functions.generate_graduation_roadmap import generate_graduation_roadmap
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     AvailableCourse,
     CreditLimitRules, GraduationRequirementRules, RetakeRules,
     StudentLevelRules,

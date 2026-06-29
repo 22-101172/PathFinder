@@ -21,7 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from engines.ale.functions.solve_target_gpa import solve_target_gpa
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     GradingScaleRules,
     GraduationRequirementRules,
     PercentageRange,

@@ -36,6 +36,7 @@ from gateway.session_manager import (
 from gateway.query_understanding import understand_query
 from gateway.orchestrator import Orchestrator
 from gateway.response_composer import ResponseComposer
+from gateway.turn_memory_builder import build_turn_memory
 from adapters.kg_adapter import KGAdapter
 from adapters.rag_adapter import RAGAdapter
 from adapters.ale_adapter import ALEAdapter
@@ -196,6 +197,7 @@ async def chat(request: QueryRequest):
             recent_turns=list(session.turn_history[-QU_CONTEXT_TURNS:]),
             resolver=_resolver,
             trace_id=trace_id,
+            last_turn_memory=session.last_turn_memory,
         )
         _qu_ms = int((time.monotonic() - _qu_t0) * 1000)
 
@@ -227,6 +229,7 @@ async def chat(request: QueryRequest):
     # 5. Persist session state (store composed answer for QU context in future turns)
     turn_overrides, had_clear = merge_turn_overrides(sqs)
     new_last_ref = _orchestrator.extract_last_referenced(sqs)
+    new_turn_memory = build_turn_memory(sqs, tw, request.user_text)
 
     update_session_after_turn(
         session_id=session.session_id,
@@ -235,6 +238,7 @@ async def chat(request: QueryRequest):
         new_overrides=turn_overrides,
         new_last_referenced=new_last_ref,
         replace_overrides=had_clear,
+        turn_memory=new_turn_memory,
     )
 
     _total_ms = int((time.monotonic() - _t0) * 1000)

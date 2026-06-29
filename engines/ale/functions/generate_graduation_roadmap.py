@@ -22,7 +22,7 @@ SCP/Orchestrator boundary (never inferred inside ALE):
 
 from dataclasses import dataclass
 
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     AvailableCourse,
     CreditLimitRules,
     GenerateGraduationRoadmapInput,

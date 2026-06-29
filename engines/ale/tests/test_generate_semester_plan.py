@@ -25,7 +25,7 @@ from __future__ import annotations
 import pytest
 
 from engines.ale.functions.generate_semester_plan import generate_semester_plan
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     AvailableCourse,
     CreditLimitRules,
     GenerateSemesterPlanInput,

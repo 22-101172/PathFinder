@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 
 from engines.ale.functions.check_course_eligibility import check_course_eligibility
-from engines.ale.schemas import CheckCourseEligibilityInput, RetakeRules
+from engines.ale.ale_schemas import CheckCourseEligibilityInput, RetakeRules
 
 # ── File-availability guard ────────────────────────────────────────────────────
 

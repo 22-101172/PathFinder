@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from engines.ale.functions.generate_graduation_roadmap import generate_graduation_roadmap
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     AcademicWarningRules,
     AvailableCourse,
     CreditLimitRules,

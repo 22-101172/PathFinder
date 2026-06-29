@@ -16,7 +16,7 @@ import time
 from typing import Any, Callable
 
 from gateway.llm_client import get_llm_client, LLMNotConfigured
-from gateway.models.schemas import EntitySet, LastReferenced, SessionOverrides, StructuredQuery
+from gateway.models.schemas import EntitySet, LastReferenced, SessionOverrides, StructuredQuery, TurnMemory
 from gateway.qu_intents import LOCKED_INTENTS
 from gateway.qu_llm_chain import QUModelChain, AllModelsFailedError
 import os
@@ -35,7 +35,13 @@ from gateway.qu_preprocessing import (
     extract_d2_skill_candidate,
     detect_policy_signal,
     detect_out_of_scope,
+    detect_prereq_full_depth,
     preprocess,
+    detect_ordinal_reference,
+    detect_subset_reference,
+    detect_subset_status_filter,
+    is_list_incompatible_style,
+    detect_status_yes_no,
 )
 
 _TRACE = os.getenv("PATHFINDER_TRACE", "").lower() in ("true", "1", "yes")
@@ -75,6 +81,7 @@ def understand_query(
     recent_turns: list[dict],
     resolver: Resolver | None = None,
     trace_id: str = "",
+    last_turn_memory: TurnMemory | None = None,
 ) -> list[StructuredQuery]:
     """
     Parse user_text into an ordered list[StructuredQuery].
@@ -85,6 +92,7 @@ def understand_query(
         recent_turns: recent conversation history (compact, no PII sent to LLM)
         resolver: optional KG entity resolver; (entity_type, entity_text) -> dict
                   If None, entity resolution is skipped (LLM extraction is trusted).
+        last_turn_memory: structured memory from the previous turn for follow-up resolution.
 
     Returns:
         Non-empty list[StructuredQuery]. Never raises; always returns at least one SQ.
@@ -92,14 +100,35 @@ def understand_query(
     _t0 = time.perf_counter()
     logger.info(
         "QU.start trace_id=%s query_len=%d resolver_enabled=%s "
-        "recent_turns=%d last_refs=%s",
+        "recent_turns=%d last_refs=%s has_turn_memory=%s",
         trace_id,
         len(user_text),
         resolver is not None,
         len(recent_turns),
         {"course": bool(last_referenced.course_code), "role": bool(last_referenced.role_id),
          "track": bool(last_referenced.track_id), "skill": bool(last_referenced.skill_id)},
+        last_turn_memory is not None,
     )
+
+    if last_turn_memory is not None:
+        _am = last_turn_memory.answer_memory
+        _ordered_summary = ", ".join(
+            f"{_it.type}:{_it.code or _it.name or '?'}"
+            for _it in _am.ordered_display_items[:6]
+        )
+        logger.info(
+            "QU.turn_memory_summary trace_id=%s source_intents=%s primary_domain=%s "
+            "courses_count=%d skills_count=%d roles_count=%d tracks_count=%d "
+            "ordered_items=[%s] has_student_record_summary=%s has_policy_text=%s ambiguity=%s",
+            trace_id,
+            last_turn_memory.source_intents,
+            last_turn_memory.primary_domain,
+            len(_am.courses), len(_am.skills), len(_am.roles), len(_am.tracks),
+            _ordered_summary,
+            _am.student_record_summary is not None,
+            _am.policy_text is not None,
+            last_turn_memory.ambiguity.has_multiple_reference_groups,
+        )
 
     pre = preprocess(user_text)
     logger.info(
@@ -121,7 +150,7 @@ def understand_query(
 
     # Build prompts once for size diagnostics and chain call
     _system_prompt = build_system_prompt()
-    _user_message = build_user_message(user_text, last_referenced, recent_turns)
+    _user_message = build_user_message(user_text, last_referenced, recent_turns, last_turn_memory)
     _sys_chars = len(_system_prompt)
     _user_chars = len(_user_message)
     _total_chars = _sys_chars + _user_chars
@@ -144,6 +173,10 @@ def understand_query(
         system=_system_prompt, user_msg=_user_message,
     )
     sq_count_before = len(sq_list)
+
+    # Deterministic TurnMemory patch — runs before entity resolution
+    if last_turn_memory is not None:
+        sq_list = _patch_for_turn_memory(sq_list, user_text, last_turn_memory, trace_id)
 
     if resolver is not None:
         sq_list = _resolve_all(sq_list, resolver)
@@ -421,6 +454,21 @@ def _normalize_one_sq(
                 new_params = {**sq.params, "attempted_skill": candidate}
                 sq = sq.model_copy(update={"entities": new_entities, "params": new_params})
 
+        # D2: prerequisite depth normalization
+        # Rule: if LLM outputs get_course_prerequisites with no/invalid depth, default to "direct".
+        # Rule: if deterministic full-depth signal fires AND depth is "direct" (or missing), upgrade to "full".
+        # Rule: if LLM already says "full", trust it — never downgrade.
+        elif intent == "get_course_prerequisites":
+            current_depth = sq.params.get("depth", "")
+            if not current_depth or current_depth not in ("direct", "full"):
+                depth = "full" if detect_prereq_full_depth(text_for_extraction) else "direct"
+                new_params = {**sq.params, "depth": depth}
+                sq = sq.model_copy(update={"params": new_params})
+            elif current_depth == "direct" and detect_prereq_full_depth(text_for_extraction):
+                new_params = {**sq.params, "depth": "full"}
+                sq = sq.model_copy(update={"params": new_params})
+            # depth="full" from LLM is trusted — no downgrade
+
         # D6: fill missing record_focus from deterministic detection
         elif intent == "get_student_record":
             if not sq.params.get("record_focus"):
@@ -433,6 +481,15 @@ def _normalize_one_sq(
                 if style and style != "normal":
                     new_params = {**sq.params, "response_style": style}
                     sq = sq.model_copy(update={"params": new_params})
+            # Repair conflicting style/focus combinations
+            focus = sq.params.get("record_focus", "")
+            style = sq.params.get("response_style", "normal")
+            if style == "one_sentence" and is_list_incompatible_style(text_for_extraction, focus):
+                sq = sq.model_copy(update={"params": {**sq.params, "response_style": "normal"}})
+                style = "normal"
+            if style in ("normal", "") and detect_status_yes_no(text_for_extraction):
+                if not sq.params.get("response_style"):
+                    sq = sq.model_copy(update={"params": {**sq.params, "response_style": "yes_no"}})
 
     except Exception:
         pass  # Never crash normalization; return original sq
@@ -451,6 +508,185 @@ def _normalize_structured_queries_after_llm(
         sq = _normalize_one_sq(sq, user_text, pre, last_referenced)
         result.append(sq)
     return result
+
+
+# ── TurnMemory Deterministic Patcher ─────────────────────────────────────────
+
+def _patch_for_turn_memory(
+    sqs: list[StructuredQuery],
+    user_text: str,
+    tm: TurnMemory,
+    trace_id: str = "",
+) -> list[StructuredQuery]:
+    """
+    Deterministic patcher for obvious TurnMemory follow-up patterns.
+    Runs after LLM normalization, before entity resolution. Never crashes.
+    Handles:
+      1. Ordinal references ("the first one") → resolve to specific entity
+      2. Subset references ("these/those") → course_status_check with course_codes
+    """
+    try:
+        return _patch_for_turn_memory_impl(sqs, user_text, tm, trace_id)
+    except Exception:
+        logger.exception("QU.turn_memory_patch: unexpected error — returning unchanged SQs")
+        return sqs
+
+
+def _patch_for_turn_memory_impl(
+    sqs: list[StructuredQuery],
+    user_text: str,
+    tm: TurnMemory,
+    trace_id: str,
+) -> list[StructuredQuery]:
+    am = tm.answer_memory
+
+    # ── 1. Ordinal reference resolution ──────────────────────────────────────
+    ordinal = detect_ordinal_reference(user_text)
+    if ordinal is not None and am.ordered_display_items:
+        word, idx = ordinal
+        if idx < len(am.ordered_display_items):
+            item = am.ordered_display_items[idx]
+            all_types = {di.type for di in am.ordered_display_items}
+            # Only resolve when unambiguous: all same type, or no mixed groups
+            is_unambiguous = (
+                not tm.ambiguity.has_multiple_reference_groups
+                or len(all_types) == 1
+            )
+            if is_unambiguous and item.code and item.type == "course":
+                patched = _inject_ordinal_course(sqs, item.code, idx)
+                if patched is not None:
+                    logger.info(
+                        "QU.turn_memory_patch ordinal_resolved trace_id=%s "
+                        "ordinal=%s idx=%d code=%s",
+                        trace_id, word, idx, item.code,
+                    )
+                    return patched
+
+    # ── 2. Subset reference resolution ───────────────────────────────────────
+    if detect_subset_reference(user_text):
+        prev_courses = _get_prev_courses_from_memory(am)
+        if prev_courses:
+            lower = user_text.lower()
+            is_status_check = any(kw in lower for kw in (
+                "complete", "pass", "fail", "taking", "enrolled",
+                "already", "ever", "have i", "did i", "am i",
+            ))
+            if is_status_check:
+                status_filter = detect_subset_status_filter(lower)
+                patched = _inject_subset_course_check(sqs, prev_courses, status_filter)
+                if patched is not None:
+                    logger.info(
+                        "QU.turn_memory_patch subset_resolved trace_id=%s "
+                        "prev_courses=%s status_filter=%s",
+                        trace_id, prev_courses, status_filter,
+                    )
+                    return patched
+
+    return sqs
+
+
+def _inject_ordinal_course(
+    sqs: list[StructuredQuery], code: str, idx: int
+) -> list[StructuredQuery] | None:
+    """
+    If any SQ is clarification_needed or has a course-type intent with no entity,
+    inject the resolved course code. Returns the patched list or None if no patch needed.
+    """
+    needs_patch = any(
+        sq.intent == "clarification_needed"
+        or (sq.intent in (
+            "check_course_eligibility", "get_course_info",
+            "get_course_prerequisites", "get_skills_taught",
+        ) and not sq.entities.course_code)
+        for sq in sqs
+    )
+    if not needs_patch:
+        return None
+
+    source_ref = f"last_turn_ordered_item_{idx + 1}"
+    patched = []
+    for sq in sqs:
+        if sq.intent == "clarification_needed":
+            patched.append(sq.model_copy(update={
+                "intent": "check_course_eligibility",
+                "entities": EntitySet(course_code=code),
+                "params": {**sq.params, "source_reference": source_ref},
+                "student_referential_fallback": True,
+            }))
+        elif sq.intent in (
+            "check_course_eligibility", "get_course_info",
+            "get_course_prerequisites", "get_skills_taught",
+        ) and not sq.entities.course_code:
+            patched.append(sq.model_copy(update={
+                "entities": sq.entities.model_copy(update={"course_code": code}),
+                "params": {**sq.params, "source_reference": source_ref},
+                "student_referential_fallback": True,
+            }))
+        else:
+            patched.append(sq)
+    return patched
+
+
+def _inject_subset_course_check(
+    sqs: list[StructuredQuery], course_codes: list[str], status_filter: str | None
+) -> list[StructuredQuery] | None:
+    """
+    Patch SQs that are get_student_record (wrong focus) or clarification_needed
+    to use course_status_check with the given course_codes.
+    Returns the patched list or None if no patch needed.
+    """
+    target_intents = {"get_student_record", "clarification_needed"}
+    needs_patch = any(
+        sq.intent in target_intents
+        or (sq.intent == "get_student_record" and sq.params.get("record_focus") in (
+            "completed_courses", "failed_courses", "in_progress_courses", "full_record",
+        ))
+        for sq in sqs
+    )
+    if not needs_patch:
+        return None
+
+    patched = []
+    for sq in sqs:
+        should_patch = (
+            sq.intent in target_intents
+            or (sq.intent == "get_student_record" and sq.params.get("record_focus") in (
+                "completed_courses", "failed_courses", "in_progress_courses", "full_record",
+            ))
+        )
+        if should_patch:
+            new_params: dict = {
+                **sq.params,
+                "record_focus": "course_status_check",
+                "course_codes": course_codes,
+            }
+            if status_filter:
+                new_params["status_filter"] = status_filter
+            patched.append(sq.model_copy(update={
+                "intent": "get_student_record",
+                "params": new_params,
+                "student_referential_fallback": True,
+            }))
+        else:
+            patched.append(sq)
+    return patched
+
+
+def _get_prev_courses_from_memory(am) -> list[str]:
+    """Extract course codes from previous TurnMemory, ordered by display rank."""
+    # Prefer ordered display items (most accurate for follow-up)
+    di_courses = [
+        item.code for item in am.ordered_display_items
+        if item.type == "course" and item.code
+    ]
+    if di_courses:
+        return list(dict.fromkeys(di_courses))[:8]
+    # Fall back to course lists
+    if am.courses:
+        return am.courses[:8]
+    if am.planning_items:
+        return am.planning_items[:8]
+    return []
 
 
 # ── Deterministic Fallback ────────────────────────────────────────────────────

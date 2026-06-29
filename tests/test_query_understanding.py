@@ -1563,3 +1563,347 @@ class TestPhase2ResolverCandidateList:
         resolved_ids = result.params.get("resolved_skill_ids", [])
         assert "SK_ML" in resolved_ids
         assert "SK_DL" in resolved_ids
+
+
+# ── Prerequisite Depth Signal & Normalization Tests ───────────────────────────
+
+class TestPrereqDepthNormalization:
+    """
+    Tests for detect_prereq_full_depth signal and post-LLM normalization rules.
+
+    Positive: full/all/complete/entire/whole/chain/tree qualifiers → depth=full
+    Negative: bare "prerequisites of X" → depth=direct; policy/general context → no override
+    """
+
+    # ── Signal function ──────────────────────────────────────────────────────
+
+    def test_signal_full_prefix(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("full prerequisites of C-CS219") is True
+
+    def test_signal_all_prefix(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("all prerequisites of C-CS219") is True
+
+    def test_signal_complete_prefix(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("complete prerequisites of C-CS219") is True
+
+    def test_signal_entire_prefix(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("entire prerequisite tree for C-CS219") is True
+
+    def test_signal_complete_chain(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("complete prerequisite chain of C-CS219") is True
+
+    def test_signal_whole_prereq_chain(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("show me the whole prereq chain for C-CS219") is True
+
+    def test_signal_false_for_bare_prerequisites(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("prerequisites of C-CS219") is False
+
+    def test_signal_false_for_prereq_policy_sentence(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("I heard prerequisites are confusing, what is the registration policy?") is False
+
+    def test_signal_false_for_general_prereq_mention(self):
+        from gateway.qu_preprocessing import detect_prereq_full_depth
+        assert detect_prereq_full_depth("Can you explain what prerequisites mean?") is False
+
+    # ── Post-LLM normalization: depth upgrade ────────────────────────────────
+
+    def _normalize(self, intent: str, params: dict, user_text: str) -> StructuredQuery:
+        from gateway.query_understanding import _normalize_one_sq
+        sq = StructuredQuery(
+            intent=intent,
+            original_text=user_text,
+            entities=EntitySet(course_code="C-CS219"),
+            params=params,
+        )
+        return _normalize_one_sq(sq, user_text, PreprocessResult(), LastReferenced())
+
+    def test_normalization_upgrades_direct_to_full_when_signal_fires(self):
+        """LLM says depth=direct but 'full prerequisites' → normalization upgrades to full."""
+        sq = self._normalize(
+            "get_course_prerequisites",
+            {"depth": "direct"},
+            "What are the full prerequisites of C-CS219?",
+        )
+        assert sq.params.get("depth") == "full"
+
+    def test_normalization_keeps_full_when_llm_correct(self):
+        """LLM says depth=full for 'all prerequisites' → normalization keeps full."""
+        sq = self._normalize(
+            "get_course_prerequisites",
+            {"depth": "full"},
+            "all prerequisites of C-CS219",
+        )
+        assert sq.params.get("depth") == "full"
+
+    def test_normalization_defaults_to_direct_when_no_signal(self):
+        """LLM omits depth for bare 'prerequisites of X' → defaults to direct."""
+        sq = self._normalize(
+            "get_course_prerequisites",
+            {},
+            "prerequisites of C-CS219",
+        )
+        assert sq.params.get("depth") == "direct"
+
+    def test_normalization_sets_full_from_missing_depth_with_signal(self):
+        """LLM omits depth but 'complete prereq chain' → normalization sets full."""
+        sq = self._normalize(
+            "get_course_prerequisites",
+            {},
+            "show the complete prereq chain of C-CS219",
+        )
+        assert sq.params.get("depth") == "full"
+
+    def test_normalization_does_not_downgrade_llm_full(self):
+        """If LLM says full but signal is absent, trust LLM — do not downgrade to direct."""
+        sq = self._normalize(
+            "get_course_prerequisites",
+            {"depth": "full"},
+            "prerequisites of C-CS219",  # no full signal
+        )
+        assert sq.params.get("depth") == "full"
+
+    def test_normalization_does_not_affect_other_intents(self):
+        """Depth normalization only applies to get_course_prerequisites, not other intents."""
+        from gateway.query_understanding import _normalize_one_sq
+        sq = StructuredQuery(
+            intent="get_course_info",
+            original_text="full details of C-CS219",
+            entities=EntitySet(course_code="C-CS219"),
+            params={},
+        )
+        result = _normalize_one_sq(sq, "full details of C-CS219", PreprocessResult(), LastReferenced())
+        assert result.intent == "get_course_info"
+        assert "depth" not in result.params
+
+    # ── LLM mock: depth patching end-to-end ──────────────────────────────────
+
+    def test_llm_mock_direct_upgraded_to_full_on_full_text(self, monkeypatch):
+        """End-to-end: LLM returns depth=direct for 'full prerequisites' → patched to full."""
+        response = _sq_json(
+            "get_course_prerequisites",
+            original_text="What are the full prerequisites of C-CS219?",
+            entities={"course_code": "C-CS219", "role": None, "track": None, "skill": None},
+            params={"depth": "direct"},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu(
+            "What are the full prerequisites of C-CS219?",
+            client, monkeypatch=monkeypatch,
+        )
+        assert result[0].intent == "get_course_prerequisites"
+        assert result[0].params.get("depth") == "full"
+
+    def test_llm_mock_depth_direct_kept_for_bare_prereq(self, monkeypatch):
+        """End-to-end: LLM returns depth=direct for bare 'prerequisites of X' → kept as direct."""
+        response = _sq_json(
+            "get_course_prerequisites",
+            original_text="prerequisites of C-CS219",
+            entities={"course_code": "C-CS219", "role": None, "track": None, "skill": None},
+            params={"depth": "direct"},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("prerequisites of C-CS219", client, monkeypatch=monkeypatch)
+        assert result[0].params.get("depth") == "direct"
+
+    # ── Negative / anti-rigid tests ──────────────────────────────────────────
+
+    def test_policy_sentence_with_prereq_word_stays_policy(self, monkeypatch):
+        """'I heard prerequisites are confusing, what is the registration policy?' → policy_query."""
+        response = _sq_json(
+            "policy_query",
+            original_text="What is the course registration policy?",
+        )
+        client = _make_mock_client([response])
+        result = _run_qu(
+            "I heard prerequisites are confusing, what is the registration policy?",
+            client, monkeypatch=monkeypatch,
+        )
+        assert result[0].intent == "policy_query"
+
+    def test_policy_sentence_not_overridden_by_normalization(self, monkeypatch):
+        """Normalization must NOT convert policy_query to get_course_prerequisites."""
+        response = _sq_json(
+            "policy_query",
+            original_text="What is the policy for prerequisites?",
+        )
+        client = _make_mock_client([response])
+        result = _run_qu(
+            "I heard full prerequisites are confusing, what is the policy?",
+            client, monkeypatch=monkeypatch,
+        )
+        assert result[0].intent == "policy_query"
+
+    def test_before_track_choice_not_prereq_intent(self, monkeypatch):
+        """'Before I choose a track, explain the policy' → NOT get_course_prerequisites."""
+        response = _sq_json(
+            "policy_query",
+            original_text="What is the policy for choosing a track?",
+        )
+        client = _make_mock_client([response])
+        result = _run_qu(
+            "Before I choose a track, can you explain the policy?",
+            client, monkeypatch=monkeypatch,
+        )
+        assert result[0].intent != "get_course_prerequisites"
+
+    def test_deterministic_fallback_prereq_policy_sentence(self):
+        """Deterministic fallback: 'registration policy' sentence containing 'prerequisite' → policy_query."""
+        from gateway.qu_preprocessing import preprocess
+        text = "I heard prerequisites are confusing, what is the registration policy?"
+        pre = preprocess(text)
+        result = _deterministic_fallback(text, pre)
+        assert result[0].intent == "policy_query"
+
+
+# ── Compare Tracks, Course-Info vs Skill-Search, CGPA+Style ──────────────────
+
+class TestCriticalBehaviorGuards:
+    """
+    Guards for critical behaviors that must be preserved after prompt compression.
+    All tests use mocked LLM so we test the normalization pipeline, not LLM output.
+    """
+
+    # ── Compare tracks produces ONE SQ ──────────────────────────────────────
+
+    def test_compare_tracks_one_sq_with_secondary(self, monkeypatch):
+        """'Compare AI and DSE tracks' → one SQ, compare_tracks, secondary_entities.track=DSE.
+
+        Uses canonical IDs (AI, DSE) so _filter_unresolved keeps them without a resolver.
+        """
+        sq_data = {
+            "intent": "compare_tracks",
+            "original_text": "Compare AI and Data Science tracks",
+            "entities": {"course_code": None, "role": None, "track": "AI", "skill": None},
+            "secondary_entities": {"course_code": None, "role": None, "track": "DSE", "skill": None},
+            "params": {},
+            "session_overrides": {
+                "added_courses": [], "assumed_passed_courses": [], "assumed_failed_courses": [],
+                "target_role": None, "course_override_type": "none", "override_action": "accumulate",
+            },
+            "student_referential_fallback": False,
+        }
+        response = json.dumps({"queries": [sq_data]})
+        client = _make_mock_client([response])
+        result = _run_qu("Compare AI and Data Science tracks", client, monkeypatch=monkeypatch)
+
+        assert len(result) == 1
+        assert result[0].intent == "compare_tracks"
+        assert result[0].entities.track_id == "AI"
+        assert result[0].secondary_entities is not None
+        assert result[0].secondary_entities.track_id == "DSE"
+
+    # ── Course info vs skill search distinction ──────────────────────────────
+
+    def test_tell_me_about_database_systems_is_course_info(self, monkeypatch):
+        """'Tell me about Database Systems' → get_course_info (not search_courses_by_skill)."""
+        response = _sq_json(
+            "get_course_info",
+            original_text="Tell me about Database Systems",
+            entities={"course_code": "Database Systems", "role": None, "track": None, "skill": None},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("Tell me about Database Systems", client, monkeypatch=monkeypatch)
+        assert result[0].intent == "get_course_info"
+
+    def test_courses_for_learning_databases_is_skill_search(self, monkeypatch):
+        """'I want courses for learning databases' → search_courses_by_skill (not get_course_info)."""
+        response = _sq_json(
+            "search_courses_by_skill",
+            original_text="I want courses for learning databases",
+            entities={"course_code": None, "role": None, "track": None, "skill": "databases"},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("I want courses for learning databases", client, monkeypatch=monkeypatch)
+        assert result[0].intent == "search_courses_by_skill"
+
+    def test_which_courses_teach_machine_learning_is_skill_search(self, monkeypatch):
+        """'Which courses teach machine learning?' → search_courses_by_skill.
+
+        skill_id is nulled by _filter_unresolved without a resolver (non-SK_ prefix);
+        the important guard here is intent correctness, not entity resolution.
+        """
+        response = _sq_json(
+            "search_courses_by_skill",
+            original_text="Which courses teach machine learning?",
+            entities={"course_code": None, "role": None, "track": None, "skill": "machine learning"},
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("Which courses teach machine learning?", client, monkeypatch=monkeypatch)
+        assert result[0].intent == "search_courses_by_skill"
+
+    # ── Record focus: cgpa + response_style=only ─────────────────────────────
+
+    def test_only_my_cgpa_sets_focus_and_style(self, monkeypatch):
+        """'only my CGPA' → record_focus=cgpa, response_style=only."""
+        response = _sq_json(
+            "get_student_record",
+            original_text="Only tell me my CGPA.",
+            params={"record_focus": "cgpa", "response_style": "only"},
+            student_referential_fallback=True,
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("only my CGPA", client, monkeypatch=monkeypatch)
+        assert result[0].intent == "get_student_record"
+        assert result[0].params.get("record_focus") == "cgpa"
+        assert result[0].params.get("response_style") == "only"
+
+    # ── Reset assumptions clears overrides ───────────────────────────────────
+
+    def test_reset_assumptions_llm_mock_clears(self, monkeypatch):
+        """'reset assumptions' → get_student_record with override_action=clear."""
+        response = _sq_json(
+            "get_student_record",
+            original_text="Reset what-if assumptions",
+            session_overrides={
+                "added_courses": [], "assumed_passed_courses": [], "assumed_failed_courses": [],
+                "target_role": None, "course_override_type": "none", "override_action": "clear",
+            },
+            student_referential_fallback=True,
+        )
+        client = _make_mock_client([response])
+        result = _run_qu("reset assumptions", client, monkeypatch=monkeypatch)
+        assert result[0].intent == "get_student_record"
+        assert result[0].session_overrides.override_action == "clear"
+
+    # ── Prompt content boundary tests ────────────────────────────────────────
+
+    def test_prompt_contains_prereq_depth_guidance(self):
+        """Compressed prompt must still contain prerequisite depth routing rule."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "depth" in prompt
+        assert "full" in prompt
+        assert "direct" in prompt
+
+    def test_prompt_contains_forbidden_intents_block(self):
+        """Compressed prompt must still warn against forbidden intents."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "FORBIDDEN INTENTS" in prompt
+        assert "get_prerequisites" in prompt
+        assert "handbook_query" in prompt
+
+    def test_prompt_contains_compare_tracks_rule(self):
+        """Compressed prompt must contain compare_tracks routing."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "compare_tracks" in prompt
+        assert "secondary_entities" in prompt
+
+    def test_prompt_size_reduced_from_baseline(self):
+        """Compressed prompt must be substantially smaller than the 41,484 char baseline."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        chars = len(prompt)
+        estimated_tokens = (chars + 3) // 4
+        # Must be less than 75% of baseline (41,484 chars = 10,371 tokens)
+        assert chars < 31_000, f"Prompt too large: {chars} chars (baseline was 41,484)"
+        assert estimated_tokens < 7_800, f"Estimated tokens too high: {estimated_tokens} (baseline was 10,371)"

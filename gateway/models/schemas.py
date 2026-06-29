@@ -9,15 +9,84 @@ class Turn(TypedDict):
     answer: str
 
 
+class Citation(BaseModel):
+    source: str
+    page: Optional[int] = None
+
+
+# ── Structured Turn Memory ────────────────────────────────────────────────────
+
+class DisplayItem(BaseModel):
+    """One visible item from the previous answer, ordered for follow-up resolution."""
+    type: Literal["course", "skill", "role", "track", "policy", "planning_item"]
+    code: Optional[str] = None
+    name: Optional[str] = None
+    source_intent: str
+    source_field: Optional[str] = None
+    rank: int = 0
+
+
+class PolicyText(BaseModel):
+    """Compact natural-language policy memory — no symbolic labels, no full chunks."""
+    answer_brief: str   # capped to 500 chars
+    citations: list[Citation] = Field(default_factory=list)
+
+
+class QueryMemory(BaseModel):
+    """What the student asked and what QU understood last turn."""
+    user_text_brief: str = ""  # capped to 160 chars
+    intents: list[str] = Field(default_factory=list)
+    entities: dict[str, list[str]] = Field(default_factory=dict)  # {courses,skills,roles,tracks}
+    params: dict[str, Any] = Field(default_factory=dict)
+    student_referential: bool = False
+
+
+class AnswerMemory(BaseModel):
+    """What the system exposed in the last answer — safe for QU context injection."""
+    policy_text: Optional[PolicyText] = None
+    student_record_summary: Optional[str] = None  # capped to 300 chars; no PII
+    courses: list[str] = Field(default_factory=list)        # max 8 course codes
+    skills: list[str] = Field(default_factory=list)         # max 10 skill IDs
+    roles: list[str] = Field(default_factory=list)          # max 8 role IDs
+    tracks: list[str] = Field(default_factory=list)         # max 5 track IDs
+    planning_items: list[str] = Field(default_factory=list) # max 8 course codes
+    gpa_scenario: Optional[str] = None
+    ordered_display_items: list[DisplayItem] = Field(default_factory=list)  # max 12
+
+
+class AmbiguityGroup(BaseModel):
+    label: str
+    item_type: str
+    items: list[str] = Field(default_factory=list)
+
+
+class AmbiguityMeta(BaseModel):
+    has_multiple_reference_groups: bool = False
+    groups: list[AmbiguityGroup] = Field(default_factory=list)
+
+
+class TurnMemory(BaseModel):
+    """
+    One compact structured memory object per completed turn.
+    Never stores: raw Composer answer, full StudentContext, student name,
+    student ID, full transcript, or hardcoded symbolic policy labels.
+    """
+    source_intents: list[str] = Field(default_factory=list)
+    primary_domain: Literal[
+        "policy", "student_record", "course", "career",
+        "track", "planning", "mixed", "control"
+    ] = "mixed"
+    query_memory: QueryMemory = Field(default_factory=QueryMemory)
+    answer_memory: AnswerMemory = Field(default_factory=AnswerMemory)
+    ambiguity: AmbiguityMeta = Field(default_factory=AmbiguityMeta)
+
+
+# ── API / Request / Response ──────────────────────────────────────────────────
+
 class QueryRequest(BaseModel):
     session_id: Optional[str] = None
     user_text: str
     student_id: str
-
-
-class Citation(BaseModel):
-    source: str
-    page: Optional[int] = None
 
 
 class QueryResponse(BaseModel):
@@ -136,6 +205,7 @@ class SessionState(BaseModel):
     last_referenced: LastReferenced = Field(default_factory=LastReferenced)
     overrides: SessionOverrides = Field(default_factory=SessionOverrides)
     turn_history: list[Turn] = Field(default_factory=list)
+    last_turn_memory: Optional[TurnMemory] = None
 
 
 class RAGResult(BaseModel):

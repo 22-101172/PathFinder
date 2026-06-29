@@ -18,7 +18,7 @@ from engines.ale.functions.run_graduation_audit import run_graduation_audit
 from engines.ale.functions.generate_semester_plan import generate_semester_plan
 from engines.ale.functions.generate_graduation_roadmap import generate_graduation_roadmap
 from engines.ale.utils.grade_resolver import GradeResolutionError, resolve_grade
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     SimulateGPAForwardInput, SolveTargetGPAInput,
     CheckCourseEligibilityInput, RunGraduationAuditInput,
     GenerateSemesterPlanInput, GenerateGraduationRoadmapInput,

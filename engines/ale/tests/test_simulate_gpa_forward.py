@@ -20,7 +20,7 @@ import pytest
 from pydantic import ValidationError
 
 from engines.ale.functions.simulate_gpa_forward import simulate_gpa_forward
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     GradingScaleRules,
     PercentageRange,
     PlannedCourseGPA,

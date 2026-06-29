@@ -9,7 +9,7 @@ No grade resolution, no GPA math. Pure eligibility and priority scoring.
 
 from dataclasses import dataclass
 
-from engines.ale.schemas import (
+from engines.ale.ale_schemas import (
     AvailableCourse,
     CreditLimitRules,
     GenerateSemesterPlanInput,

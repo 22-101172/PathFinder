@@ -355,6 +355,7 @@ class Orchestrator:
             )
             results.append(result)
 
+        results = self._apply_display_enrichment(results, caches)
         wrapper = _build_turn_wrapper(turn_id, session.session_id, timestamp, results)
         _turn_ms = int((time.monotonic() - _turn_t0) * 1000)
         logger.info(
@@ -855,7 +856,7 @@ class Orchestrator:
                            "Which courses are you planning to take? Please specify course codes or names.")
 
         # KG: get_course_profile per planned course for real credits
-        from engines.ale.schemas import PlannedCourseGPA
+        from engines.ale.ale_schemas import PlannedCourseGPA
         planned_course_gpa_list = []
         for code in planned_course_codes:
             if code not in caches.course_profile_cache:
@@ -953,7 +954,7 @@ class Orchestrator:
                         f"Missing rule bundles: {missing_b}")
 
         # If already met, pass empty planned_courses — ALE returns already_met shape
-        from engines.ale.schemas import PlannedCourseTarget
+        from engines.ale.ale_schemas import PlannedCourseTarget
         planned_courses_target = []
 
         if ctx.cgpa is None or target_cgpa > ctx.cgpa:
@@ -1375,6 +1376,10 @@ class Orchestrator:
         record_focus = sq.params.get("record_focus") or "full_record"
         response_style = sq.params.get("response_style") or "normal"
 
+        # Guard: a clear-override action means reset_assumptions — never enrich full record
+        if had_clear and record_focus not in _D6_NO_ENRICH_FOCUSES:
+            record_focus = "reset_assumptions"
+
         # Compute academic_standing from rule bundles
         warning_rules = rule_bundles.get("academic_warning_rules")
         if ctx.cgpa is None:
@@ -1394,6 +1399,9 @@ class Orchestrator:
         # Focus-aware enrichment: skip KG calls for scalar-only or no-enrich focuses
         failed_history_codes: list = []
         failed_history_details: list = []
+        # multi-course status_check metadata — populated in course_status_check branch
+        _checked_course_codes: list[str] = []
+        _snapshot_status_filter: Optional[str] = None
 
         if record_focus in _D6_SCALAR_FOCUSES or record_focus in _D6_NO_ENRICH_FOCUSES:
             completed_details: list = []
@@ -1412,18 +1420,49 @@ class Orchestrator:
             in_progress_details = []
             failed_details = self._enrich_course_details(ctx.failed_courses or [], caches)
         elif record_focus in _D6_COURSE_STATUS_CHECK_FOCUSES:
-            target_code = sq.entities.course_code
-            if target_code:
-                # Enrich only the target course, not all courses
-                completed_details = self._enrich_course_details(
-                    [c for c in (ctx.completed_courses or []) if c == target_code], caches
-                )
-                in_progress_details = self._enrich_course_details(
-                    [c for c in (ctx.in_progress_courses or []) if c == target_code], caches
-                )
-                failed_details = self._enrich_course_details(
-                    [c for c in (ctx.failed_courses or []) if c == target_code], caches
-                )
+            _target_code = sq.entities.course_code
+            _target_codes: list[str] = sq.params.get("course_codes") or []
+            _status_filter: Optional[str] = sq.params.get("status_filter")
+
+            if _target_code:
+                _checked_course_codes = [_target_code]
+            elif _target_codes:
+                _checked_course_codes = _target_codes
+            else:
+                _checked_course_codes = []
+
+            _snapshot_status_filter = _status_filter
+
+            if _checked_course_codes:
+                _target_set = set(_checked_course_codes)
+                if _status_filter == "completed":
+                    completed_details = self._enrich_course_details(
+                        [c for c in (ctx.completed_courses or []) if c in _target_set], caches
+                    )
+                    in_progress_details = []
+                    failed_details = []
+                elif _status_filter == "in_progress":
+                    completed_details = []
+                    in_progress_details = self._enrich_course_details(
+                        [c for c in (ctx.in_progress_courses or []) if c in _target_set], caches
+                    )
+                    failed_details = []
+                elif _status_filter == "failed":
+                    completed_details = []
+                    in_progress_details = []
+                    failed_details = self._enrich_course_details(
+                        [c for c in (ctx.failed_courses or []) if c in _target_set], caches
+                    )
+                else:
+                    completed_details = self._enrich_course_details(
+                        [c for c in (ctx.completed_courses or []) if c in _target_set], caches
+                    )
+                    in_progress_details = self._enrich_course_details(
+                        [c for c in (ctx.in_progress_courses or []) if c in _target_set], caches
+                    )
+                    failed_details = self._enrich_course_details(
+                        [c for c in (ctx.failed_courses or []) if c in _target_set], caches
+                    )
             else:
                 # No specific course — enrich current courses only
                 completed_details = []
@@ -1493,6 +1532,13 @@ class Orchestrator:
             "assumed_passed_courses": assumed_passed,
         }
 
+        # Add multi-course status_check metadata for Composer
+        if record_focus in _D6_COURSE_STATUS_CHECK_FOCUSES:
+            if _checked_course_codes:
+                snapshot["checked_course_codes"] = _checked_course_codes
+            if _snapshot_status_filter:
+                snapshot["status_filter"] = _snapshot_status_filter
+
         if had_clear:
             snapshot["assumptions_cleared"] = True
             snapshot["message"] = (
@@ -1502,6 +1548,87 @@ class Orchestrator:
 
         return _ok(sq_index, intent, snapshot,
                    override_state_active=True if assumptions_active else None)
+
+    # ── Display enrichment finalizer ──────────────────────────────────────────
+
+    _DISPLAY_ENRICH_CAP = 12
+
+    def _apply_display_enrichment(
+        self, results: list[PerSQResult], caches: _TurnCaches,
+    ) -> list[PerSQResult]:
+        """
+        Post-process: attach course_display_labels to get_student_record results
+        that contain raw course code lists not already covered by enriched details.
+        Uses course_profile_cache; capped at _DISPLAY_ENRICH_CAP per turn. Never raises.
+        """
+        try:
+            return self._apply_display_enrichment_impl(results, caches)
+        except Exception:
+            logger.exception("Orchestrator.display_enrichment: error — skipping")
+            return results
+
+    def _apply_display_enrichment_impl(
+        self, results: list[PerSQResult], caches: _TurnCaches,
+    ) -> list[PerSQResult]:
+        budget = self._DISPLAY_ENRICH_CAP
+        enriched = []
+        for result in results:
+            if (
+                result.status in ("error", "out_of_scope", "clarification_needed")
+                or result.intent != "get_student_record"
+                or not result.data
+            ):
+                enriched.append(result)
+                continue
+
+            data = result.data
+            focus = data.get("record_focus", "")
+            if (
+                focus in _D6_SCALAR_FOCUSES
+                or focus in _D6_NO_ENRICH_FOCUSES
+                or focus in _D6_COURSE_STATUS_CHECK_FOCUSES
+            ):
+                enriched.append(result)
+                continue
+
+            # Codes already covered by enriched detail dicts
+            detailed: set[str] = set()
+            for df in ("completed_course_details", "in_progress_course_details", "failed_course_details"):
+                for d in data.get(df) or []:
+                    if isinstance(d, dict) and d.get("course_code"):
+                        detailed.add(d["course_code"])
+
+            # Raw codes that need a display label
+            raw: list[str] = []
+            for field in ("in_progress_courses", "completed_courses", "failed_courses"):
+                for code in data.get(field) or []:
+                    if isinstance(code, str) and code not in detailed and code not in raw:
+                        raw.append(code)
+
+            if not raw or budget <= 0:
+                enriched.append(result)
+                continue
+
+            to_enrich = raw[:budget]
+            labels: dict[str, str] = {}
+            for code in to_enrich:
+                if code not in caches.course_profile_cache:
+                    profile = self._kg.call("get_course_profile", {"course_code": code})
+                    caches.course_profile_cache[code] = profile
+                profile = caches.course_profile_cache.get(code, {})
+                if isinstance(profile, dict) and not profile.get("error") and profile.get("name"):
+                    labels[code] = f"{profile['name']} ({code})"
+                else:
+                    labels[code] = f"{code} (course name not available in catalogue)"
+                budget -= 1
+
+            if labels:
+                enriched.append(result.model_copy(update={
+                    "data": {**data, "course_display_labels": labels}
+                }))
+            else:
+                enriched.append(result)
+        return enriched
 
     # ── KG helper ─────────────────────────────────────────────────────────────
 

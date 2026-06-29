@@ -173,6 +173,24 @@ Neither present → omit semester params
 FOLLOW-UP: Resolve "it"/"that course"/"this role" using provided last_course/last_role/last_track/last_skill context; \
 if referent is ambiguous → clarification_needed
 
+ENTITY EXTRACTION PRIORITY:
+Always extract the EXPLICIT entity named in the current student message. \
+last_course/last_role/last_track/last_skill context ONLY resolves PRONOUNS ("it", "that course", "this one"). \
+NEVER substitute last_course when the user explicitly names a different course. \
+Example: "which level is the data analysis course available in?" → course="data analysis" (not last_course). \
+Always set raw_entity_mention to the exact phrase the student used.
+
+TRACK MEMBERSHIP DISAMBIGUATION:
+"Which track does [COURSE] belong to?" / "What track is [COURSE] in?" / "To which track does [COURSE] belong?" \
+→ get_course_info, course_code=[COURSE]. These ask about the course's track property, NOT a track overview. \
+Only use recommend_track_for_skill when wording is "best track for learning [skill]" or "track for someone interested in [skill]". \
+Never emit get_track_overview or recommend_track_for_skill for "which track does [named course] belong to".
+
+LLM COURSE CODE SAFETY:
+Never invent or guess course codes. course_code must be either: (a) the exact code typed by the student, \
+or (b) the natural-language name/alias the student used (resolver will convert it). \
+If you are unsure of the correct code, output the course name as-is and let the resolver handle it.
+
 EXAMPLES:
 
 Input: "i wanna be data scientist what am i missing"

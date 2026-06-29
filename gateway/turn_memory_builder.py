@@ -195,7 +195,11 @@ def _extract_policy(result: PerSQResult) -> tuple[Optional[PolicyText], list[Dis
 
 
 def _extract_student_record(result: PerSQResult) -> tuple[Optional[str], list[DisplayItem]]:
-    """Extract a short, safe record summary — no name, ID, grades, or full transcript."""
+    """Extract a short, safe record summary — no name, ID, grades, or full transcript.
+
+    Focus-aware: only adds display items relevant to the declared record_focus.
+    Scalar focuses and control focuses produce no course display items.
+    """
     data = result.data or {}
     focus = data.get("record_focus", "")
     parts: list[str] = []
@@ -208,23 +212,108 @@ def _extract_student_record(result: PerSQResult) -> tuple[Optional[str], list[Di
         parts.append(f"cgpa={data['cgpa']}")
     if data.get("total_credit_hours_earned") is not None:
         parts.append(f"credits={data['total_credit_hours_earned']}")
-    # Course lists (codes only — no grades, no names, no PII)
+
+    summary = (", ".join(parts))[:_CAP_RECORD_SUMMARY] if parts else None
+
+    # ── Focus-aware display item extraction ───────────────────────────────────
     courses_disp: list[DisplayItem] = []
-    for field_name, disp_type in (
-        ("in_progress_courses", "course"),
-        ("completed_courses", "course"),
-        ("failed_courses", "course"),
-    ):
-        for code in _str_list(data.get(field_name, []), 4):
-            courses_disp.append(DisplayItem(
-                type=disp_type,
+
+    # Scalar / control focuses: no course display items
+    _SCALAR_FOCUSES = frozenset({
+        "cgpa", "academic_level", "academic_standing", "academic_warnings",
+        "probation_status", "completed_credits", "last_semester_gpa",
+        "study_status", "track", "current_semester",
+        "assumption_acknowledgement", "reset_assumptions",
+    })
+    if focus in _SCALAR_FOCUSES:
+        return summary, []
+
+    def _items_from_details(details: list, field_name: str) -> list[DisplayItem]:
+        """Build DisplayItems preferring enriched details (with names) over raw codes."""
+        items: list[DisplayItem] = []
+        seen: set[str] = set()
+        for d in details[:4]:
+            if isinstance(d, dict):
+                code = d.get("course_code", "")
+                name = d.get("course_name") or None
+                if code and code not in seen:
+                    seen.add(code)
+                    items.append(DisplayItem(
+                        type="course",
+                        code=code,
+                        name=name,
+                        source_intent=result.intent,
+                        source_field=field_name,
+                        rank=len(courses_disp) + len(items),
+                    ))
+        return items
+
+    def _items_from_codes(codes: list, field_name: str) -> list[DisplayItem]:
+        """Build DisplayItems from raw code list (fallback when no enriched details)."""
+        items: list[DisplayItem] = []
+        for code in _str_list(codes, 4):
+            items.append(DisplayItem(
+                type="course",
                 code=code,
                 source_intent=result.intent,
                 source_field=field_name,
+                rank=len(courses_disp) + len(items),
+            ))
+        return items
+
+    def _course_items_for(detail_field: str, raw_field: str) -> list[DisplayItem]:
+        """Return display items using enriched details if available, else raw codes."""
+        details = data.get(detail_field) or []
+        if details:
+            return _items_from_details(details, detail_field)
+        raw = data.get(raw_field) or []
+        if raw:
+            return _items_from_codes(raw, raw_field)
+        return []
+
+    if focus == "in_progress_courses":
+        courses_disp = _course_items_for("in_progress_course_details", "in_progress_courses")
+    elif focus == "completed_courses":
+        courses_disp = _course_items_for("completed_course_details", "completed_courses")
+    elif focus == "failed_courses":
+        courses_disp = _course_items_for("failed_course_details", "failed_courses")
+    elif focus == "failed_course_history":
+        # Use failed_history_details or failed_history_codes
+        details = data.get("failed_history_details") or []
+        if details:
+            courses_disp = _items_from_details(details, "failed_history_details")
+        else:
+            codes = data.get("failed_history_codes") or []
+            courses_disp = _items_from_codes(codes, "failed_history_codes")
+    elif focus == "course_status_check":
+        # Use checked_course_codes with names from details when available
+        checked = data.get("checked_course_codes") or []
+        all_details: list[dict] = []
+        for df in ("completed_course_details", "in_progress_course_details", "failed_course_details"):
+            for d in data.get(df) or []:
+                if isinstance(d, dict) and d.get("course_code"):
+                    all_details.append(d)
+        details_by_code: dict[str, dict] = {d["course_code"]: d for d in all_details}
+        for code in _str_list(checked, 4):
+            d = details_by_code.get(code)
+            name = d.get("course_name") if d else None
+            courses_disp.append(DisplayItem(
+                type="course",
+                code=code,
+                name=name,
+                source_intent=result.intent,
+                source_field="checked_course_codes",
                 rank=len(courses_disp),
             ))
+    else:
+        # full_record, progress_summary, unknown → all three, capped at 4 each
+        for detail_field, raw_field in (
+            ("in_progress_course_details", "in_progress_courses"),
+            ("completed_course_details", "completed_courses"),
+            ("failed_course_details", "failed_courses"),
+        ):
+            courses_disp.extend(_course_items_for(detail_field, raw_field))
 
-    summary = (", ".join(parts))[:_CAP_RECORD_SUMMARY] if parts else None
     return summary, courses_disp[:_CAP_DISPLAY]
 
 

@@ -657,3 +657,33 @@ def is_list_incompatible_style(text: str, record_focus: str | None) -> bool:
 def detect_status_yes_no(text: str) -> bool:
     """Return True for 'did I pass/fail/take/am I taking' style status checks."""
     return bool(_D6_STATUS_YES_NO_RE.search(text))
+
+
+# ── Course Track-Membership Question ─────────────────────────────────────────
+# Detects "which track does X belong to?" / "what track is X in?" patterns.
+# These ask about a COURSE's property (which track it belongs to),
+# NOT a track overview or skill→track recommendation.
+
+_TRACK_MEMBERSHIP_RE = re.compile(
+    r'(?:'
+    r'(?:which|what)\s+track\s+(?:does|is)\s+(.+?)\s+(?:belong|available|in)\b'
+    r'|to\s+which\s+track\s+(?:does\s+)?(?:the\s+)?(.+?)\s+belongs?\b'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def detect_course_track_membership(text: str) -> bool:
+    """Return True if text asks which track a given course belongs to."""
+    return bool(_TRACK_MEMBERSHIP_RE.search(text))
+
+
+def extract_course_from_track_membership(text: str) -> str | None:
+    """Extract the course mention from a track-membership question."""
+    m = _TRACK_MEMBERSHIP_RE.search(text)
+    if m:
+        raw = (m.group(1) or m.group(2) or "").strip().rstrip(".,?!")
+        raw = re.sub(r'^(?:the|a|an)\s+', '', raw, flags=re.IGNORECASE)
+        if raw and len(raw) > 1:
+            return raw
+    return None

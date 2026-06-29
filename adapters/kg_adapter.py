@@ -102,10 +102,50 @@ def _summarize_result(result: dict) -> tuple[str, dict]:
         return "success", {"keys": []}
 
 
+class _KGMetadataCache:
+    """Lightweight startup-loaded metadata for entity display enrichment.
+
+    Provides fast id → {type, id, name, ...} lookups without additional KG calls.
+    Loaded once at startup; no TTL (deployment carry-forward: add TTL/stale-while-
+    revalidate for production caching when needed).
+    """
+
+    def __init__(self):
+        self.courses: dict = {}
+        self.skills: dict = {}
+        self.roles: dict = {}
+        self.tracks: dict = {}
+        self.loaded: bool = False
+
+    def get_course(self, code: str) -> dict:
+        return self.courses.get(code, {"type": "course", "id": code, "name": None})
+
+    def get_skill(self, skill_id: str) -> dict:
+        return self.skills.get(skill_id, {"type": "skill", "id": skill_id, "name": None})
+
+    def get_role(self, role_id: str) -> dict:
+        return self.roles.get(role_id, {"type": "role", "id": role_id, "name": None})
+
+    def get_track(self, track_id: str) -> dict:
+        return self.tracks.get(track_id, {"type": "track", "id": track_id, "name": None})
+
+    def get_entity(self, entity_type: str, entity_id: str) -> dict:
+        if entity_type == "course":
+            return self.get_course(entity_id)
+        if entity_type == "skill":
+            return self.get_skill(entity_id)
+        if entity_type == "role":
+            return self.get_role(entity_id)
+        if entity_type == "track":
+            return self.get_track(entity_id)
+        return {"type": entity_type, "id": entity_id, "name": None}
+
+
 class KGAdapter:
 
     def __init__(self):
         self._client = None
+        self._meta = _KGMetadataCache()
         try:
             client = Neo4jClient()
             client.connect()
@@ -113,6 +153,69 @@ class KGAdapter:
             logger.info("KGAdapter: connected to Neo4j")
         except Exception as exc:
             logger.warning("KGAdapter: Neo4j unavailable at startup: %s", exc)
+        self._load_metadata_cache()
+
+    def _load_metadata_cache(self) -> None:
+        """Load lightweight display metadata for all entities at startup."""
+        if self._client is None:
+            logger.info("KGAdapter: skipping metadata cache load — no KG connection")
+            return
+        try:
+            for item in Q.q_get_all_course_metadata(self._client):
+                code = item.get("code")
+                if code:
+                    self._meta.courses[code] = {
+                        "type": "course", "id": code,
+                        "name": item.get("name"),
+                        "credits": item.get("credits"),
+                        "level": item.get("level"),
+                    }
+            for item in Q.q_get_all_skill_metadata(self._client):
+                sid = item.get("skill_id")
+                if sid:
+                    self._meta.skills[sid] = {
+                        "type": "skill", "id": sid,
+                        "name": item.get("name"),
+                        "category": item.get("category"),
+                    }
+            for item in Q.q_get_all_role_metadata(self._client):
+                rid = item.get("role_id")
+                if rid:
+                    self._meta.roles[rid] = {
+                        "type": "role", "id": rid,
+                        "name": item.get("name"),
+                        "domain": item.get("domain"),
+                    }
+            for item in Q.q_get_all_track_metadata(self._client):
+                tid = item.get("track_id")
+                if tid:
+                    self._meta.tracks[tid] = {
+                        "type": "track", "id": tid,
+                        "name": item.get("name"),
+                    }
+            self._meta.loaded = True
+            logger.info(
+                "KGAdapter: metadata cache loaded — %d courses, %d skills, %d roles, %d tracks",
+                len(self._meta.courses), len(self._meta.skills),
+                len(self._meta.roles), len(self._meta.tracks),
+            )
+        except Exception as exc:
+            logger.warning("KGAdapter: metadata cache load failed: %s", exc)
+
+    def get_course_metadata(self, course_code: str) -> dict:
+        return self._meta.get_course(course_code)
+
+    def get_skill_metadata(self, skill_id: str) -> dict:
+        return self._meta.get_skill(skill_id)
+
+    def get_role_metadata(self, role_id: str) -> dict:
+        return self._meta.get_role(role_id)
+
+    def get_track_metadata(self, track_id: str) -> dict:
+        return self._meta.get_track(track_id)
+
+    def get_entity_metadata(self, entity_type: str, entity_id: str) -> dict:
+        return self._meta.get_entity(entity_type, entity_id)
 
     def close(self):
         if self._client is not None:

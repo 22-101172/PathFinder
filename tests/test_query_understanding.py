@@ -1907,3 +1907,834 @@ class TestCriticalBehaviorGuards:
         # Must be less than 75% of baseline (41,484 chars = 10,371 tokens)
         assert chars < 31_000, f"Prompt too large: {chars} chars (baseline was 41,484)"
         assert estimated_tokens < 7_800, f"Estimated tokens too high: {estimated_tokens} (baseline was 10,371)"
+
+
+# ── Course-Info Domain 2 Live Bug Regression Tests ────────────────────────────
+
+class TestCourseInfoD2LiveBugs:
+    """
+    Regression tests for live failures found in D2 / get_course_info integration.
+    Tests A-F as specified in the bug report.
+    All use deterministic normalization or mock LLM — no live LLM or KG required.
+    """
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _normalize_sq(self, intent: str, entities_dict: dict, params_dict: dict,
+                      original_text: str = "test", user_text: str = "test") -> StructuredQuery:
+        """Run _normalize_one_sq for a single SQ without touching LLM or resolver."""
+        from gateway.query_understanding import _normalize_one_sq
+        sq = StructuredQuery(
+            intent=intent,
+            original_text=original_text,
+            entities=EntitySet(**{k: entities_dict.get(k) for k in ("course_code", "role_id", "track_id", "skill_id")}),
+            params=params_dict,
+        )
+        return _normalize_one_sq(sq, user_text, PreprocessResult(), LastReferenced())
+
+    def _resolve_sq(self, intent: str, entities_dict: dict, params_dict: dict,
+                    resolver, original_text: str = "test") -> StructuredQuery:
+        """Run _resolve_sq directly for targeted resolution testing."""
+        from gateway.query_understanding import _resolve_sq
+        sq = StructuredQuery(
+            intent=intent,
+            original_text=original_text,
+            entities=EntitySet(**{k: entities_dict.get(k) for k in ("course_code", "role_id", "track_id", "skill_id")}),
+            params=params_dict,
+        )
+        return _resolve_sq(sq, resolver)
+
+    # ── A: Track-membership question → get_course_info, not get_track_overview ─
+
+    def test_A1_track_membership_data_analysis_rerouted(self):
+        """'to which track the data analysis course belongs to?' → get_course_info."""
+        from gateway.qu_preprocessing import detect_course_track_membership, extract_course_from_track_membership
+        text = "to which track the data analysis course belongs to?"
+        assert detect_course_track_membership(text) is True
+        mention = extract_course_from_track_membership(text)
+        assert mention is not None
+        assert "data analysis" in mention.lower()
+
+    def test_A2_track_membership_reroutes_from_get_track_overview(self):
+        """Normalization: get_track_overview on track-membership query → get_course_info."""
+        text = "to which track the data analysis course belongs to?"
+        sq = self._normalize_sq(
+            "get_track_overview",
+            {"course_code": None, "role_id": None, "track_id": "DSE", "skill_id": None},
+            {},
+            original_text=text,
+            user_text=text,
+        )
+        assert sq.intent == "get_course_info"
+        assert sq.entities.course_code is not None
+        assert "data analysis" in sq.entities.course_code.lower()
+        assert sq.entities.track_id is None
+
+    def test_A3_track_membership_which_track_does_X_belong(self):
+        """'Which track does Natural Language Processing belong to?' → get_course_info."""
+        from gateway.qu_preprocessing import detect_course_track_membership, extract_course_from_track_membership
+        text = "Which track does Natural Language Processing belong to?"
+        assert detect_course_track_membership(text) is True
+        mention = extract_course_from_track_membership(text)
+        assert mention is not None
+        assert "natural language processing" in mention.lower()
+
+    def test_A4_track_membership_reroutes_from_recommend_track_for_skill(self):
+        """Normalization: recommend_track_for_skill on track-membership → get_course_info."""
+        text = "Which track does Natural Language Processing belong to?"
+        sq = self._normalize_sq(
+            "recommend_track_for_skill",
+            {"course_code": None, "role_id": None, "track_id": None, "skill_id": "SK_NLP"},
+            {},
+            original_text=text,
+            user_text=text,
+        )
+        assert sq.intent == "get_course_info"
+        assert sq.entities.course_code is not None
+        assert "natural language processing" in sq.entities.course_code.lower()
+        assert sq.entities.skill_id is None
+
+    def test_A5_real_track_overview_not_affected(self):
+        """'What courses are in the AI track?' stays get_track_overview (not membership)."""
+        text = "What courses are in the AI track?"
+        sq = self._normalize_sq(
+            "get_track_overview",
+            {"course_code": None, "role_id": None, "track_id": "AI", "skill_id": None},
+            {},
+            original_text=text,
+            user_text=text,
+        )
+        assert sq.intent == "get_track_overview"
+        assert sq.entities.track_id == "AI"
+
+    # ── B: Explicit entity beats last_referenced / stale canonical code ────────
+
+    def test_B1_stale_code_overridden_by_raw_entity_mention(self):
+        """If LLM outputs stale C-CS435 but raw_entity_mention='data analysis', override."""
+        text = "well, which level is the data analysis course available in?"
+        sq = self._normalize_sq(
+            "get_course_info",
+            {"course_code": "C-CS435", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "data analysis"},
+            original_text=text,
+            user_text=text,
+        )
+        assert sq.intent == "get_course_info"
+        # Code was overridden: should NOT be C-CS435 any more
+        assert sq.entities.course_code != "C-CS435"
+        assert sq.entities.course_code is not None
+        assert "data analysis" in sq.entities.course_code.lower()
+
+    def test_B2_explicit_code_in_user_text_is_kept(self):
+        """If user explicitly types C-CS301, it must not be replaced."""
+        text = "Tell me about C-CS301"
+        sq = self._normalize_sq(
+            "get_course_info",
+            {"course_code": "C-CS301", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "C-CS301"},
+            original_text=text,
+            user_text=text,
+        )
+        assert sq.entities.course_code == "C-CS301"
+
+    def test_B3_pronoun_raw_mention_does_not_override_resolved_code(self):
+        """Pronoun 'it' in raw_entity_mention must NOT override a resolved canonical code."""
+        text = "tell me more about it"
+        sq = self._normalize_sq(
+            "get_course_info",
+            {"course_code": "C-CS316", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "it"},
+            original_text=text,
+            user_text=text,
+        )
+        # 'it' is a pronoun; C-CS316 should not be replaced
+        assert sq.entities.course_code == "C-CS316"
+
+    # ── C: NLP should resolve as course, not skill, for track-membership wording ─
+
+    def test_C1_nlp_track_membership_gives_course_info(self):
+        """'Which track does NLP belong to?' → get_course_info, not recommend_track_for_skill."""
+        from gateway.qu_preprocessing import detect_course_track_membership
+        assert detect_course_track_membership("Which track does NLP belong to?") is True
+
+    def test_C2_nlp_what_track_is_in_pattern(self):
+        """'What track is Natural Language Processing available in?' detected as membership."""
+        from gateway.qu_preprocessing import detect_course_track_membership, extract_course_from_track_membership
+        text = "What track is Natural Language Processing available in?"
+        assert detect_course_track_membership(text) is True
+        mention = extract_course_from_track_membership(text)
+        assert mention is not None
+        assert "natural language processing" in mention.lower()
+
+    # ── D: Hallucinated course code validated through resolver ─────────────────
+
+    def test_D1_hallucinated_code_not_in_user_text_goes_to_resolver(self):
+        """C-SO305 not in user text → sent to resolver → not_found → clarification."""
+        user_text = "Give me a quick overview of Development of Secure Software Systems"
+        calls = []
+
+        def not_found_resolver(et, txt):
+            calls.append((et, txt))
+            return {"status": "not_found"}
+
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "C-SO305", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            not_found_resolver,
+            original_text=user_text,
+        )
+        # C-SO305 is not in user_text → resolver was called → not_found → clarification
+        assert result.intent == "clarification_needed"
+        course_calls = [c for c in calls if c[0] == "course"]
+        assert len(course_calls) >= 1
+
+    def test_D2_explicit_user_code_bypasses_resolver(self):
+        """C-CS301 typed explicitly by user → resolver NOT called."""
+        user_text = "Tell me about C-CS301"
+        calls = []
+
+        def tracking_resolver(et, txt):
+            calls.append((et, txt))
+            return {"status": "ok", "resolved_id": txt}
+
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "C-CS301", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            tracking_resolver,
+            original_text=user_text,
+        )
+        assert result.intent == "get_course_info"
+        assert result.entities.course_code == "C-CS301"
+        course_calls = [c for c in calls if c[0] == "course"]
+        assert course_calls == []
+
+    def test_D3_field_training_resolves_correctly(self):
+        """'Is Field Training a real course in the catalogue?' resolves to C-TR304."""
+        user_text = "Is Field Training a real course in the catalogue?"
+        calls = []
+
+        def alias_resolver(et, txt):
+            calls.append((et, txt))
+            # Simulate alias resolution: "field training" → C-TR304
+            if txt.lower().strip() in ("field training",):
+                return {"status": "ok", "resolved_id": "C-TR304"}
+            return {"status": "not_found"}
+
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "Field Training", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            alias_resolver,
+            original_text=user_text,
+        )
+        assert result.intent == "get_course_info"
+        assert result.entities.course_code == "C-TR304"
+
+    # ── E: Explicit entity in current turn beats TurnMemory last entity ────────
+
+    def test_E1_graduation_project_b_not_overridden_by_raw_mention(self):
+        """'What can you tell me about Graduation Project B?' → override stale code."""
+        text = "What can you tell me about Graduation Project B?"
+        # Simulate LLM using stale C-TR304 but providing correct raw_entity_mention
+        sq = self._normalize_sq(
+            "get_course_info",
+            {"course_code": "C-TR304", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "Graduation Project B"},
+            original_text=text,
+            user_text=text,
+        )
+        assert sq.entities.course_code != "C-TR304"
+        assert sq.entities.course_code is not None
+        assert "graduation project b" in sq.entities.course_code.lower()
+
+    def test_E2_graduation_project_b_alias_in_entity_aliases(self):
+        """'graduation project b' must be an alias for C-GP411B in entity_aliases.json."""
+        import json
+        import os
+        alias_path = os.path.join(
+            os.path.dirname(__file__), "..", "engines", "kg", "data", "entity_aliases.json"
+        )
+        with open(alias_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert "graduation project b" in data["course"]["aliases"]["C-GP411B"]
+
+    def test_E3_field_training_alias_in_entity_aliases(self):
+        """'field training' must be an alias for C-TR304 in entity_aliases.json."""
+        import json
+        import os
+        alias_path = os.path.join(
+            os.path.dirname(__file__), "..", "engines", "kg", "data", "entity_aliases.json"
+        )
+        with open(alias_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert "field training" in data["course"]["aliases"]["C-TR304"]
+
+    # ── Alias existence for D: Development of Secure Software Systems ──────────
+
+    def test_D4_secure_software_alias_in_entity_aliases(self):
+        """'development of secure software systems' must be alias for C-SW423."""
+        import json
+        import os
+        alias_path = os.path.join(
+            os.path.dirname(__file__), "..", "engines", "kg", "data", "entity_aliases.json"
+        )
+        with open(alias_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert "development of secure software systems" in data["course"]["aliases"]["C-SW423"]
+
+    # ── F: Ordinal reference behavior from Domain 1 preserved ────────────────
+
+    def test_F1_detect_course_track_membership_not_triggered_by_ordinal(self):
+        """'can I take the first one again?' must NOT be detected as track membership."""
+        from gateway.qu_preprocessing import detect_course_track_membership
+        assert detect_course_track_membership("can I take the first one again?") is False
+
+    def test_F2_detect_course_track_membership_not_triggered_by_courses_in_track(self):
+        """'What courses are in the AI track?' must NOT be detected as track membership."""
+        from gateway.qu_preprocessing import detect_course_track_membership
+        assert detect_course_track_membership("What courses are in the AI track?") is False
+
+    def test_F3_detect_course_track_membership_not_triggered_by_skill_best_track(self):
+        """'Which track is best for learning ML?' is NOT a course-membership question."""
+        from gateway.qu_preprocessing import detect_course_track_membership
+        assert detect_course_track_membership("Which track is best for learning ML?") is False
+
+    def test_F4_normalization_does_not_alter_get_course_info_with_explicit_code(self):
+        """Normalization must not alter a valid get_course_info SQ with explicit code in text."""
+        text = "Tell me about C-AI424"
+        sq = self._normalize_sq(
+            "get_course_info",
+            {"course_code": "C-AI424", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            original_text=text,
+            user_text=text,
+        )
+        assert sq.intent == "get_course_info"
+        assert sq.entities.course_code == "C-AI424"
+
+    def test_F5_stale_code_guard_only_fires_for_d2_course_intents(self):
+        """Stale code guard must not affect plan_semester or other non-D2 intents."""
+        text = "plan my semester"
+        sq = self._normalize_sq(
+            "plan_semester",
+            {"course_code": "C-CS435", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "some other course"},
+            original_text=text,
+            user_text=text,
+        )
+        # plan_semester is not in _D2_COURSE_INTENTS → no override
+        assert sq.intent == "plan_semester"
+        assert sq.entities.course_code == "C-CS435"
+
+    # ── Prompt contains new disambiguation rules ───────────────────────────────
+
+    def test_prompt_contains_track_membership_disambiguation(self):
+        """Prompt must contain track-membership disambiguation rule."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "TRACK MEMBERSHIP DISAMBIGUATION" in prompt
+
+    def test_prompt_contains_entity_extraction_priority_rule(self):
+        """Prompt must contain entity extraction priority rule."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "ENTITY EXTRACTION PRIORITY" in prompt
+
+    def test_prompt_contains_llm_course_code_safety(self):
+        """Prompt must contain LLM course code safety rule."""
+        from gateway.qu_prompt import build_system_prompt
+        prompt = build_system_prompt()
+        assert "LLM COURSE CODE SAFETY" in prompt
+
+
+# ── ML Ambiguity, Clarification Quality, and Topic-Fallback Refinement ──────────
+
+class TestMLAmbiguityAndClarification:
+    """
+    Regression tests for live Course Info failures involving ML ambiguity,
+    topic-fallback over-firing, and clarification message quality.
+    Tests A–F as requested.
+    """
+
+    # ── shared helpers ─────────────────────────────────────────────────────────
+
+    def _resolve_sq(self, intent: str, entities_dict: dict, params_dict: dict,
+                    resolver, original_text: str = "test") -> StructuredQuery:
+        from gateway.query_understanding import _resolve_sq as _rq
+        sq = StructuredQuery(
+            intent=intent,
+            original_text=original_text,
+            entities=EntitySet(**{k: entities_dict.get(k) for k in
+                                  ("course_code", "role_id", "track_id", "skill_id")}),
+            params=params_dict,
+        )
+        return _rq(sq, resolver)
+
+    @staticmethod
+    def _ml_ambiguous_resolver(et: str, txt: str) -> dict:
+        """Mock: 'ML' as course → ambiguous (C-AI321 / C-AI422); 'ML' as skill → SK_ML."""
+        norm = txt.strip().lower()
+        if et == "course" and norm in ("ml", "ml course", "machine learning"):
+            return {
+                "status": "ambiguous",
+                "matches": [
+                    {"id": "C-AI321", "name": "Introduction to Machine Learning",
+                     "match_type": "explicit_ambiguous", "score": 0.85},
+                    {"id": "C-AI422", "name": "Machine Learning Fundamentals",
+                     "match_type": "explicit_ambiguous", "score": 0.85},
+                ],
+            }
+        if et == "skill" and norm in ("ml", "machine learning"):
+            return {"status": "ok", "resolved_id": "SK_ML"}
+        return {"status": "not_found"}
+
+    # ── A: "Tell me about ML" → clarification, NOT skill search ───────────────
+
+    def test_A_tell_me_about_ml_produces_clarification(self):
+        """'Tell me about ML' → clarification_needed, not search_courses_by_skill."""
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "ML", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "ML"},
+            self._ml_ambiguous_resolver,
+            original_text="Tell me about ML",
+        )
+        assert result.intent == "clarification_needed", (
+            f"Expected clarification_needed, got {result.intent}"
+        )
+
+    def test_A_tell_me_about_ml_clarification_includes_course_options(self):
+        """Clarification prompt for 'Tell me about ML' includes both ML course candidates."""
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "ML", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "ML"},
+            self._ml_ambiguous_resolver,
+            original_text="Tell me about ML",
+        )
+        prompt = result.params.get("clarification_prompt", "")
+        # Both course candidates must appear in the prompt (by name or code)
+        assert "C-AI321" in prompt or "Introduction to Machine Learning" in prompt
+        assert "C-AI422" in prompt or "Machine Learning Fundamentals" in prompt
+
+    def test_A_tell_me_about_ml_not_rerouted_to_skill_search(self):
+        """topic_fallback must NOT fire for 'Tell me about ML' even though SK_ML resolves."""
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "ML", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            self._ml_ambiguous_resolver,
+            original_text="Tell me about ML",
+        )
+        assert result.intent != "search_courses_by_skill"
+        assert not result.params.get("topic_fallback")
+
+    # ── B: "talk to me about the ML course" → clarification ───────────────────
+
+    def test_B_talk_about_ml_course_produces_clarification(self):
+        """'talk to me about the ML course' → clarification_needed, not direct C-AI321."""
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "ML", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "the ML course"},
+            self._ml_ambiguous_resolver,
+            original_text="talk to me about the ML course",
+        )
+        assert result.intent == "clarification_needed"
+
+    def test_B_clarification_shows_both_ml_courses_with_names(self):
+        """Clarification for ML course query shows C-AI321 and C-AI422 with names."""
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "ML", "role_id": None, "track_id": None, "skill_id": None},
+            {"raw_entity_mention": "the ML course"},
+            self._ml_ambiguous_resolver,
+            original_text="talk to me about the ML course",
+        )
+        prompt = result.params.get("clarification_prompt", "")
+        assert "Introduction to Machine Learning" in prompt or "C-AI321" in prompt
+        assert "Machine Learning Fundamentals" in prompt or "C-AI422" in prompt
+        # Friendly format: names should accompany codes in parentheses
+        assert "(" in prompt
+
+    # ── C: "Which courses teach ML?" → skill search preserved ─────────────────
+
+    def test_C_which_courses_teach_ml_stays_skill_search(self, monkeypatch):
+        """'Which courses teach ML?' → search_courses_by_skill (topic_fallback not involved)."""
+        response = _sq_json(
+            "search_courses_by_skill",
+            original_text="Which courses teach ML?",
+            entities={"course_code": None, "role": None, "track": None, "skill": "machine learning"},
+        )
+        client = _make_mock_client([response])
+
+        def resolver(et: str, txt: str) -> dict:
+            if et == "skill" and txt.strip().lower() in ("machine learning", "ml"):
+                return {"status": "ok", "resolved_id": "SK_ML"}
+            return {"status": "not_found"}
+
+        result = _run_qu("Which courses teach ML?", client, monkeypatch=monkeypatch, resolver=resolver)
+        assert result[0].intent == "search_courses_by_skill"
+        assert result[0].entities.skill_id == "SK_ML"
+
+    def test_C_courses_cover_ml_stays_skill_search(self, monkeypatch):
+        """'Which courses cover ML?' → search_courses_by_skill."""
+        response = _sq_json(
+            "search_courses_by_skill",
+            original_text="Which courses cover ML?",
+            entities={"course_code": None, "role": None, "track": None, "skill": "ml"},
+        )
+        client = _make_mock_client([response])
+
+        def resolver(et: str, txt: str) -> dict:
+            if et == "skill" and txt.strip().lower() in ("ml", "machine learning"):
+                return {"status": "ok", "resolved_id": "SK_ML"}
+            return {"status": "not_found"}
+
+        result = _run_qu("Which courses cover ML?", client, monkeypatch=monkeypatch, resolver=resolver)
+        assert result[0].intent == "search_courses_by_skill"
+
+    # ── D: Unambiguous full name resolves directly ─────────────────────────────
+
+    def test_D_tell_me_about_intro_to_machine_learning_resolves_c_ai321(self, monkeypatch):
+        """'Tell me about Introduction to Machine Learning' → get_course_info C-AI321."""
+        response = _sq_json(
+            "get_course_info",
+            original_text="Tell me about Introduction to Machine Learning",
+            entities={"course_code": "Introduction to Machine Learning",
+                      "role": None, "track": None, "skill": None},
+            params={"raw_entity_mention": "Introduction to Machine Learning"},
+        )
+        client = _make_mock_client([response])
+
+        def resolver(et: str, txt: str) -> dict:
+            if et == "course" and "introduction to machine learning" in txt.lower():
+                return {"status": "ok", "resolved_id": "C-AI321"}
+            return {"status": "not_found"}
+
+        result = _run_qu(
+            "Tell me about Introduction to Machine Learning",
+            client, monkeypatch=monkeypatch, resolver=resolver,
+        )
+        assert result[0].intent == "get_course_info"
+        assert result[0].entities.course_code == "C-AI321"
+
+    def test_E_tell_me_about_ml_fundamentals_resolves_c_ai422(self, monkeypatch):
+        """'Tell me about Machine Learning Fundamentals' → get_course_info C-AI422."""
+        response = _sq_json(
+            "get_course_info",
+            original_text="Tell me about Machine Learning Fundamentals",
+            entities={"course_code": "Machine Learning Fundamentals",
+                      "role": None, "track": None, "skill": None},
+            params={"raw_entity_mention": "Machine Learning Fundamentals"},
+        )
+        client = _make_mock_client([response])
+
+        def resolver(et: str, txt: str) -> dict:
+            if et == "course" and "machine learning fundamentals" in txt.lower():
+                return {"status": "ok", "resolved_id": "C-AI422"}
+            return {"status": "not_found"}
+
+        result = _run_qu(
+            "Tell me about Machine Learning Fundamentals",
+            client, monkeypatch=monkeypatch, resolver=resolver,
+        )
+        assert result[0].intent == "get_course_info"
+        assert result[0].entities.course_code == "C-AI422"
+
+    # ── F: Ambiguous clarification uses friendly "Name (CODE)" labels ──────────
+
+    def test_F_selected_topics_clarification_with_friendly_labels(self):
+        """'Tell me about Selected Topics' → clarification with Name (CODE) format."""
+        def resolver(et: str, txt: str) -> dict:
+            if et == "course" and "selected topics" in txt.lower():
+                return {
+                    "status": "ambiguous",
+                    "matches": [
+                        {"id": "C-CS351", "name": "Selected Topics in Basic Computer Science-1",
+                         "match_type": "partial_name", "score": 0.7},
+                        {"id": "C-CS352", "name": "Selected Topics in Basic Computer Science-2",
+                         "match_type": "partial_name", "score": 0.7},
+                        {"id": "C-CS495", "name": "Selected Topics in Computer Science-1",
+                         "match_type": "partial_name", "score": 0.7},
+                        {"id": "C-CS496", "name": "Selected Topics in Computer Science-2",
+                         "match_type": "partial_name", "score": 0.7},
+                    ],
+                }
+            return {"status": "not_found"}
+
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "Selected Topics", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            resolver,
+            original_text="Tell me about Selected Topics",
+        )
+        assert result.intent == "clarification_needed"
+        prompt = result.params.get("clarification_prompt", "")
+        # Course names must be present (not just raw codes)
+        assert "Selected Topics in Basic Computer Science-1" in prompt
+        assert "C-CS351" in prompt
+        # Parenthesis format: "Name (CODE)"
+        assert "(" in prompt
+
+    def test_F_selected_topics_clarification_raw_code_only_format_absent(self):
+        """Clarification must not be 'Options: C-CS351, C-CS352, ...' (code-only)."""
+        def resolver(et: str, txt: str) -> dict:
+            if et == "course" and "selected topics" in txt.lower():
+                return {
+                    "status": "ambiguous",
+                    "matches": [
+                        {"id": "C-CS351", "name": "Selected Topics in Basic Computer Science-1",
+                         "match_type": "partial_name", "score": 0.7},
+                        {"id": "C-CS352", "name": "Selected Topics in Basic Computer Science-2",
+                         "match_type": "partial_name", "score": 0.7},
+                    ],
+                }
+            return {"status": "not_found"}
+
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "Selected Topics", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            resolver,
+            original_text="Tell me about Selected Topics",
+        )
+        prompt = result.params.get("clarification_prompt", "")
+        # The old format was e.g. "Options: C-CS351, C-CS352" — this must not be the full picture
+        # Names must appear alongside codes
+        assert "Selected Topics in Basic Computer Science" in prompt
+
+    # ── G: existing Domain 1 behavior preserved (regression guard) ────────────
+
+    def test_G_topic_fallback_still_fires_for_ambiguous_original_text(self):
+        """topic_fallback must still fire when original_text has no course-info verb."""
+        # Uses generic text 'test' — no "tell me about" → fallback should fire
+        def resolver(et: str, txt: str) -> dict:
+            if et == "skill" and "oop" in txt.lower():
+                return {"status": "ok", "resolved_id": "SK_OOP"}
+            return {"status": "not_found"}
+
+        result = self._resolve_sq(
+            "get_course_info",
+            {"course_code": "oop", "role_id": None, "track_id": None, "skill_id": None},
+            {},
+            resolver,
+            original_text="test",  # no course-info verb → fallback fires
+        )
+        assert result.intent == "search_courses_by_skill"
+        assert result.entities.skill_id == "SK_OOP"
+        assert result.params.get("topic_fallback") is True
+
+    def test_G_ambiguous_entity_aliases_json_has_ml(self):
+        """entity_aliases.json must have 'ml' in course ambiguous_terms → C-AI321 and C-AI422."""
+        import json
+        import os
+        alias_path = os.path.join(
+            os.path.dirname(__file__), "..", "engines", "kg", "data", "entity_aliases.json"
+        )
+        with open(alias_path, encoding="utf-8") as f:
+            data = json.load(f)
+        ambiguous = data["course"]["ambiguous_terms"]
+        assert "ml" in ambiguous
+        assert "C-AI321" in ambiguous["ml"]
+        assert "C-AI422" in ambiguous["ml"]
+
+
+# ── compare_tracks 3+ mention guard ──────────────────────────────────────────
+
+
+class TestCompareTracksThreePlusGuard:
+    """
+    Tests for the compare_tracks normalization guard:
+    when 3+ tracks are mentioned, return clarification_needed instead of
+    silently executing a two-track comparison.
+    """
+
+    def _normalize_sq(self, intent: str, track_id: str | None,
+                      secondary_track_id: str | None,
+                      original_text: str) -> StructuredQuery:
+        from gateway.query_understanding import _normalize_one_sq
+        from gateway.models.schemas import EntitySet, StructuredQuery
+        secondary = None
+        if secondary_track_id is not None:
+            secondary = EntitySet(track_id=secondary_track_id)
+        sq = StructuredQuery(
+            intent=intent,
+            original_text=original_text,
+            entities=EntitySet(track_id=track_id),
+            secondary_entities=secondary,
+            params={},
+        )
+        return _normalize_one_sq(sq, original_text, PreprocessResult(), LastReferenced())
+
+    # ── A: 3+ tracks in text → clarification_needed ──────────────────────────
+
+    def test_A_three_track_ids_returns_clarification(self):
+        """'Compare AI, DSE, and SWE' → clarification_needed, not compare_tracks."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "DSE",
+            "Compare AI, DSE, and SWE",
+        )
+        assert result.intent == "clarification_needed"
+
+    def test_A_three_tracks_long_names_returns_clarification(self):
+        """'Compare Artificial Intelligence, Data Science and Engineering, and SWE' → clarification_needed."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "DSE",
+            "Compare Artificial Intelligence, Data Science and Engineering, and SWE",
+        )
+        assert result.intent == "clarification_needed"
+
+    def test_A_four_tracks_also_returns_clarification(self):
+        """Four tracks mentioned → still clarification_needed."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "DSE",
+            "Compare AI, DSE, SWE, and CYS tracks",
+        )
+        assert result.intent == "clarification_needed"
+
+    # ── B: Clarification prompt lists all options with friendly names ─────────
+
+    def test_B_clarification_includes_all_three_options(self):
+        """Clarification prompt must include all three track options with friendly names."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "DSE",
+            "Compare AI, DSE, and SWE",
+        )
+        prompt = result.params.get("clarification_prompt", "")
+        assert "Artificial Intelligence (AI)" in prompt
+        assert "Data Science and Engineering (DSE)" in prompt
+        assert "Software Engineering (SWE)" in prompt
+
+    def test_B_clarification_prompt_is_friendly(self):
+        """Clarification prompt must explain the two-track limit."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "DSE",
+            "Compare AI, DSE, and SWE",
+        )
+        prompt = result.params.get("clarification_prompt", "")
+        assert "two tracks at a time" in prompt.lower() or "two" in prompt.lower()
+
+    def test_B_clarification_prompt_stored_in_params(self):
+        """Clarification prompt must be in params['clarification_prompt']."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "DSE",
+            "Compare AI, DSE, and SWE",
+        )
+        assert "clarification_prompt" in result.params
+        assert len(result.params["clarification_prompt"]) > 20
+
+    # ── C: Two-track comparisons must NOT trigger the guard ──────────────────
+
+    def test_C1_two_tracks_ai_vs_dse_passes(self):
+        """'Compare AI and Data Science tracks' → compare_tracks (2 tracks, no guard)."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "DSE",
+            "Compare AI and Data Science tracks",
+        )
+        assert result.intent == "compare_tracks"
+
+    def test_C2_two_tracks_ai_vs_cybersecurity_passes(self):
+        """'Compare AI track and Cybersecurity' → compare_tracks (2 tracks, no guard)."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "CYS",
+            "Compare AI track and Cybersecurity",
+        )
+        assert result.intent == "compare_tracks"
+
+    def test_C3_two_tracks_vs_notation_passes(self):
+        """'SWE vs CYS' → compare_tracks (2 tracks, no guard)."""
+        result = self._normalize_sq(
+            "compare_tracks", "SWE", "CYS",
+            "SWE vs CYS",
+        )
+        assert result.intent == "compare_tracks"
+
+    def test_C4_two_tracks_with_context_words_passes(self):
+        """'Compare the courses and skills in SWE and DSE' → compare_tracks."""
+        result = self._normalize_sq(
+            "compare_tracks", "SWE", "DSE",
+            "Compare the courses and skills in SWE and DSE",
+        )
+        assert result.intent == "compare_tracks"
+
+    def test_C5_two_tracks_full_names_passes(self):
+        """'Compare Software Engineering and Cybersecurity' → compare_tracks."""
+        result = self._normalize_sq(
+            "compare_tracks", "SWE", "CYS",
+            "Compare Software Engineering and Cybersecurity",
+        )
+        assert result.intent == "compare_tracks"
+
+    # ── D: Unsupported/unknown track in text does not trigger guard ───────────
+
+    def test_D_unknown_track_name_not_counted(self):
+        """'Compare business and AI' → 1 canonical track (AI) → no guard, intent unchanged."""
+        result = self._normalize_sq(
+            "compare_tracks", "AI", "business",
+            "Compare business and AI",
+        )
+        # Guard must NOT fire (only 1 canonical track in text) → intent stays compare_tracks
+        assert result.intent == "compare_tracks"
+
+    def test_D_only_one_canonical_track_no_guard(self):
+        """Single canonical track in text → guard does not fire."""
+        result = self._normalize_sq(
+            "compare_tracks", "DSE", None,
+            "Compare DSE and something else entirely",
+        )
+        assert result.intent == "compare_tracks"
+
+    # ── E: End-to-end via LLM mock ────────────────────────────────────────────
+
+    def test_E_end_to_end_three_tracks_clarification(self, monkeypatch):
+        """End-to-end: LLM returns compare_tracks for 3-track query → clarification_needed."""
+        sq_data = {
+            "intent": "compare_tracks",
+            "original_text": "Compare AI, DSE, and SWE",
+            "entities": {"course_code": None, "role": None, "track": "AI", "skill": None},
+            "secondary_entities": {"course_code": None, "role": None, "track": "DSE", "skill": None},
+            "params": {},
+            "session_overrides": {
+                "added_courses": [], "assumed_passed_courses": [], "assumed_failed_courses": [],
+                "target_role": None, "course_override_type": "none", "override_action": "accumulate",
+            },
+            "student_referential_fallback": False,
+        }
+        response = json.dumps({"queries": [sq_data]})
+        client = _make_mock_client([response])
+        result = _run_qu("Compare AI, DSE, and SWE", client, monkeypatch=monkeypatch)
+
+        assert len(result) == 1
+        assert result[0].intent == "clarification_needed"
+        prompt = result[0].params.get("clarification_prompt", "")
+        assert "Artificial Intelligence (AI)" in prompt
+        assert "Data Science and Engineering (DSE)" in prompt
+        assert "Software Engineering (SWE)" in prompt
+
+    def test_E_end_to_end_two_track_regression(self, monkeypatch):
+        """End-to-end: LLM returns compare_tracks for 2-track query → compare_tracks preserved."""
+        sq_data = {
+            "intent": "compare_tracks",
+            "original_text": "Compare AI and DSE tracks",
+            "entities": {"course_code": None, "role": None, "track": "AI", "skill": None},
+            "secondary_entities": {"course_code": None, "role": None, "track": "DSE", "skill": None},
+            "params": {},
+            "session_overrides": {
+                "added_courses": [], "assumed_passed_courses": [], "assumed_failed_courses": [],
+                "target_role": None, "course_override_type": "none", "override_action": "accumulate",
+            },
+            "student_referential_fallback": False,
+        }
+        response = json.dumps({"queries": [sq_data]})
+        client = _make_mock_client([response])
+        result = _run_qu("Compare AI and DSE tracks", client, monkeypatch=monkeypatch)
+
+        assert len(result) == 1
+        assert result[0].intent == "compare_tracks"
+        assert result[0].entities.track_id == "AI"
+        assert result[0].secondary_entities is not None
+        assert result[0].secondary_entities.track_id == "DSE"

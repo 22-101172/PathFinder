@@ -1777,3 +1777,85 @@ def q_resolve_entity(client, entity_type: str, entity_text: str) -> dict:
     result = _format_resolver_not_found(entity_type, entity_text, normalized)
     logger.debug("Resolver result: status=not_found for entity_type=%s", entity_type)
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A8 — Bulk Metadata (startup display cache)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def q_get_all_course_metadata(client) -> list:
+    """Return lightweight metadata for all courses — used for the startup display cache."""
+    rows = client.execute_query(
+        """
+        MATCH (c:Course)
+        RETURN c.course_code AS code, c.name AS name,
+               c.credits AS credits, c.level AS level
+        ORDER BY c.course_code
+        """,
+        {}
+    )
+    return [
+        {
+            "code": r["code"],
+            "name": r.get("name"),
+            "credits": r.get("credits"),
+            "level": r.get("level"),
+        }
+        for r in rows if r.get("code")
+    ]
+
+
+def q_get_all_skill_metadata(client) -> list:
+    """Return lightweight metadata for all skills — used for the startup display cache."""
+    rows = client.execute_query(
+        """
+        MATCH (s:Skill)
+        RETURN s.skill_id AS skill_id, s.name AS name, s.category AS category
+        ORDER BY s.skill_id
+        """,
+        {}
+    )
+    return [
+        {
+            "skill_id": r["skill_id"],
+            "name": r.get("name"),
+            "category": r.get("category"),
+        }
+        for r in rows if r.get("skill_id")
+    ]
+
+
+def q_get_all_role_metadata(client) -> list:
+    """Return lightweight metadata for all roles — used for the startup display cache."""
+    rows = client.execute_query(
+        """
+        MATCH (r:Role)
+        RETURN r.role_id AS role_id, r.name AS name, r.domain AS domain
+        ORDER BY r.role_id
+        """,
+        {}
+    )
+    return [
+        {
+            "role_id": r["role_id"],
+            "name": r.get("name"),
+            "domain": r.get("domain"),
+        }
+        for r in rows if r.get("role_id")
+    ]
+
+
+def q_get_all_track_metadata(client) -> list:
+    """Return lightweight metadata for all tracks — used for the startup display cache."""
+    rows = client.execute_query(
+        """
+        MATCH (t:Track)
+        RETURN t.track_id AS track_id, t.name AS name
+        ORDER BY t.track_id
+        """,
+        {}
+    )
+    return [
+        {"track_id": r["track_id"], "name": r.get("name")}
+        for r in rows if r.get("track_id")
+    ]

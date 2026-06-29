@@ -227,15 +227,26 @@ Show the matched skill name. If skill not found, include the attempted skill nam
 response so the student knows what was searched.
 33. For D6 failed_course_history: show all historically failed attempts, note that some may \
 have been retaken and passed. This is different from current failed_courses (unresolved fails only).
-34. RESPONSE STYLE CONTRACT: When response_style is "only" in the narration packet, respond with \
-EXACTLY the value of the requested field and nothing else. One sentence only — no warnings, \
-no last-semester GPA, no academic standing, no extra context. \
-Example: for record_focus=cgpa + response_style=only, produce only "Your current CGPA is 2.41." \
-and stop. Any extra sentence violates this rule.
+34. RESPONSE DETAIL MATCHING: Match the level of detail the student requested. \
+If they asked "what is my CGPA?", give a natural sentence like "Your current CGPA is 1.91." \
+If they explicitly used phrasing like "just the number" or "yes or no only", be minimal. \
+For list questions (failed courses, in-progress courses), always include the relevant list \
+unless the student explicitly said not to. response_style is a tone hint only — it should \
+never suppress directly relevant facts.
 35. For academic warning (academic_standing="warning") WITHOUT a policy citation in the packet, \
 state the fact in measured terms ("you are currently on academic warning") but do NOT speculate \
 about consequences such as suspension, dismissal, or probation timelines. \
 Only add consequence language when the packet contains explicit RAG policy citations.
+36. NEVER derive or infer a course name from its course code. If a course has no name or \
+display_label in the packet, display ONLY the code: e.g., "C-AI321" or \
+"C-AI321 (name not available)". Do NOT construct names like "Artificial Intelligence 321" \
+or "Computer Science 496" from the code format.
+37. For eligibility_status="in_progress": do NOT promise retake availability. State that the \
+student is currently enrolled and cannot register again while enrolled. \
+Retake eligibility depends on the final grade once the course is complete.
+38. When the packet contains checked_course_metadata or in_progress_course_metadata, \
+use the provided name for each code. Format as "Course Name (CODE)". \
+Do not invent names; if the metadata entry has name=null or is absent, show ONLY the code.
 """
 
 # ── Narration packet — per-PerSQResult extraction ─────────────────────────────
@@ -599,6 +610,9 @@ def _extract_track(packet: dict, data: dict, intent: str) -> None:
         "description", "shared_courses", "different_courses",
         "skills", "role_alignment", "recommended_track", "ranking",
         "courses", "error",
+        # recommendation intents — KG returns these
+        "ranked_tracks", "total_tracks_evaluated",
+        "role_id", "role_name", "skill_id", "skill_name",
     ):
         if k in data:
             val = data[k]
@@ -616,33 +630,9 @@ def _extract_policy(packet: dict, data: dict) -> None:
             packet[k] = val
 
 
-_SCALAR_ONLY_FIELDS: dict[str, list[str]] = {
-    "cgpa": ["cgpa"],
-    "last_semester_gpa": ["last_semester_gpa"],
-    "academic_level": ["level", "level_display"],
-    "academic_standing": ["academic_standing", "cgpa"],
-    "probation_status": ["academic_standing", "cgpa"],
-    "academic_warnings": ["consecutive_warnings", "total_warnings"],
-    "completed_credits": ["total_credit_hours_earned"],
-    "track": ["track_id", "program"],
-    "current_semester": ["current_semester"],
-    "study_status": ["study_status"],
-}
-
-
 def _extract_student_record(packet: dict, data: dict) -> None:
-    record_focus = data.get("record_focus", "full_record")
-    response_style = data.get("response_style", "normal")
-
-    # response_style="only": send the LLM only the single requested scalar — no extras
-    if response_style == "only":
-        scalar_fields = _SCALAR_ONLY_FIELDS.get(record_focus)
-        if scalar_fields:
-            for f in ["record_focus", "response_style"] + scalar_fields:
-                if f in data:
-                    packet[f] = data[f]
-            return
-
+    # response_style is kept as a tone hint but never strips fields from the packet.
+    # The deterministic narration layer handles focus-specific rendering.
     for k in (
         "record_focus", "response_style",
         "track_id", "program", "level", "level_display", "cgpa",
@@ -658,6 +648,9 @@ def _extract_student_record(packet: dict, data: dict) -> None:
         "checked_course_codes", "status_filter",
         # display enrichment labels from Orchestrator
         "course_display_labels",
+        # startup-cache metadata for course_status_check display
+        "checked_course_metadata",
+        "in_progress_course_metadata",
     ):
         if k in data:
             val = data[k]
@@ -779,6 +772,11 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
 
         if eligibility_status == "in_progress":
             lines.append(f"You are already enrolled in / currently taking {course_label}.")
+            lines.append(
+                "You cannot register for another attempt while currently enrolled. "
+                "Retake or improve-retake eligibility will depend on your final grade "
+                "once the course is complete."
+            )
         elif eligibility_status == "already_completed":
             lines.append(f"You have already completed and passed {course_label}.")
         elif eligibility_status == "retake_cap_exceeded":
@@ -1248,21 +1246,43 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             lines.append(f"  Different courses: {len(diff)}")
 
     elif intent in ("recommend_track_for_role", "recommend_track_for_skill"):
-        rec = p.get("recommended_track") or p.get("ranking")
-        if isinstance(rec, list):
-            lines.append("Recommended tracks (ranked):")
-            for t in rec[:5]:
+        # KG returns ranked_tracks; fall back to legacy fields for backward compatibility
+        ranked = p.get("ranked_tracks")
+        if not ranked:
+            ranked = p.get("recommended_track") or p.get("ranking")
+
+        if intent == "recommend_track_for_role":
+            role_display = _fmt_role_label(p.get("role_id", ""), p.get("role_name", "")) or "this role"
+            header = f"Recommended tracks for a {role_display} career path:"
+        else:
+            skill_display = _fmt_skill_label(p.get("skill_id", ""), p.get("skill_name", "")) or "this skill"
+            header = f"Recommended tracks to develop {skill_display}:"
+
+        if isinstance(ranked, list) and ranked:
+            lines.append(header)
+            for t in ranked[:5]:
                 if isinstance(t, dict):
                     tid = t.get("track_id", "")
-                    tname = t.get("name", "")
+                    tname = t.get("track_name") or t.get("name", "")
                     label = _fmt_track_label(tid, tname)
+                    rank = t.get("rank")
+                    score = t.get("alignment_score")
+                    course_count = t.get("course_count")
+                    if isinstance(score, (int, float)):
+                        label += f" — {score:.0%} alignment"
+                    elif course_count is not None:
+                        label += f" — {course_count} course(s)"
+                    prefix = f"  {rank}." if rank is not None else "  •"
+                    lines.append(f"{prefix} {label}")
                 else:
-                    label = _fmt_track_label(str(t))
-                lines.append(f"  • {label}")
-        elif rec:
-            lines.append(f"Recommended track: {_fmt_track_label(str(rec))}")
+                    lines.append(f"  • {_fmt_track_label(str(t))}")
+            total = p.get("total_tracks_evaluated")
+            if total is not None:
+                lines.append(f"(Evaluated {total} tracks in total.)")
+        elif ranked:
+            lines.append(f"Recommended track: {_fmt_track_label(str(ranked))}")
         else:
-            lines.append("No track recommendation available.")
+            lines.append("No track recommendation is available in the current curriculum data.")
 
     elif intent == "policy_query":
         answer = p.get("answer", "")
@@ -1532,10 +1552,17 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                 found_in_progress = {d.get("course_code") for d in in_progress_details if isinstance(d, dict)}
                 found_failed = {d.get("course_code") for d in failed_details if isinstance(d, dict)}
 
+                checked_meta_map: dict = p.get("checked_course_metadata") or {}
+
                 def _cl(code: str) -> str:
+                    # Prefer enriched status-confirmed detail dicts
                     for dl in list(completed_details) + list(in_progress_details) + list(failed_details):
                         if isinstance(dl, dict) and dl.get("course_code") == code:
                             return _render_course_detail(dl)
+                    # Use startup metadata cache
+                    _meta = checked_meta_map.get(code)
+                    if isinstance(_meta, dict) and _meta.get("name"):
+                        return f"{_meta['name']} ({code})"
                     return display_labels.get(code) or code
 
                 matched_completed = [c for c in checked_codes if c in found_completed]
@@ -1589,8 +1616,13 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             if in_progress:
                 sem_note = f" in {current_sem}" if current_sem else ""
                 lines.append(f"Your current courses{sem_note}:")
+                in_p_meta_map: dict = p.get("in_progress_course_metadata") or {}
                 for c in in_progress[:10]:
-                    lines.append(f"  • {c}")
+                    _m = in_p_meta_map.get(c)
+                    if isinstance(_m, dict) and _m.get("name"):
+                        lines.append(f"  • {_m['name']} ({c})")
+                    else:
+                        lines.append(f"  • {c}")
             if completed:
                 lines.append(f"Completed: {len(completed)} course(s)")
             return

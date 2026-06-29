@@ -1425,35 +1425,40 @@ class Orchestrator:
             _status_filter: Optional[str] = sq.params.get("status_filter")
 
             if _target_code:
+                # Entity-resolved single course: always check all 3 statuses — ignore status_filter
                 _checked_course_codes = [_target_code]
+                _snapshot_status_filter = None  # override: entity resolution → check all
             elif _target_codes:
+                # Memory-subset multi-course: respect status_filter
                 _checked_course_codes = _target_codes
+                _snapshot_status_filter = _status_filter
             else:
                 _checked_course_codes = []
-
-            _snapshot_status_filter = _status_filter
+                _snapshot_status_filter = _status_filter
 
             if _checked_course_codes:
                 _target_set = set(_checked_course_codes)
-                if _status_filter == "completed":
+                # Use _snapshot_status_filter (None when entity-resolved → checks all 3)
+                if _snapshot_status_filter == "completed":
                     completed_details = self._enrich_course_details(
                         [c for c in (ctx.completed_courses or []) if c in _target_set], caches
                     )
                     in_progress_details = []
                     failed_details = []
-                elif _status_filter == "in_progress":
+                elif _snapshot_status_filter == "in_progress":
                     completed_details = []
                     in_progress_details = self._enrich_course_details(
                         [c for c in (ctx.in_progress_courses or []) if c in _target_set], caches
                     )
                     failed_details = []
-                elif _status_filter == "failed":
+                elif _snapshot_status_filter == "failed":
                     completed_details = []
                     in_progress_details = []
                     failed_details = self._enrich_course_details(
                         [c for c in (ctx.failed_courses or []) if c in _target_set], caches
                     )
                 else:
+                    # None (entity-resolved) or unrecognised → check all 3 statuses
                     completed_details = self._enrich_course_details(
                         [c for c in (ctx.completed_courses or []) if c in _target_set], caches
                     )
@@ -1538,6 +1543,24 @@ class Orchestrator:
                 snapshot["checked_course_codes"] = _checked_course_codes
             if _snapshot_status_filter:
                 snapshot["status_filter"] = _snapshot_status_filter
+            # Attach display metadata for checked codes from startup cache
+            if _checked_course_codes:
+                checked_meta: dict = {}
+                for _code in _checked_course_codes:
+                    _m = self._kg.get_course_metadata(_code)
+                    if isinstance(_m, dict) and _m.get("name") is not None:
+                        checked_meta[_code] = _m
+                if checked_meta:
+                    snapshot["checked_course_metadata"] = checked_meta
+            # Attach metadata for contextual in-progress courses shown alongside status check
+            if ctx.in_progress_courses:
+                _in_p_meta: dict = {}
+                for _code in (ctx.in_progress_courses or [])[:12]:
+                    _m = self._kg.get_course_metadata(_code)
+                    if isinstance(_m, dict) and _m.get("name") is not None:
+                        _in_p_meta[_code] = _m
+                if _in_p_meta:
+                    snapshot["in_progress_course_metadata"] = _in_p_meta
 
         if had_clear:
             snapshot["assumptions_cleared"] = True
@@ -1598,9 +1621,18 @@ class Orchestrator:
                     if isinstance(d, dict) and d.get("course_code"):
                         detailed.add(d["course_code"])
 
-            # Raw codes that need a display label
+            # Raw codes that need a display label — scan only the focus-relevant field
+            _FOCUS_TO_RAW_FIELD: dict[str, list[str]] = {
+                "in_progress_courses": ["in_progress_courses"],
+                "completed_courses": ["completed_courses"],
+                "failed_courses": ["failed_courses"],
+                "failed_course_history": ["failed_history_codes"],
+            }
+            _raw_fields_to_scan = _FOCUS_TO_RAW_FIELD.get(
+                focus, ["in_progress_courses", "completed_courses", "failed_courses"]
+            )
             raw: list[str] = []
-            for field in ("in_progress_courses", "completed_courses", "failed_courses"):
+            for field in _raw_fields_to_scan:
                 for code in data.get(field) or []:
                     if isinstance(code, str) and code not in detailed and code not in raw:
                         raw.append(code)

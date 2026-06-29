@@ -42,6 +42,8 @@ from gateway.qu_preprocessing import (
     detect_subset_status_filter,
     is_list_incompatible_style,
     detect_status_yes_no,
+    detect_course_track_membership,
+    extract_course_from_track_membership,
 )
 
 _TRACE = os.getenv("PATHFINDER_TRACE", "").lower() in ("true", "1", "yes")
@@ -167,6 +169,27 @@ def understand_query(
         bool(last_referenced.track_id), bool(last_referenced.skill_id),
         resolver is not None,
     )
+
+    # ── Pre-LLM fast path: obvious ordinal reference → skip LLM ─────────────
+    if last_turn_memory is not None:
+        fast_path = _maybe_fast_path_ordinal(user_text, last_turn_memory, trace_id)
+        if fast_path is not None:
+            if resolver is not None:
+                fast_path = _resolve_all(fast_path, resolver)
+            else:
+                fast_path = _filter_unresolved(fast_path)
+            duration_ms = int((time.perf_counter() - _t0) * 1000)
+            logger.info(
+                "QU.result trace_id=%s sq_count=%d intents=%s source=%s "
+                "resolver_enabled=%s duration_ms=%d",
+                trace_id,
+                len(fast_path),
+                [sq.intent for sq in fast_path],
+                "fast_path_ordinal",
+                resolver is not None,
+                duration_ms,
+            )
+            return fast_path
 
     sq_list, classification_source = _classify(
         user_text, last_referenced, recent_turns, pre, trace_id,
@@ -397,6 +420,50 @@ _D2_COURSE_INTENTS = frozenset({"get_course_info", "get_course_prerequisites", "
 _D2_SKILL_INTENTS = frozenset({"search_courses_by_skill"})
 
 
+# Pronoun/referential expressions that must NOT be used as entity overrides
+_PRONOUN_OR_REF_MENTIONS: frozenset[str] = frozenset({
+    "it", "this", "that", "them", "those", "these",
+    "the one", "that one", "this one",
+    "this course", "that course", "the course",
+    "this subject", "that subject", "the subject",
+})
+
+# Track intents that can be misrouted when the user asks about a course's track membership
+_TRACK_INTENTS_MISROUTED: frozenset[str] = frozenset({
+    "get_track_overview", "recommend_track_for_skill",
+})
+
+# Minimal canonical patterns for compare_tracks 3+ mention guard.
+# Only mirrors KG canonical track IDs and their primary names — not the full alias table.
+# Purpose: detect obvious 3+ track mentions so we don't silently drop one track.
+_TRACK_MENTION_PATTERNS: dict[str, re.Pattern] = {
+    "AI": re.compile(r'\b(?:artificial intelligence|ai track|ai)\b', re.IGNORECASE),
+    "DSE": re.compile(r'\b(?:data science and engineering|data science track|dse)\b', re.IGNORECASE),
+    "SWE": re.compile(r'\b(?:software engineering track|software engineering|swe)\b', re.IGNORECASE),
+    "CYS": re.compile(r'\b(?:cybersecurity track|cyber security track|cybersecurity|cyber security|cys)\b', re.IGNORECASE),
+    "GEN": re.compile(r'\b(?:general track|general|gen)\b', re.IGNORECASE),
+}
+
+_TRACK_FRIENDLY_NAMES: dict[str, str] = {
+    "AI":  "Artificial Intelligence (AI)",
+    "DSE": "Data Science and Engineering (DSE)",
+    "SWE": "Software Engineering (SWE)",
+    "CYS": "Cybersecurity (CYS)",
+    "GEN": "General (GEN)",
+}
+
+
+def _detect_track_mentions(text: str) -> list[str]:
+    """Return unique track IDs found in text, ordered by first match position."""
+    matches: list[tuple[int, str]] = []
+    for track_id, pattern in _TRACK_MENTION_PATTERNS.items():
+        m = pattern.search(text)
+        if m:
+            matches.append((m.start(), track_id))
+    matches.sort()
+    return [tid for _, tid in matches]
+
+
 def _normalize_one_sq(
     sq: StructuredQuery,
     user_text: str,
@@ -407,6 +474,65 @@ def _normalize_one_sq(
     try:
         intent = sq.intent
         text_for_extraction = sq.original_text or user_text
+
+        # ── Guard 1: Track-membership question misrouted to track intent ──────
+        # "which track does X belong to?" → get_course_info, NOT get_track_overview
+        if intent in _TRACK_INTENTS_MISROUTED and detect_course_track_membership(text_for_extraction):
+            course_mention = extract_course_from_track_membership(text_for_extraction)
+            if course_mention:
+                sq = sq.model_copy(update={
+                    "intent": "get_course_info",
+                    "entities": sq.entities.model_copy(update={
+                        "course_code": course_mention,
+                        "track_id": None,
+                        "skill_id": None,
+                    }),
+                    "params": {
+                        **sq.params,
+                        "entity_type_hint": "course",
+                        "raw_entity_mention": course_mention,
+                    },
+                })
+                intent = "get_course_info"
+
+        # ── Guard 2: compare_tracks with 3+ track mentions → clarification_needed ──
+        # If the user mentions three or more tracks in a compare request, we cannot
+        # silently pick two and drop the rest. Ask which two they want to compare.
+        if intent == "compare_tracks":
+            track_mentions = _detect_track_mentions(text_for_extraction)
+            if len(track_mentions) >= 3:
+                friendly = [_TRACK_FRIENDLY_NAMES.get(tid, tid) for tid in track_mentions]
+                options_str = ", ".join(friendly[:-1]) + ", or " + friendly[-1]
+                prompt = (
+                    "I can compare two tracks at a time. "
+                    f"Which two would you like to compare: {options_str}?"
+                )
+                return StructuredQuery(
+                    intent="clarification_needed",
+                    original_text=prompt,
+                    params={"clarification_prompt": prompt},
+                )
+
+        # ── Guard 3: Stale/hallucinated canonical code → prefer raw_entity_mention ─
+        # If the LLM output a strict code (C-XXXYYY) that is NOT literally in the
+        # user text, and raw_entity_mention provides a different, non-pronoun mention,
+        # trust the explicit mention and let the resolver validate it.
+        if intent in _D2_COURSE_INTENTS and sq.entities.course_code:
+            _cc = sq.entities.course_code
+            if STRICT_COURSE_CODE_RE.fullmatch(_cc.strip().upper()):
+                _code_upper = _cc.strip().upper()
+                if _code_upper not in text_for_extraction.upper():
+                    _raw = sq.params.get("raw_entity_mention")
+                    if isinstance(_raw, str):
+                        _mention = _raw.strip()
+                        if (_mention
+                                and _mention.upper() != _code_upper
+                                and _mention.lower() not in _PRONOUN_OR_REF_MENTIONS):
+                            sq = sq.model_copy(update={
+                                "entities": sq.entities.model_copy(
+                                    update={"course_code": _mention}
+                                )
+                            })
 
         # D2: course entity promotion for course-info intents
         if intent in _D2_COURSE_INTENTS and not sq.entities.course_code:
@@ -508,6 +634,65 @@ def _normalize_structured_queries_after_llm(
         sq = _normalize_one_sq(sq, user_text, pre, last_referenced)
         result.append(sq)
     return result
+
+
+# ── Pre-LLM fast path ─────────────────────────────────────────────────────────
+
+def _maybe_fast_path_ordinal(
+    user_text: str,
+    tm: "TurnMemory | None",
+    trace_id: str = "",
+) -> "list[StructuredQuery] | None":
+    """Try to resolve obvious ordinal reference without LLM. Returns SQs or None.
+
+    Called BEFORE _classify (the LLM call) to skip the LLM when the user says
+    something like "can I take the first one again?" with unambiguous TurnMemory.
+    """
+    if tm is None:
+        return None
+
+    ordinal = detect_ordinal_reference(user_text)
+    if ordinal is None:
+        return None
+
+    am = tm.answer_memory
+    if not am.ordered_display_items:
+        return None
+
+    word, idx = ordinal
+    if idx >= len(am.ordered_display_items):
+        return None
+
+    item = am.ordered_display_items[idx]
+    if item.type != "course" or not item.code:
+        return None
+
+    all_types = {di.type for di in am.ordered_display_items}
+    is_unambiguous = not tm.ambiguity.has_multiple_reference_groups or len(all_types) == 1
+    if not is_unambiguous:
+        return None
+
+    lower = user_text.lower()
+    if any(p in lower for p in ("can i take", "am i eligible", "eligible to take", "take it again", "again")):
+        intent = "check_course_eligibility"
+    elif any(p in lower for p in ("what is", "tell me about", "info", "details about")):
+        intent = "get_course_info"
+    elif any(p in lower for p in ("prerequisites", "prereq")):
+        intent = "get_course_prerequisites"
+    else:
+        return None
+
+    logger.info(
+        "QU.fast_path_ordinal trace_id=%s ordinal=%s idx=%d code=%s intent=%s",
+        trace_id, word, idx, item.code, intent,
+    )
+    return [StructuredQuery(
+        intent=intent,
+        original_text=user_text,
+        entities=EntitySet(course_code=item.code),
+        params={"source_reference": f"last_turn_ordered_item_{idx + 1}"},
+        student_referential_fallback=True,
+    )]
 
 
 # ── TurnMemory Deterministic Patcher ─────────────────────────────────────────
@@ -960,8 +1145,12 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
     failures: list[str] = []
     failure_info: list[tuple[str, str | None]] = []  # (entity_type, resolver_status)
 
+    _sq_user_text = sq.original_text or ""
+
     # ── Course resolution with entity_candidates fallback ─────────────────────
-    course_code, fail, fail_status = _resolve_course(entities.course_code, resolver)
+    course_code, fail, fail_status = _resolve_course(
+        entities.course_code, resolver, user_text=_sq_user_text
+    )
     if fail:
         # Try entity_candidates in priority order before giving up
         entity_candidates: list[str] = []
@@ -983,29 +1172,39 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
                     sq.intent, cand, res_cand,
                 )
                 break
-        # If course still failed but intent is course-info — try skill fallback
+        # If course still failed but intent is course-info — try skill fallback.
+        # Skip the fallback when wording is "tell me about / explain / what is" (course-info
+        # verb), or when the resolver returned "ambiguous" (multiple courses matched).
+        # In those cases the user clearly meant a course; produce clarification_needed
+        # rather than silently rerouting to skill search.
         if fail and sq.intent in _D2_COURSE_INTENTS:
-            skill_fallback_mention = primary_mention or (entity_candidates[0] if entity_candidates else None)
-            if skill_fallback_mention:
-                res_skill, fail_skill, _ = _resolve_entity("skill", skill_fallback_mention, resolver)
-                if res_skill:
-                    logger.info(
-                        "QU.topic_fallback intent=%s mention=%r skill=%r -> search_courses_by_skill",
-                        sq.intent, skill_fallback_mention, res_skill,
-                    )
-                    # Reroute: course-intent → search_courses_by_skill with resolved skill
-                    new_entities = EntitySet(skill_id=res_skill)
-                    new_params = {
-                        **sq.params,
-                        "topic_fallback": True,
-                        "original_intent": sq.intent,
-                        "attempted_candidate": primary_mention,
-                    }
-                    return sq.model_copy(update={
-                        "intent": "search_courses_by_skill",
-                        "entities": new_entities,
-                        "params": new_params,
-                    })
+            _orig_for_fb = sq.original_text or ""
+            _skip_fallback = (
+                detect_d2_course_info_verb(_orig_for_fb)
+                or fail_status == "ambiguous"
+            )
+            if not _skip_fallback:
+                skill_fallback_mention = primary_mention or (entity_candidates[0] if entity_candidates else None)
+                if skill_fallback_mention:
+                    res_skill, fail_skill, _ = _resolve_entity("skill", skill_fallback_mention, resolver)
+                    if res_skill:
+                        logger.info(
+                            "QU.topic_fallback intent=%s mention=%r skill=%r -> search_courses_by_skill",
+                            sq.intent, skill_fallback_mention, res_skill,
+                        )
+                        # Reroute: course-intent → search_courses_by_skill with resolved skill
+                        new_entities = EntitySet(skill_id=res_skill)
+                        new_params = {
+                            **sq.params,
+                            "topic_fallback": True,
+                            "original_intent": sq.intent,
+                            "attempted_candidate": primary_mention,
+                        }
+                        return sq.model_copy(update={
+                            "intent": "search_courses_by_skill",
+                            "entities": new_entities,
+                            "params": new_params,
+                        })
         if fail:
             failures.append(fail)
             failure_info.append(("course", fail_status))
@@ -1056,25 +1255,25 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
 
     new_added = []
     for c in sq.session_overrides.added_courses:
-        res, fail, _ = _resolve_course(c, resolver)
+        res, fail, _ = _resolve_course(c, resolver, user_text=_sq_user_text)
         if fail: failures.append(fail)
         elif res: new_added.append(res)
 
     new_passed = []
     for c in sq.session_overrides.assumed_passed_courses:
-        res, fail, _ = _resolve_course(c, resolver)
+        res, fail, _ = _resolve_course(c, resolver, user_text=_sq_user_text)
         if fail: failures.append(fail)
         elif res: new_passed.append(res)
 
     new_failed = []
     for c in sq.session_overrides.assumed_failed_courses:
-        res, fail, _ = _resolve_course(c, resolver)
+        res, fail, _ = _resolve_course(c, resolver, user_text=_sq_user_text)
         if fail: failures.append(fail)
         elif res: new_failed.append(res)
 
     new_grades = {}
     for k, v in sq.params.get("expected_grades", {}).items():
-        res, fail, _ = _resolve_course(k, resolver)
+        res, fail, _ = _resolve_course(k, resolver, user_text=_sq_user_text)
         if fail: failures.append(fail)
         elif res: new_grades[res] = str(v)
 
@@ -1148,13 +1347,19 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
 def _resolve_course(
     mention: str | None,
     resolver: Resolver,
+    user_text: str = "",
 ) -> tuple[str | None, str | None, str | None]:
     if not mention:
         return None, None, None
-    # Only bypass resolver for strict canonical course-code forms with the C- prefix
-    if STRICT_COURSE_CODE_RE.fullmatch(mention.strip().upper()):
-        return mention.strip().upper(), None, None
-    # Name/alias — resolve via KG
+    code_upper = mention.strip().upper()
+    if STRICT_COURSE_CODE_RE.fullmatch(code_upper):
+        # Only bypass resolver when code appears literally in the query text
+        # (i.e., user typed it explicitly). Codes not in user text may be
+        # hallucinated by the LLM or carried over from last_referenced and must
+        # be validated by the resolver to prevent phantom KG calls.
+        if user_text and code_upper in user_text.upper():
+            return code_upper, None, None
+        # Fall through: validate via resolver
     return _resolve_entity("course", mention, resolver)
 
 
@@ -1180,8 +1385,18 @@ def _resolve_entity(
         return resolved_id, None, None
 
     if status == "ambiguous":
-        opts = [m.get("id") or m.get("name", "") for m in result.get("matches", [])[:5]]
-        return None, f"Which {entity_type} did you mean? Options: {', '.join(str(o) for o in opts)}", "ambiguous"
+        _parts: list[str] = []
+        for _m in result.get("matches", [])[:5]:
+            _eid = _m.get("id")
+            _nm = _m.get("name")
+            if _nm and _eid and _nm != _eid:
+                _parts.append(f"{_nm} ({_eid})")
+            elif _eid:
+                _parts.append(_eid)
+            elif _nm:
+                _parts.append(_nm)
+        _opts_str = ", ".join(_parts) if _parts else mention or "?"
+        return None, f"Which {entity_type} did you mean? Options: {_opts_str}", "ambiguous"
 
     if status in ("not_found", "error", "unsupported_entity_type", "empty_entity_text"):
         return None, f"I couldn't find a {entity_type} matching '{mention}'. Could you provide the exact name or ID?", "not_found"

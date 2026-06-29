@@ -293,8 +293,6 @@
         "intro ml",
         "introduction to ml",
         "iml",
-        "machine learning course",
-        "ml course",
         "intro to ml"
       ],
       "C-AI412": [
@@ -382,7 +380,10 @@
         "secure coding",
         "security in software",
         "devsecops course",
-        "secure dev"
+        "secure dev",
+        "development of secure software systems",
+        "development of secure software",
+        "secure software systems"
       ],
       "C-SW425": [
         "strategic it",
@@ -479,6 +480,10 @@
     },
     "ambiguous_terms": {
       "machine learning": [
+        "C-AI321",
+        "C-AI422"
+      ],
+      "ml": [
         "C-AI321",
         "C-AI422"
       ],

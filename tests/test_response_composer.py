@@ -1839,3 +1839,116 @@ class TestPhase2CoursesBySkillTopicFallback:
         answer = _deterministic_answer([packet])
         assert "Machine Learning" in answer
         assert "don't see" not in answer.lower()
+
+
+# ── Track Guidance recommendation regression tests ────────────────────────────
+
+class TestTrackRecommendationNarration:
+    """Regression tests for recommend_track_for_role and recommend_track_for_skill
+    narration using the ranked_tracks field returned by the KG."""
+
+    def _make_role_result(self, ranked_tracks: list) -> PerSQResult:
+        return PerSQResult(
+            sq_index=0,
+            intent="recommend_track_for_role",
+            status="success",
+            data={
+                "role_id": "RL_ML_Engineer",
+                "role_name": "Machine Learning Engineer",
+                "ranked_tracks": ranked_tracks,
+                "total_tracks_evaluated": 5,
+            },
+        )
+
+    def _make_skill_result(self, ranked_tracks: list) -> PerSQResult:
+        return PerSQResult(
+            sq_index=0,
+            intent="recommend_track_for_skill",
+            status="success",
+            data={
+                "skill_id": "SK_ML",
+                "skill_name": "Machine Learning",
+                "ranked_tracks": ranked_tracks,
+                "total_tracks_evaluated": 5,
+            },
+        )
+
+    # A. recommend_track_for_role with ranked_tracks non-empty → mentions top track
+    def test_role_ranked_tracks_mentions_top_track(self):
+        ranked = [
+            {"track_id": "AI", "track_name": "Artificial Intelligence", "alignment_score": 0.85, "rank": 1},
+            {"track_id": "DSE", "track_name": "Data Science and Engineering", "alignment_score": 0.60, "rank": 2},
+        ]
+        r = self._make_role_result(ranked)
+        packets = [_extract_packet(r)]
+        answer = _deterministic_answer(packets)
+        assert "Artificial Intelligence" in answer or "AI" in answer
+        assert "Machine Learning Engineer" in answer or "ML Engineer" in answer or "Machine Learning" in answer
+
+    # B. recommend_track_for_skill with ranked_tracks non-empty → mentions top track
+    def test_skill_ranked_tracks_mentions_top_track(self):
+        ranked = [
+            {"track_id": "AI", "track_name": "Artificial Intelligence", "course_count": 8, "rank": 1},
+            {"track_id": "DSE", "track_name": "Data Science and Engineering", "course_count": 4, "rank": 2},
+        ]
+        r = self._make_skill_result(ranked)
+        packets = [_extract_packet(r)]
+        answer = _deterministic_answer(packets)
+        assert "Artificial Intelligence" in answer or "AI" in answer
+
+    # C. Empty ranked_tracks → safe no recommendation message
+    def test_empty_ranked_tracks_says_no_recommendation(self):
+        r = self._make_role_result([])
+        packets = [_extract_packet(r)]
+        answer = _deterministic_answer(packets)
+        assert "no track recommendation" in answer.lower() or "not available" in answer.lower()
+
+    # D. No hallucinated "could not find" when ranked_tracks exists
+    def test_non_empty_ranked_tracks_never_says_could_not_find(self):
+        ranked = [
+            {"track_id": "AI", "track_name": "Artificial Intelligence", "alignment_score": 0.75, "rank": 1},
+        ]
+        r = self._make_role_result(ranked)
+        packets = [_extract_packet(r)]
+        answer = _deterministic_answer(packets)
+        assert "could not find" not in answer.lower()
+        assert "no recommendation found" not in answer.lower()
+        assert "not available" not in answer.lower() or "Artificial Intelligence" in answer
+
+    def test_extract_packet_preserves_ranked_tracks(self):
+        """_extract_packet must pass ranked_tracks through to the narration packet."""
+        r = self._make_role_result([
+            {"track_id": "AI", "track_name": "Artificial Intelligence", "alignment_score": 0.85, "rank": 1},
+        ])
+        p = _extract_packet(r)
+        assert "ranked_tracks" in p
+        assert len(p["ranked_tracks"]) == 1
+        assert p["ranked_tracks"][0]["track_id"] == "AI"
+
+    def test_extract_packet_preserves_role_and_skill_context(self):
+        """role_id, role_name, skill_id, skill_name, total_tracks_evaluated must be in packet."""
+        r = self._make_role_result([
+            {"track_id": "AI", "track_name": "Artificial Intelligence", "alignment_score": 0.85, "rank": 1},
+        ])
+        p = _extract_packet(r)
+        assert p.get("role_id") == "RL_ML_Engineer"
+        assert p.get("role_name") == "Machine Learning Engineer"
+        assert p.get("total_tracks_evaluated") == 5
+
+    def test_alignment_score_shown_in_role_recommendation(self):
+        ranked = [
+            {"track_id": "AI", "track_name": "Artificial Intelligence", "alignment_score": 0.85, "rank": 1},
+        ]
+        r = self._make_role_result(ranked)
+        packets = [_extract_packet(r)]
+        answer = _deterministic_answer(packets)
+        assert "85%" in answer
+
+    def test_course_count_shown_in_skill_recommendation(self):
+        ranked = [
+            {"track_id": "AI", "track_name": "Artificial Intelligence", "course_count": 8, "rank": 1},
+        ]
+        r = self._make_skill_result(ranked)
+        packets = [_extract_packet(r)]
+        answer = _deterministic_answer(packets)
+        assert "8" in answer

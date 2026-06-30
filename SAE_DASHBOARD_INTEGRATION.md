@@ -1,196 +1,134 @@
-# SAE Dashboard Integration — Notes for Seif
+# SAE Full Integration Guide
 
-This branch adds the **Student Analysis Engine (SAE) dashboard** on top of
-PathFinder: a real login screen, a Student Analysis page, and an Advisor
-Console — all wired to live data through new proxy routes in `main.py`.
-
-Your chat pipeline (`/chat`, sessions, QU → Orchestrator → Composer,
-RAG/KG/ALE) is **completely untouched**. This only adds new things alongside it.
+This branch (`sae-full-integration`) is a **completely self-contained** version of PathFinder with the Student Analysis Engine (SAE) bundled directly inside the repo. A `git clone` followed by filling in `.env` is the entire setup process — no separate SAE folder needed.
 
 ---
 
-## 1. The three moving pieces
+## 1. What is inside this repo now
 
-| Piece | What it is | Where it runs |
+| Folder / File | What it is |
+|---|---|
+| `SAE/` | The complete SAE engine — analysis, risk flags, CGPA computation, course analytics |
+| `SAE/sae/` | SAE Python package (`api.py`, `engine.py`, `data_loader.py`, etc.) |
+| `SAE/data/` | Course catalogue Excel file |
+| `SAE/students_anonymous (1).xlsx` | Anonymised student dataset |
+| `SAE/engines/ale/rules/curriculum_2026.json` | Prerequisite graph + curriculum data |
+| `SAE/requirements.txt` | SAE-only Python dependencies |
+| `SAE/.env.example` | SAE env vars template (just GROQ key for LLM features) |
+| `adapters/sae_adapter.py` | PathFinder-side HTTP client to SAE |
+| `gateway/sae_rules_bridge.py` | Converts RAG rule bundles to SAE's flat dict format |
+| `ui_react/` | React frontend — login, chat, Student Analysis, Advisor Console |
+| `.env.example` | Complete env vars for both PathFinder and SAE |
+
+---
+
+## 2. Three services, one repo
+
+| Service | Command | Port |
 |---|---|---|
-| **SAE** | The analytics engine (CGPA, risk flags, course difficulty, advisor insights) | Its own process, port `8502` |
-| **PathFinder backend** | This repo — `main.py` | Port `8000`, unchanged location |
-| **New frontend** | `ui_react/` — login, chat, Student Analysis, Advisor Console | Static files, any port (e.g. `5500`) |
+| **SAE** (analytics engine) | `cd SAE/ && uvicorn sae.api:app --port 8502` | 8502 |
+| **PathFinder** (chat backend) | `uvicorn main:app --port 8000` | 8000 |
+| **Frontend** (static React) | `cd ui_react/ && python -m http.server 5500` | 5500 |
 
-SAE is a **separate service**, not part of this repo's Python process. PathFinder
-talks to it over HTTP through a new adapter, exactly the same pattern as how
-`KGAdapter` talks to Neo4j or `RAGAdapter` talks to the vector store — just
-swap "Neo4j" for "another FastAPI service."
+PathFinder connects to SAE at startup via `SAE_BASE_URL` in `.env`. If SAE is not running, PathFinder starts anyway and logs a warning — the chat pipeline still works, only the `/sae/*` routes return 503.
 
 ---
 
-## 2. What was actually changed in this repo
-
-### New file: `adapters/sae_adapter.py`
-A thin HTTP client, same shape as `KGAdapter`/`RAGAdapter`/`ALEAdapter`. Exposes:
-`get_student_analysis`, `get_advisor_overview`, `get_advisor_analysis`,
-`get_course_risk`, `simulate_gpa`, `health_check`. Every method returns a
-plain dict — `{"error": "..."}` on failure, never raises, so callers can
-decide what to do with it.
-
-### Edited: `main.py`
-Three small additions, all isolated:
-1. Import + global `_sae: Optional[SAEAdapter]`
-2. In `lifespan()`: instantiate `SAEAdapter()` at startup and log whether it's
-   reachable (non-fatal if not — same degrade-gracefully pattern as the KG
-   resolver when Neo4j is down).
-3. Six new routes, all prefixed `/sae/`, right before the existing `/health`
-   endpoint. They just proxy to the adapter and translate its dict responses
-   into proper HTTP status codes (404 / 502 / 200).
-
-Nothing in the existing `/chat`, `/sessions`, or session-management routes
-was touched.
-
-### New folder: `ui_react/`
-A plain React app (Babel-in-browser, no webpack/vite build step — open
-`index.html` directly or serve it with any static server). React, ReactDOM,
-and Babel are bundled locally in `ui_react/vendor/` so there's no CDN
-dependency for the demo.
-
-```
-ui_react/
-├── index.html          ← entry point, sets window.__PF_API_BASE__
-├── app.css              ← your existing EUI-branded design system, unchanged
-├── vendor/              ← react, react-dom, babel (local, no CDN)
-└── js/
-    ├── components.js    ← Icon, LogoMark, Spinner, ErrorState, etc.
-    ├── api.js            ← NEW — every fetch() call to the backend lives here
-    ├── data_flows.js     ← i18n strings only (mock chat flows removed)
-    ├── sae_pages.js      ← StudentAnalysisPage + AdvisorConsole, now data-driven
-    └── main_app.js       ← login screen + real chat wiring + page routing
-```
-
----
-
-## 3. How this maps to the UI you built in Claude Design
-
-Your `StudentAnalysisPage` and `AdvisorConsole` components were already
-fully designed — they just rendered hardcoded mock objects (`PF_ANALYSIS.student`,
-`PF_ANALYSIS.advisor`, `PF_ANALYSIS.sample`) and every action button showed a
-"Ready for backend — not wired yet" toast.
-
-What changed: those components now call `PF_API.getStudentAnalysis(id)` /
-`PF_API.getAdvisorOverview(id)` / `PF_API.getAdvisorAnalysis(id)` on mount,
-show a spinner while loading, an error state with Retry if the call fails,
-and map the real JSON response into the exact same props your components
-already expected (`s.gpa`, `s.gpaHistory`, `s.cohortStanding`, etc.). The
-visual design is identical — only the data source changed.
-
-I also added a "Deeper Analysis" section using your existing `.an-card` style
-that surfaces things SAE computes but the original mock didn't have a slot
-for: risk flags, anomaly alerts, subject-area performance, prerequisite
-bottlenecks, semester difficulty, graduation outlook, and suggestions.
-
-I left the "Export report" / "Flag for outreach" / "Open transcript" buttons
-as stubs (still show "Coming soon") since there's no backend feature for
-those yet — didn't want to fake it.
-
----
-
-## 4. Login
-
-There's no real auth system yet, so login is ID-prefix based:
-- `STU...` → validated against SAE (`GET /sae/student/{id}`); rejected if not found → routed to Chat + My Analysis
-- `ADV...` → **not validated** against a real advisor table (SAE simulates the
-  advisor→student assignment with a hash internally) → routed straight to
-  Advisor Console
-
-This needs a real identity check before this goes anywhere beyond a demo —
-flagging it explicitly so it doesn't get missed.
-
----
-
-## 5. How to run all three pieces
+## 3. Setup (fresh clone)
 
 ```bash
-# Terminal 1 — SAE
-cd SAE/
-uvicorn sae.api:app --port 8502
+# 1. Clone and enter
+git clone https://github.com/22-101172/PathFinder
+cd PathFinder
+git checkout sae-full-integration
 
-# Terminal 2 — PathFinder backend (this repo)
-cp .env.example .env   # if not already done; then add SAE_BASE_URL=http://localhost:8502
+# 2. Install PathFinder dependencies
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
 
-# Terminal 3 — frontend
-cd ui_react/
-python3 -m http.server 5500
-```
-Open `http://localhost:5500`. If your backend isn't on `localhost:8000`, change
-the one line at the top of `ui_react/index.html`:
-```js
-window.__PF_API_BASE__ = "http://localhost:8000";
+# 3. Install SAE dependencies
+cd SAE/
+pip install -r requirements.txt
+cd ..
+
+# 4. Configure environment
+cp .env.example .env          # PathFinder config
+cp SAE/.env.example SAE/.env  # SAE config (only GROQ key needed for LLM)
+# Edit .env and fill in: Neo4j credentials, GROQ_API_KEY, LLM keys
+
+# 5. Start everything (three terminals)
+cd SAE/ && uvicorn sae.api:app --port 8502          # Terminal 1
+uvicorn main:app --reload --port 8000               # Terminal 2
+cd ui_react/ && python -m http.server 5500          # Terminal 3
 ```
 
-Watch Terminal 2's startup log for:
+Open `http://localhost:5500`. Log in with any student ID (`STU000528`) or advisor ID (`ADV001`).
+
+Watch Terminal 2 for:
 ```
 PathFinder: SAE connected at http://localhost:8502
 ```
-If it says "SAE not reachable" instead, start SAE first and restart this.
+
+If it says `SAE not reachable`, start SAE first and restart PathFinder.
 
 ---
 
-## 6. What I actually verified vs. what still needs a real test
+## 4. Environment variables
 
-Being precise here so nothing gets assumed that wasn't checked:
+### PathFinder `.env` (repo root)
 
-**Verified:**
-- `main.py` and `adapters/sae_adapter.py` parse as valid Python (no syntax errors)
-- All 5 files in `ui_react/js/` compile through Babel with zero JSX errors
-- Rendered the actual UI in headless Chromium: login screen works, advisor
-  login routes correctly, and when no backend is reachable the UI shows a
-  clean "Cannot reach server / Retry" state instead of crashing — screenshots
-  attached separately if useful
+All PathFinder vars are already documented in `.env.example`. The SAE-related ones:
 
-**Not verified (couldn't be, without your live SAE + this backend running together):**
-- The real end-to-end flow with actual student data flowing through both services
-- That every field name I assumed SAE returns (`official_cgpa`, `risk_flags`,
-  `cohort_percentile`, `category_performance`, etc.) matches exactly what your
-  current SAE build outputs — I worked from the SAE API contract as it stood
-  at the time, but SAE's response shape may have shifted slightly since
-- One real bug I found on a second pass and already fixed: SAE might return
-  "student not found" as either a true HTTP 404 *or* an HTTP 200 with
-  `{"error": "..."}` in the body depending on how its FastAPI layer was
-  written. `main.py`'s `_sae_or_502()` helper now checks for both, but worth
-  double-checking which one your SAE actually does
+```
+SAE_BASE_URL=http://localhost:8502   # Where SAE is running
+SAE_TIMEOUT_SECONDS=30               # HTTP timeout for SAE calls
+```
 
-**First thing to do when you pull this:** run the smoke-test checklist below.
-If a field is missing or named differently than expected, the affected card
-will silently show blank/`N/A` rather than crash — check the browser console
-network tab for the raw JSON if a section looks empty.
+### SAE `SAE/.env`
+
+```
+GROQ_API_KEY=your_groq_key_here     # LLM features (optional — analysis works without it)
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=llama-3.3-70b-versatile
+```
+
+SAE's LLM features (advisor session guides) are completely optional. All CGPA analysis, risk scoring, and course analytics work without any API key.
 
 ---
 
-## 7. Smoke test checklist
+## 5. What was changed vs `person-seif`
+
+### New: `SAE/` folder
+The entire SAE engine is now part of the repo. Paths inside SAE are anchored to the SAE folder itself using `Path(__file__).parent.parent`, so it works regardless of where the repo is cloned.
+
+### New: `adapters/sae_adapter.py`
+Thin HTTP client that proxies PathFinder's `/sae/*` routes to SAE's API. Same shape as `KGAdapter` and `RAGAdapter` — never raises, returns `{"error": "..."}` on failure.
+
+### New: `gateway/sae_rules_bridge.py`
+Converts PathFinder's 8 RAG rule bundles (loaded at startup from RAG) into SAE's flat dict format. Covers 28 of SAE's 63 policy keys; the other 35 fall back to SAE's own EUI-calibrated defaults.
+
+### Edited: `main.py`
+Added SAE adapter initialization at startup + 5 proxy routes (`/sae/student/{id}`, `/sae/advisor/overview`, `/sae/student/{id}/analysis`, `/sae/courses/risk`, `/sae/student/{id}/simulate`). The existing chat pipeline is untouched.
+
+### New: `ui_react/`
+React frontend with real data wired to the backend. No build step — open `index.html` directly or serve with any static server. React, ReactDOM, and Babel are bundled locally in `ui_react/vendor/`.
+
+---
+
+## 6. Smoke test checklist
 
 - [ ] `curl http://localhost:8502/sae/health` → `{"status":"ok"}`
-- [ ] `curl http://localhost:8000/health` → `{"status":"ok",...}`
-- [ ] `curl http://localhost:8000/sae/health` → confirms the proxy route reaches SAE
-- [ ] Log in as a real student ID → land on Chat, ask a question → real answer from the orchestrator
-- [ ] Click "My Analysis" → CGPA chart + metrics load (check Network tab if blank)
-- [ ] Log out, log in as `ADV001` (or any `ADV###`) → Advisor Console loads with risk summary
-- [ ] Search a real student ID in Advisor Console → profile + key points + session guide load
-- [ ] Try an invalid student ID at login → should show "couldn't find that ID," not crash
+- [ ] `curl http://localhost:8000/sae/health` → confirms PathFinder proxy reaches SAE
+- [ ] Log in as `STU000528` → chat page loads, ask "What is my current GPA?" → real answer
+- [ ] Click **My Analysis** → CGPA chart and metrics load with Maxwell Avila's data
+- [ ] Log out → log in as `ADV001` → Advisor Console loads (first load ~30–45s, then cached)
+- [ ] Enter `STU000528` in Advisor Console search → student profile appears
+- [ ] Try invalid ID at login → "couldn't find that ID" error, no crash
 
 ---
 
-## 8. Known gaps / things to decide together
+## 7. Known gaps
 
-1. **RAG rules aren't passed to SAE yet.** `main.py` calls the adapter without
-   a `rules=` argument, so SAE uses its own correct EUI-handbook defaults.
-   If you want the live RAG rule bundle (`_rag.get_rule_bundles()`, already
-   loaded at startup) to override SAE's defaults, that's a one-line addition
-   per route — just say the word.
-2. **GPA simulation isn't wired into chat yet.** The endpoint exists
-   (`POST /sae/student/{id}/simulate`) and the JS client supports it
-   (`PF_API.simulateGpa`), but no chat intent calls it automatically. The
-   UI's "Simulate my GPA" suggestion chip currently just sends that text as a
-   normal chat message.
-3. **CORS is wide open** (`allow_origins=["*"]`), matching what was already
-   there — fine for local testing, should be tightened before any real deploy.
-4. **Advisor identity** — see §4 above.
+1. **Advisor Console cold start** — First call to `/sae/advisor/overview` computes analytics for all 710 students and takes ~30–45s. Subsequent calls use a 24h file cache and return in ~2s.
+2. **No real auth** — Login is prefix-based (`STU...` → student, `ADV...` → advisor). Fine for demo, not for production.
+3. **CORS is wide open** — `allow_origins=["*"]` in `main.py`. Tighten before any real deploy.
+4. **GPA simulation not in chat** — The `/sae/student/{id}/simulate` endpoint exists, the JS client has `PF_API.simulateGpa`, but no chat intent triggers it automatically yet.

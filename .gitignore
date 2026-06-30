@@ -1,5 +1,7 @@
 .env
+SAE/.env
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -15,5 +17,7 @@ env/
 engines/rag/chroma_db/
 engines/rag/chunks.pkl
 
-.env
+# SAE runtime artifacts
+SAE/sae/cache/
+
 main.py.backup

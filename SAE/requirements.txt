@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pandas
+numpy
+openpyxl
+requests
+python-dotenv
+streamlit
+plotly
+APScheduler

@@ -180,8 +180,8 @@ def test_real_stu000004_not_final_semester(scp):
     )
 
 
-def test_real_stu000004_default_credit_cap_18(scp):
-    """STU000004 CGPA≈3.64 ≥ 2.0 — default path (no max_credits_mode) → cap=18."""
+def test_real_stu000004_default_credit_cap_uses_bracket_max(scp):
+    """STU000004 CGPA≈3.64 ≥ 3.0 — default path uses CGPA-bracket max (21 for cgpa >= 3.0)."""
     ctx = scp("STU000004")
     if ctx is None:
         pytest.skip("STU000004 not found in dataset")
@@ -210,8 +210,11 @@ def test_real_stu000004_default_credit_cap_18(scp):
     )
     out = generate_semester_plan(inp)
 
-    assert out.credit_cap_applied == 18, (
-        f"STU000004 CGPA={ctx.cgpa} >= 2.0, default path should give cap=18; got {out.credit_cap_applied}"
+    # New design: default path = cgpa_bracket_max
+    # STU000004 CGPA=3.64 >= 3.0 → cgpa_bracket_max = 21
+    expected_cap = 21 if ctx.cgpa >= 3.0 else (18 if ctx.cgpa >= 2.0 else 15)
+    assert out.credit_cap_applied == expected_cap, (
+        f"STU000004 CGPA={ctx.cgpa}, expected bracket max={expected_cap}; got {out.credit_cap_applied}"
     )
 
 

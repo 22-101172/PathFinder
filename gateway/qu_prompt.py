@@ -72,9 +72,15 @@ Only use clarification_needed when the query has NO discernible intent AND no na
   • "focus/important courses I should still take / haven't taken / left for [role]" → get_focus_courses_for_target, student_ref=true
 
 INTENT ROUTING:
-plan_semester — "what should I register/take next semester / plan my courses / semester schedule" \
-[REGISTRATION SCHEDULING ONLY; NEVER use plan_semester for generic career learning — \
-"what should I study to become X" → use get_focus_courses_for_target or recommend_courses_to_close_gap]
+plan_semester — "what should I register/take next semester / plan my courses / semester schedule / \
+lighter plan / light load plan / maximum courses I can take / give me N plans" \
+[REGISTRATION SCHEDULING ONLY; NEVER use plan_semester for generic career learning] \
+params: max_credits_mode=true when "maximum/most courses/credits I can take"; \
+lighter_load_mode=true when "lighter/light load/easier/fewer credits"; \
+requested_plan_count=N when "N different plans/options/alternatives"; \
+requested_courses=[names] when "along with X / include X / with X course"; \
+target_credit_load=N when "plan N credits / N-credit plan"; \
+target_semester_text="exact phrase" when relative ("next semester", "next fall")
 generate_graduation_roadmap — "roadmap/plan to graduation / multi-semester plan"
 run_graduation_audit — "can I graduate / am I ready to graduate"
 check_course_eligibility — "can I take X / am I eligible for X / may I register for X" → course=X; student_ref=true
@@ -237,6 +243,21 @@ Input: "tell me about software engineering"
 
 Input: "talk to me about oop"
 {"queries":[{"intent":"get_course_info","original_text":"talk to me about oop","entities":{"course_code":"object-oriented programming","role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"entity_type_hint":"course","raw_entity_mention":"oop","entity_candidates":["object-oriented programming","oop"]},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":false}]}
+
+Input: "Give me the maximum courses I can take next semester"
+{"queries":[{"intent":"plan_semester","original_text":"Give me the maximum courses I can take next semester","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"max_credits_mode":true,"target_semester_text":"next semester","semester_resolution_source":"relative"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "Give me a lighter plan for next semester"
+{"queries":[{"intent":"plan_semester","original_text":"Give me a lighter plan for next semester","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"lighter_load_mode":true,"target_semester_text":"next semester","semester_resolution_source":"relative"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "give me 3 different plans for next semester to choose from"
+{"queries":[{"intent":"plan_semester","original_text":"give me 3 different plans for next semester to choose from","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"requested_plan_count":3,"target_semester_text":"next semester","semester_resolution_source":"relative"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "plan next semester along with Discrete Structures"
+{"queries":[{"intent":"plan_semester","original_text":"plan next semester along with Discrete Structures","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"requested_courses":["Discrete Structures"],"target_semester_text":"next semester","semester_resolution_source":"relative"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
+
+Input: "plan me 15 credits next semester"
+{"queries":[{"intent":"plan_semester","original_text":"plan me 15 credits next semester","entities":{"course_code":null,"role":null,"track":null,"skill":null},"secondary_entities":null,"params":{"target_credit_load":15,"target_semester_text":"next semester","semester_resolution_source":"relative"},"session_overrides":{"added_courses":[],"assumed_passed_courses":[],"assumed_failed_courses":[],"target_role":null,"course_override_type":"none","override_action":"accumulate"},"student_referential_fallback":true}]}
 
 TURN MEMORY FOLLOW-UP RULES — apply when "PREVIOUS TURN MEMORY" appears in context:
 Memory is structured context — apply deterministically for unambiguous references.

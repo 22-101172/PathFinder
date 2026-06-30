@@ -1952,3 +1952,413 @@ class TestTrackRecommendationNarration:
         packets = [_extract_packet(r)]
         answer = _deterministic_answer(packets)
         assert "8" in answer
+
+
+# ── compute_skill_gap covered_by display ─────────────────────────────────────
+
+class TestComputeSkillGapCoveredByDisplay:
+    """
+    Composer deterministic narration: compute_skill_gap shows covered skills with
+    'Course Name (CODE)' when name is available, and code-only when name is None.
+    Tests B and C from the D3 rendering audit.
+    """
+
+    def _result(self, data: dict) -> PerSQResult:
+        return PerSQResult(sq_index=0, intent="compute_skill_gap", status="success", data=data)
+
+    def test_covered_by_with_name_displays_course_name_code(self):
+        """
+        Issue B: When covered_by items have name+code, display as 'Course Name (CODE)'.
+        Previously only showed a count; now shows each skill with course attribution.
+        No skill_gap_count so missing skills are enumerated by name.
+        """
+        data = {
+            "role_id": "RL_ML_Engineer",
+            "role_name": "Machine Learning Engineer",
+            "missing_skills": [
+                {"skill_id": "SK_DL", "name": "Deep Learning"},
+            ],
+            "covered_skills": [
+                {
+                    "skill_id": "SK_ML", "name": "Machine Learning",
+                    "covered_by": [
+                        {"course_code": "C-AI311",
+                         "name": "Introduction to Artificial Intelligence"},
+                    ],
+                },
+                {
+                    "skill_id": "SK_Stats", "name": "Statistics",
+                    "covered_by": [
+                        {"course_code": "C-ST211",
+                         "name": "Introduction to Probability and Statistics"},
+                        {"course_code": "C-DE211", "name": "Data Analysis"},
+                    ],
+                },
+            ],
+            # No skill_gap_count so missing skills are individually enumerated
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        # Covered skills with course name + code
+        assert "Introduction to Artificial Intelligence (C-AI311)" in answer
+        assert "Introduction to Probability and Statistics (C-ST211)" in answer
+        assert "Data Analysis (C-DE211)" in answer
+        # Missing skills enumerated (no gap_count suppresses the list)
+        assert "Deep Learning" in answer
+        # Role name present
+        assert "Machine Learning Engineer" in answer
+
+    def test_covered_by_code_only_when_name_is_none(self):
+        """
+        Issue C: When covered_by name=None (metadata unavailable), show code only.
+        Must never fabricate a name.
+        """
+        data = {
+            "role_id": "RL_ML_Engineer",
+            "role_name": "Machine Learning Engineer",
+            "missing_skills": [],
+            "covered_skills": [
+                {
+                    "skill_id": "SK_ML", "name": "Machine Learning",
+                    "covered_by": [{"course_code": "C-UNKNOWN", "name": None}],
+                },
+            ],
+            "skill_gap_count": 0,
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        # Code must appear; no fabricated name
+        assert "C-UNKNOWN" in answer
+        assert "(None)" not in answer
+
+    def test_covered_by_raw_string_code_displayed_as_code(self):
+        """Fallback: if covered_by contains a raw string (not enriched), show it as-is."""
+        data = {
+            "role_id": "RL_ML_Engineer",
+            "role_name": "Machine Learning Engineer",
+            "missing_skills": [],
+            "covered_skills": [
+                {
+                    "skill_id": "SK_ML", "name": "Machine Learning",
+                    "covered_by": ["C-AI311"],  # raw string, not enriched
+                },
+            ],
+            "skill_gap_count": 0,
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        assert "C-AI311" in answer
+
+    def test_covered_skills_count_and_list_both_shown(self):
+        """Both count and per-skill breakdown appear in the deterministic answer."""
+        data = {
+            "role_id": "RL_Data_Scientist",
+            "role_name": "Data Scientist",
+            "missing_skills": [{"skill_id": "SK_Stats", "name": "Statistics"}],
+            "covered_skills": [
+                {
+                    "skill_id": "SK_Python", "name": "Python",
+                    "covered_by": [{"course_code": "C-CS101", "name": "Intro to CS"}],
+                },
+            ],
+            "skill_gap_count": 1,
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        assert "Python" in answer
+        assert "Intro to CS (C-CS101)" in answer
+        # Count should appear (either in the header or list length)
+        assert "1" in answer  # skill_gap_count
+
+    def test_existing_get_role_profile_unaffected(self):
+        """Regression: get_role_profile deterministic narration unchanged."""
+        data = {
+            "role_id": "RL_Data_Scientist",
+            "role_name": "Data Scientist",
+            "description": "Analyzes data.",
+            "required_skills": [
+                {"skill_id": "SK_ML", "name": "Machine Learning"},
+                {"skill_id": "SK_Python", "name": "Python"},
+            ],
+        }
+        r = PerSQResult(sq_index=0, intent="get_role_profile", status="success", data=data)
+        packet = _extract_packet(r)
+        answer = _deterministic_answer([packet])
+        assert "Data Scientist" in answer
+        assert "Machine Learning" in answer
+        assert "Python" in answer
+        assert "RL_Data_Scientist" not in answer
+
+    def test_existing_get_roles_by_track_unaffected(self):
+        """Regression: get_roles_by_track deterministic narration unchanged."""
+        data = {
+            "track_id": "CYS",
+            "track_name": "Cyber Security",
+            "roles": [
+                {"role_id": "RL_Security_Analyst", "name": "Security Analyst"},
+                {"role_id": "RL_Penetration_Tester", "name": "Penetration Tester"},
+            ],
+        }
+        r = PerSQResult(sq_index=0, intent="get_roles_by_track", status="success", data=data)
+        packet = _extract_packet(r)
+        answer = _deterministic_answer([packet])
+        assert "Cyber Security" in answer or "CYS" in answer
+        assert "Security Analyst" in answer
+        assert "Penetration Tester" in answer
+        assert "RL_Security_Analyst" not in answer
+
+
+# ── compute_alignment_score percentage formatting ──────────────────────────────
+
+class TestComputeAlignmentScorePercentage:
+    """
+    Composer deterministic narration: compute_alignment_score always shows a clean
+    percentage, never a raw decimal.
+
+    Priority: alignment_percentage (0-100) > alignment_score (0-1, multiply ×100) >
+              alignment_score >1 (treat as already percentage-like).
+
+    Tests A-D from the D3 chunk-2 rendering audit.
+    """
+
+    def _result(self, data: dict) -> PerSQResult:
+        return PerSQResult(sq_index=0, intent="compute_alignment_score",
+                           status="success", data=data)
+
+    def test_alignment_percentage_preferred_over_score(self):
+        """Test A: alignment_percentage=69.12 → shows '69.12%', not '0.6912'."""
+        data = {
+            "role_id": "RL_ML_Engineer",
+            "role_name": "Machine Learning Engineer",
+            "alignment_score": 0.6912,
+            "alignment_percentage": 69.12,
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        assert "69.12%" in answer
+        assert "0.6912" not in answer
+
+    def test_alignment_percentage_60_clean(self):
+        """Test B: alignment_percentage=60.0 → shows '60%', not '60.0%'."""
+        data = {
+            "role_id": "RL_Data_Scientist",
+            "role_name": "Data Scientist",
+            "alignment_percentage": 60.0,
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        assert "60%" in answer
+        assert "60.0%" not in answer
+
+    def test_alignment_score_only_0_to_1_converted(self):
+        """Test C: only alignment_score=0.5 → '50%'."""
+        data = {
+            "role_id": "RL_ML_Engineer",
+            "role_name": "Machine Learning Engineer",
+            "alignment_score": 0.5,
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        assert "50%" in answer
+        assert "0.5" not in answer
+
+    def test_alignment_score_above_1_treated_as_percentage(self):
+        """Test D: only alignment_score=72.31 (>1) → '72.31%'."""
+        data = {
+            "role_id": "RL_ML_Engineer",
+            "role_name": "Machine Learning Engineer",
+            "alignment_score": 72.31,
+        }
+        packet = _extract_packet(self._result(data))
+        answer = _deterministic_answer([packet])
+        assert "72.31%" in answer
+        assert "0.7231" not in answer
+
+    def test_find_best_matching_roles_regression(self):
+        """Test E: find_best_matching_roles still shows per-role percentage correctly."""
+        data = {
+            "ranked_roles": [
+                {"role_id": "RL_Data_Scientist", "name": "Data Scientist",
+                 "alignment_score": 0.85},
+                {"role_id": "RL_ML_Engineer", "name": "ML Engineer",
+                 "alignment_score": 0.72},
+            ]
+        }
+        r = PerSQResult(sq_index=0, intent="find_best_matching_roles",
+                        status="success", data=data)
+        packet = _extract_packet(r)
+        answer = _deterministic_answer([packet])
+        assert "Data Scientist" in answer
+        assert "85%" in answer
+        assert "72%" in answer
+
+    def test_recommend_courses_to_close_gap_regression(self):
+        """Test F: recommend_courses_to_close_gap narration still works."""
+        data = {
+            "role_id": "RL_ML_Engineer",
+            "role_name": "Machine Learning Engineer",
+            "recommended_courses": [
+                {"course_code": "C-AI311", "name": "Intro to AI"},
+                {"course_code": "C-CS401", "name": "Advanced Algorithms"},
+            ],
+        }
+        r = PerSQResult(sq_index=0, intent="recommend_courses_to_close_gap",
+                        status="success", data=data)
+        packet = _extract_packet(r)
+        answer = _deterministic_answer([packet])
+        assert "Machine Learning Engineer" in answer
+        assert "Intro to AI" in answer or "C-AI311" in answer
+
+
+# ── D3 chunk 3: estimate_alignment_improvement / get_focus_courses_for_target ─
+
+class TestEstimateAlignmentImprovementNarration:
+    """Composer narration for estimate_alignment_improvement with KG v2 field names."""
+
+    def _result(self, data: dict) -> PerSQResult:
+        return PerSQResult(sq_index=0, intent="estimate_alignment_improvement",
+                           status="success", data=data)
+
+    def test_kg_v2_percentage_fields_displayed_correctly(self):
+        """current_alignment_percentage / projected_alignment_percentage → clean % display."""
+        data = {
+            "role_id": "RL_Data_Scientist", "role_name": "Data Scientist",
+            "current_alignment_percentage": 40.0,
+            "projected_alignment_percentage": 65.0,
+            "alignment_improvement": 0.25,
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "40%" in answer
+        assert "65%" in answer
+        assert "Data Scientist" in answer
+
+    def test_kg_v2_score_fields_fallback_when_no_pct(self):
+        """Falls back to alignment_score fields (0-1) when percentage fields absent."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "current_alignment_score": 0.30,
+            "projected_alignment_score": 0.70,
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "30%" in answer
+        assert "70%" in answer
+
+    def test_newly_covered_skills_shown(self):
+        """newly_covered_skills are listed in the narration."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "current_alignment_percentage": 30.0,
+            "projected_alignment_percentage": 60.0,
+            "newly_covered_skills": [
+                {"skill_id": "SK_ML", "name": "Machine Learning"},
+                {"skill_id": "SK_DS", "name": "Data Science"},
+            ],
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "Machine Learning" in answer or "Data Science" in answer
+
+    def test_unresolved_planned_names_noted(self):
+        """unresolved_planned_names are surfaced in the narration."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "current_alignment_percentage": 30.0,
+            "projected_alignment_percentage": 60.0,
+            "unresolved_planned_names": ["FakeCourse999"],
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "FakeCourse999" in answer
+
+    def test_legacy_current_alignment_field_still_works(self):
+        """Backward-compat: legacy current_alignment / new_alignment fields still narrate."""
+        data = {
+            "role_id": "RL_Data_Scientist", "role_name": "Data Scientist",
+            "current_alignment": 0.4,
+            "new_alignment": 0.65,
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "40%" in answer
+        assert "65%" in answer
+
+
+class TestFocusCoursesNarration:
+    """Composer narration for get_focus_courses_for_target."""
+
+    def _result(self, data: dict) -> PerSQResult:
+        return PerSQResult(sq_index=0, intent="get_focus_courses_for_target",
+                           status="success", data=data)
+
+    def _make_courses(self, n: int) -> list:
+        return [{"course_code": f"C-CS{i:03d}", "name": f"Course {i}"} for i in range(n)]
+
+    def test_E_not_a_semester_plan(self):
+        """Focus-course answer must not present itself as an official semester plan."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "focus_courses": [
+                {"course_code": "C-AI321", "name": "Machine Learning"},
+                {"course_code": "C-CS401", "name": "Advanced Algorithms"},
+            ],
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "register" not in answer.lower()
+        assert "semester plan" not in answer.lower()
+        assert "ML Engineer" in answer or "Machine Learning" in answer
+
+    def test_F_mention_exclusion_when_personalized(self):
+        """When personalized_focus=True + completed_courses_excluded > 0, narration says so."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "focus_courses": [{"course_code": "C-AI321", "name": "Machine Learning"}],
+            "personalized_focus": True,
+            "completed_courses_excluded": 15,
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert any(w in answer.lower() for w in (
+            "haven't", "remaining", "not yet", "completed", "based on"
+        ))
+
+    def test_G_caps_long_list_at_8(self):
+        """Long focus_courses list is capped at 8 bullet points."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "focus_courses": self._make_courses(20),
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        bullet_count = answer.count("•")
+        assert bullet_count <= 8
+
+    def test_overflow_label_shown_when_more_than_8(self):
+        """When more than 8 courses exist, a '… and N more' line appears."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "focus_courses": self._make_courses(12),
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "more" in answer.lower()
+
+    def test_no_overflow_when_8_or_fewer(self):
+        """Exactly 8 courses → no overflow line."""
+        data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "focus_courses": self._make_courses(8),
+        }
+        answer = _deterministic_answer([_extract_packet(self._result(data))])
+        assert "more" not in answer.lower() or "no more" in answer.lower()
+
+    def test_generic_query_label_differs_from_personalized(self):
+        """Generic query shows 'Key courses' label; personalized shows 'haven't completed' label."""
+        generic_data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "focus_courses": [{"course_code": "C-AI321", "name": "ML"}],
+            "personalized_focus": False,
+        }
+        personalized_data = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "focus_courses": [{"course_code": "C-AI321", "name": "ML"}],
+            "personalized_focus": True,
+            "completed_courses_excluded": 10,
+        }
+        generic_answer = _deterministic_answer([_extract_packet(self._result(generic_data))])
+        personalized_answer = _deterministic_answer([_extract_packet(self._result(personalized_data))])
+        assert "haven't" in personalized_answer.lower() or "based on" in personalized_answer.lower()
+        assert "haven't" not in generic_answer.lower() or "based on" not in personalized_answer.lower()

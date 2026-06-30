@@ -163,6 +163,44 @@ class TestControlIntents:
         assert result.turn_status == "needs_clarification"
         assert result.has_clarification is True
 
+    def test_clarification_prompt_in_params_preferred_over_original_text(self):
+        """
+        When QU returns clarification_needed with params['clarification_prompt'] set
+        (e.g. LLM-generated disambiguation question), the Orchestrator must use
+        that prompt — not original_text, which may be the user's raw query text.
+        """
+        orch = _make_orchestrator()
+        session = _make_session()
+        clarification_q = (
+            "Are you asking about roles in the Cybersecurity (CYS) track, "
+            "or roles with 'security' in their title across all tracks?"
+        )
+        sqs = [_sq(
+            "clarification_needed",
+            original_text="What roles are connected to security?",
+            params={"clarification_prompt": clarification_q},
+        )]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "clarification_needed"
+        assert r.clarification_prompt == clarification_q
+        # Must NOT be the user's original query
+        assert r.clarification_prompt != "What roles are connected to security?"
+
+    def test_clarification_prompt_field_preferred_when_no_params(self):
+        """sq.clarification_prompt (schema field) is used if params key is absent."""
+        orch = _make_orchestrator()
+        session = _make_session()
+        sqs = [StructuredQuery(
+            intent="clarification_needed",
+            original_text="raw user text",
+            clarification_prompt="Schema-level clarification question?",
+        )]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "clarification_needed"
+        assert r.clarification_prompt == "Schema-level clarification question?"
+
 
 # ── T03: Domain 2 — KG course intents ────────────────────────────────────────
 
@@ -1375,10 +1413,24 @@ class TestAllIntentsCoverage:
         assert r.status in ("success", "informational")
 
     def test_estimate_alignment_improvement(self):
-        r = self._smoke("estimate_alignment_improvement",
-                        entities={"role_id": "data_scientist"},
-                        params={"planned_courses": ["C-CS301"]},
-                        kg_return={"improvement": 0.1})
+        """Smoke: estimate_alignment_improvement resolves planned codes then calls KG."""
+        kg = MagicMock()
+
+        def _kg_side(op, params, **kwargs):
+            if op == "resolve_entity":
+                # Course codes resolve to themselves
+                return {"status": "ok", "resolved_id": params.get("entity_text"), "name": "Course"}
+            return {"improvement": 0.1}
+
+        kg.call.side_effect = _kg_side
+        orch = _make_orchestrator(kg=kg)
+        student = _make_student(completed=["C-CS101"])
+        session = _make_session(student=student)
+        sq = _sq("estimate_alignment_improvement",
+                 entities={"role_id": "data_scientist"},
+                 params={"planned_courses": ["C-CS301"]})
+        result = orch.execute_turn([sq], session, _make_bundles())
+        r = result.results[0]
         assert r.status in ("success", "informational")
 
     def test_get_focus_courses_for_target(self):
@@ -1644,3 +1696,334 @@ class TestRelativeSemesterPhrases:
         r = result.results[0]
         assert r.status == "error"
         assert r.error_code == "validation_failed"
+
+
+# ── Skill-gap covered_by enrichment ──────────────────────────────────────────
+
+class TestSkillGapCoveredByEnrichment:
+    """
+    Orchestrator._enrich_skill_gap_covered_by converts raw course-code strings
+    in covered_skills[*].covered_by into {course_code, name} dicts.
+    """
+
+    _SKILL_GAP_WITH_CODES = {
+        "role_id": "RL_ML_Engineer",
+        "role_name": "Machine Learning Engineer",
+        "missing_skills": [{"skill_id": "SK_DL", "name": "Deep Learning"}],
+        "covered_skills": [
+            {"skill_id": "SK_ML", "name": "Machine Learning", "covered_by": ["C-AI311"]},
+            {"skill_id": "SK_Stats", "name": "Statistics",
+             "covered_by": ["C-ST211", "C-DE211"]},
+        ],
+        "skill_gap_count": 1,
+    }
+
+    def _make_kg_with_metadata(self) -> MagicMock:
+        kg = MagicMock()
+        _COURSE_NAMES = {
+            "C-AI311": "Introduction to Artificial Intelligence",
+            "C-ST211": "Introduction to Probability and Statistics",
+            "C-DE211": "Data Analysis",
+        }
+        kg.call.return_value = self._SKILL_GAP_WITH_CODES
+        kg.get_course_metadata.side_effect = (
+            lambda code: {"name": _COURSE_NAMES.get(code)}
+        )
+        return kg
+
+    def test_covered_by_enriched_with_course_names(self):
+        """covered_by string codes → {course_code, name} with resolved names."""
+        kg = self._make_kg_with_metadata()
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-AI311", "C-ST211", "C-DE211"]))
+        sqs = [_sq("compute_skill_gap", entities={"role_id": "RL_ML_Engineer"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "success"
+        covered = r.data["covered_skills"]
+        ml_skill = next(s for s in covered if s["skill_id"] == "SK_ML")
+        assert ml_skill["covered_by"] == [
+            {"course_code": "C-AI311", "name": "Introduction to Artificial Intelligence"}
+        ]
+        stats_skill = next(s for s in covered if s["skill_id"] == "SK_Stats")
+        cb_codes = [cb["course_code"] for cb in stats_skill["covered_by"]]
+        assert "C-ST211" in cb_codes
+        assert "C-DE211" in cb_codes
+        assert stats_skill["covered_by"][0]["name"] == "Introduction to Probability and Statistics"
+
+    def test_covered_by_name_is_none_when_metadata_unavailable(self):
+        """If KG metadata returns name=None, covered_by item has name=None (show code only)."""
+        kg = MagicMock()
+        kg.call.return_value = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "missing_skills": [],
+            "covered_skills": [
+                {"skill_id": "SK_ML", "name": "Machine Learning", "covered_by": ["C-UNKNOWN"]},
+            ],
+            "skill_gap_count": 0,
+        }
+        kg.get_course_metadata.return_value = {"name": None}
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-UNKNOWN"]))
+        sqs = [_sq("compute_skill_gap", entities={"role_id": "RL_ML_Engineer"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        covered = r.data["covered_skills"]
+        assert covered[0]["covered_by"] == [{"course_code": "C-UNKNOWN", "name": None}]
+
+    def test_already_enriched_dicts_passed_through_unchanged(self):
+        """covered_by items that are already dicts are not re-processed."""
+        kg = MagicMock()
+        kg.call.return_value = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "missing_skills": [],
+            "covered_skills": [
+                {"skill_id": "SK_ML", "name": "Machine Learning",
+                 "covered_by": [{"course_code": "C-AI311", "name": "Intro AI"}]},
+            ],
+            "skill_gap_count": 0,
+        }
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-AI311"]))
+        sqs = [_sq("compute_skill_gap", entities={"role_id": "RL_ML_Engineer"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        covered = r.data["covered_skills"]
+        # Already-enriched dict unchanged
+        assert covered[0]["covered_by"] == [{"course_code": "C-AI311", "name": "Intro AI"}]
+        # get_course_metadata should NOT be called (no string codes to resolve)
+        kg.get_course_metadata.assert_not_called()
+
+    def test_empty_covered_skills_returns_result_unchanged(self):
+        """No covered_skills → no enrichment, result passes through."""
+        kg = MagicMock()
+        kg.call.return_value = {
+            "role_id": "RL_ML_Engineer", "role_name": "ML Engineer",
+            "missing_skills": [{"skill_id": "SK_ML", "name": "Machine Learning"}],
+            "covered_skills": [],
+            "skill_gap_count": 1,
+        }
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-AI311"]))
+        sqs = [_sq("compute_skill_gap", entities={"role_id": "RL_ML_Engineer"})]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "success"
+        assert r.data["covered_skills"] == []
+        kg.get_course_metadata.assert_not_called()
+
+
+# ── T22: estimate_alignment_improvement course resolution ─────────────────────
+
+class TestEstimateAlignmentImprovementCourseResolution:
+    """estimate_alignment_improvement resolves raw course names to codes before KG call."""
+
+    _KG_RESULT = {
+        "role_id": "RL_Data_Scientist", "role_name": "Data Scientist",
+        "current_alignment_score": 0.40,
+        "current_alignment_percentage": 40.0,
+        "projected_alignment_score": 0.65,
+        "projected_alignment_percentage": 65.0,
+        "alignment_improvement": 0.25,
+        "newly_covered_skills": [],
+        "still_missing_skills": [],
+        "total_newly_covered": 0,
+        "total_still_missing": 0,
+    }
+
+    def test_A_raw_names_resolved_to_codes(self):
+        """Raw course names are resolved to codes before estimate_alignment_improvement KG call."""
+        kg = MagicMock()
+
+        def _side_effect(op, params, **kwargs):
+            if op == "resolve_entity":
+                text = params.get("entity_text", "")
+                if "machine learning" in text.lower():
+                    return {"status": "ok", "resolved_id": "C-AI321", "name": "Intro to ML"}
+                if "natural language" in text.lower():
+                    return {"status": "ok", "resolved_id": "C-AI424", "name": "NLP"}
+                return {"status": "not_found"}
+            if op == "estimate_alignment_improvement":
+                return self._KG_RESULT
+            return {}
+
+        kg.call.side_effect = _side_effect
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-CS301"]))
+        sqs = [_sq(
+            "estimate_alignment_improvement",
+            entities={"role_id": "RL_Data_Scientist"},
+            params={"planned_courses": [
+                "Introduction to Machine Learning",
+                "Natural Language Processing",
+            ]},
+        )]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "success"
+        # KG must have received codes, not raw names
+        kg_call_args = [
+            c for c in kg.call.call_args_list
+            if c[0][0] == "estimate_alignment_improvement"
+        ]
+        assert len(kg_call_args) == 1
+        planned_sent = kg_call_args[0][0][1]["planned_courses"]
+        assert "C-AI321" in planned_sent
+        assert "C-AI424" in planned_sent
+        assert "Introduction to Machine Learning" not in planned_sent
+
+    def test_B_entity_course_code_included_as_planned(self):
+        """sq.entities.course_code is included as a planned course code."""
+        kg = MagicMock()
+
+        def _side_effect(op, params, **kwargs):
+            if op == "resolve_entity":
+                text = params.get("entity_text", "")
+                return {"status": "ok", "resolved_id": text, "name": "Course"}
+            if op == "estimate_alignment_improvement":
+                return self._KG_RESULT
+            return {}
+
+        kg.call.side_effect = _side_effect
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-CS301"]))
+        # No planned_courses in params — only entity course_code
+        sqs = [_sq(
+            "estimate_alignment_improvement",
+            entities={"role_id": "RL_Data_Scientist", "course_code": "C-AI321"},
+        )]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status in ("success", "informational")
+        kg_call_args = [
+            c for c in kg.call.call_args_list
+            if c[0][0] == "estimate_alignment_improvement"
+        ]
+        assert len(kg_call_args) == 1
+        assert "C-AI321" in kg_call_args[0][0][1]["planned_courses"]
+
+    def test_C_mixed_valid_invalid_preserves_unresolved_names(self):
+        """Mixed valid/invalid → valid codes sent to KG, unresolved names in result data."""
+        kg = MagicMock()
+
+        def _side_effect(op, params, **kwargs):
+            if op == "resolve_entity":
+                text = params.get("entity_text", "")
+                if "machine learning" in text.lower():
+                    return {"status": "ok", "resolved_id": "C-AI321", "name": "ML"}
+                return {"status": "not_found"}
+            if op == "estimate_alignment_improvement":
+                return self._KG_RESULT
+            return {}
+
+        kg.call.side_effect = _side_effect
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-CS301"]))
+        sqs = [_sq(
+            "estimate_alignment_improvement",
+            entities={"role_id": "RL_Data_Scientist"},
+            params={"planned_courses": [
+                "Introduction to Machine Learning",
+                "FakeCourse999",
+            ]},
+        )]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status in ("success", "informational")
+        # KG call must have received only the valid code
+        kg_call_args = [
+            c for c in kg.call.call_args_list
+            if c[0][0] == "estimate_alignment_improvement"
+        ]
+        assert len(kg_call_args) == 1
+        planned_sent = kg_call_args[0][0][1]["planned_courses"]
+        assert "C-AI321" in planned_sent
+        assert "FakeCourse999" not in planned_sent
+        # Unresolved name preserved in result
+        assert "FakeCourse999" in (r.data.get("unresolved_planned_names") or [])
+
+    def test_D_no_valid_planned_courses_returns_clarification(self):
+        """All planned courses unresolvable → clarification (no KG call for estimate)."""
+        kg = MagicMock()
+
+        def _side_effect(op, params, **kwargs):
+            if op == "resolve_entity":
+                return {"status": "not_found"}
+            return {}
+
+        kg.call.side_effect = _side_effect
+        orch = _make_orchestrator(kg=kg)
+        session = _make_session(student=_make_student(completed=["C-CS301"]))
+        sqs = [_sq(
+            "estimate_alignment_improvement",
+            entities={"role_id": "RL_Data_Scientist"},
+            params={"planned_courses": ["FakeCourse999", "AnotherFake"]},
+        )]
+        result = orch.execute_turn(sqs, session, _make_bundles())
+        r = result.results[0]
+        assert r.status == "clarification_needed"
+        # estimate_alignment_improvement KG call must NOT have been made
+        assert not any(
+            c[0][0] == "estimate_alignment_improvement"
+            for c in kg.call.call_args_list
+        )
+
+
+# ── T23: get_focus_courses_for_target personalized wording ───────────────────
+
+class TestFocusCoursesPersonalizedWording:
+    """get_focus_courses_for_target passes completed_courses when query is personalized."""
+
+    def test_D_future_wording_passes_completed_courses(self):
+        """'future' keyword in original_text triggers personalized → completed passed to KG."""
+        kg = MagicMock()
+        kg.call.return_value = {
+            "focus_courses": [],
+            "personalized_focus": True,
+        }
+        orch = _make_orchestrator(kg=kg)
+        student = _make_student(completed=["C-CS301", "C-AI311"])
+        session = _make_session(student=student)
+        sqs = [_sq(
+            "get_focus_courses_for_target",
+            original_text="What future courses should I focus on for ML Engineer?",
+            entities={"role_id": "RL_ML_Engineer"},
+            student_referential_fallback=False,  # QU didn't set this
+        )]
+        orch.execute_turn(sqs, session, _make_bundles())
+        call_args = kg.call.call_args
+        assert "C-CS301" in call_args[0][1]["completed_courses"]
+        assert "C-AI311" in call_args[0][1]["completed_courses"]
+
+    def test_generic_wording_passes_empty_completed(self):
+        """Generic query passes no completed courses so KG returns all focus courses."""
+        kg = MagicMock()
+        kg.call.return_value = {"focus_courses": []}
+        orch = _make_orchestrator(kg=kg)
+        student = _make_student(completed=["C-CS301", "C-AI311"])
+        session = _make_session(student=student)
+        sqs = [_sq(
+            "get_focus_courses_for_target",
+            original_text="What are the important courses for Data Scientist?",
+            entities={"role_id": "RL_Data_Scientist"},
+            student_referential_fallback=False,
+        )]
+        orch.execute_turn(sqs, session, _make_bundles())
+        call_args = kg.call.call_args
+        assert call_args[0][1]["completed_courses"] == []
+
+    def test_referential_flag_passes_completed_courses(self):
+        """student_referential_fallback=True still passes completed courses (regression)."""
+        kg = MagicMock()
+        kg.call.return_value = {"focus_courses": []}
+        orch = _make_orchestrator(kg=kg)
+        student = _make_student(completed=["C-CS301"])
+        session = _make_session(student=student)
+        sqs = [_sq(
+            "get_focus_courses_for_target",
+            entities={"role_id": "RL_Data_Scientist"},
+            student_referential_fallback=True,
+        )]
+        orch.execute_turn(sqs, session, _make_bundles())
+        call_args = kg.call.call_args
+        assert "C-CS301" in call_args[0][1]["completed_courses"]

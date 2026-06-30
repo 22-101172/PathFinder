@@ -78,6 +78,10 @@ _KG_ADAPTER_ERRORS = frozenset({"kg_unavailable", "unknown_operation", "bad_para
 
 _LEVEL_DISPLAY: dict[int, str] = {1: "Freshman", 2: "Sophomore", 3: "Junior", 4: "Senior"}
 
+# Non-universal zero-credit courses — not required for every student.
+# Excluded from required_zero_credit_courses in graduation checks.
+_NON_UNIVERSAL_ZERO_CREDIT_COURSES: frozenset[str] = frozenset({"HUM110", "C-MA110"})
+
 _D6_SCALAR_FOCUSES: frozenset[str] = frozenset({
     "cgpa", "academic_level", "academic_standing", "academic_warnings",
     "probation_status", "completed_credits", "last_semester_gpa",
@@ -103,6 +107,19 @@ _FORBIDDEN_INTENTS = frozenset({
 _CONDITIONAL_STUDENT_INTENTS = frozenset({
     "get_roles_by_track", "get_track_overview", "compare_tracks",
 })
+
+_PERSONALIZED_FOCUS_KEYWORDS = frozenset({
+    "future", "still", "remaining", "haven't taken",
+    "based on my", "not yet", "not taken", "what's left",
+    "what should i", "for me", "not completed",
+})
+
+
+def _is_personalized_focus(sq: StructuredQuery) -> bool:
+    if sq.student_referential_fallback:
+        return True
+    lower = (sq.original_text or "").lower()
+    return any(kw in lower for kw in _PERSONALIZED_FOCUS_KEYWORDS)
 
 # ── Route trace: engine + operation labels ────────────────────────────────────
 
@@ -399,7 +416,15 @@ class Orchestrator:
 
         # Control intents — pass-through
         if intent == "clarification_needed":
-            return _clarif(sq_index, intent, sq.original_text or "Please clarify your question.")
+            # Prefer the explicit clarification question from QU params over original_text,
+            # which may be the user's raw query (not the clarification question to display).
+            prompt = (
+                sq.params.get("clarification_prompt")
+                or sq.clarification_prompt
+                or sq.original_text
+                or "Please clarify your question."
+            )
+            return _clarif(sq_index, intent, prompt)
         if intent == "out_of_scope":
             return _oos(sq_index, intent)
 
@@ -558,6 +583,9 @@ class Orchestrator:
             "target_track": track_id,  # resolved: params → entities.track_id → ctx.track_id
             "target_credit_load": sq.params.get("target_credit_load"),
             "max_credits_mode": sq.params.get("max_credits_mode", False),
+            "lighter_load_mode": sq.params.get("lighter_load_mode", False),
+            "requested_plan_count": sq.params.get("requested_plan_count"),
+            "requested_courses": sq.params.get("requested_courses", []),
         }
 
         ale_result = self._ale.call("generate_semester_plan", ctx, bundles,
@@ -627,7 +655,7 @@ class Orchestrator:
         required_zero_credit_courses = [
             c["course_code"]
             for c in kg_data.get("courses", [])
-            if c.get("credits") == 0
+            if c.get("credits") == 0 and c["course_code"] not in _NON_UNIVERSAL_ZERO_CREDIT_COURSES
         ]
 
         # Target-semester mode: parse explicit target like "Fall 2027" or "3 Falls from now"
@@ -723,7 +751,7 @@ class Orchestrator:
         required_zero_credit_courses = [
             c["course_code"]
             for c in zc_kg_data.get("courses", [])
-            if c.get("credits") == 0
+            if c.get("credits") == 0 and c["course_code"] not in _NON_UNIVERSAL_ZERO_CREDIT_COURSES
         ]
 
         # Build course_credit_lookup from KG for transcript codes
@@ -1177,6 +1205,7 @@ class Orchestrator:
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
             if "error" in result:
                 return _info(sq_index, intent, result)
+            result = self._enrich_skill_gap_covered_by(result)
             return _ok(sq_index, intent, result,
                        assumptions_active=True if assumptions_active else None)
 
@@ -1221,14 +1250,52 @@ class Orchestrator:
             role = e.role_id
             if not role:
                 return _clarif(sq_index, intent, "Which role are you estimating improvement for?")
-            planned = sq.params.get("planned_courses") or (ctx.in_progress_courses if ctx else [])
-            if not planned:
+
+            # Collect raw planned course candidates (names or codes)
+            raw_planned: list[str] = list(sq.params.get("planned_courses") or [])
+            # sq.entities.course_code is already KG-resolved by QU — include it first
+            if e.course_code and e.course_code not in raw_planned:
+                raw_planned.insert(0, e.course_code)
+            # Fall back to current in-progress courses if user gave none
+            if not raw_planned:
+                raw_planned = list(ctx.in_progress_courses) if ctx else []
+            if not raw_planned:
                 return _clarif(sq_index, intent, "Which courses are you planning to take?")
+
+            # Resolve each candidate to a course code via KG entity resolver
+            resolved_codes: list[str] = []
+            unresolved_names: list[str] = []
+            for item in raw_planned:
+                item_s = str(item).strip()
+                if not item_s:
+                    continue
+                res = self._kg.call("resolve_entity",
+                                    {"entity_type": "course", "entity_text": item_s})
+                if res.get("status") == "ok":
+                    code = res.get("resolved_id")
+                    if code and code not in resolved_codes:
+                        resolved_codes.append(code)
+                else:
+                    unresolved_names.append(item_s)
+
+            if not resolved_codes:
+                if unresolved_names:
+                    names_str = ", ".join(
+                        f'"{n}"' for n in unresolved_names[:5]
+                    )
+                    return _clarif(sq_index, intent,
+                                   f"I couldn't find courses matching: {names_str}. "
+                                   "Please use course codes (e.g., C-AI321) or verify course names.")
+                return _clarif(sq_index, intent, "Which courses are you planning to take?")
+
             result = self._kg.call("estimate_alignment_improvement", {
-                "role_id": role, "completed_courses": completed, "planned_courses": planned,
+                "role_id": role, "completed_courses": completed,
+                "planned_courses": resolved_codes,
             })
             if _is_kg_adapter_error(result):
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
+            if unresolved_names:
+                result["unresolved_planned_names"] = unresolved_names
             if "error" in result:
                 return _info(sq_index, intent, result)
             return _ok(sq_index, intent, result,
@@ -1244,8 +1311,9 @@ class Orchestrator:
                 target_type = "track"
             if not target_id:
                 return _clarif(sq_index, intent, "Which role or track are you focusing on?")
-            # Only pass completed courses for personalised (student-referential) queries
-            focus_completed = completed if sq.student_referential_fallback else []
+            # Personalized queries (future/remaining/should I/…) exclude completed courses
+            personalized = _is_personalized_focus(sq)
+            focus_completed = completed if personalized else []
             result = self._kg.call("get_focus_courses_for_target", {
                 "target_id": target_id,
                 "target_type": target_type,
@@ -1255,6 +1323,10 @@ class Orchestrator:
                 return _err(sq_index, intent, "engine_error", "kg_adapter", "KG unavailable.")
             if "error" in result:
                 return _info(sq_index, intent, result)
+            # Signal personalization context to Composer
+            result["personalized_focus"] = personalized
+            if personalized and completed:
+                result["completed_courses_excluded"] = len(completed)
             return _ok(sq_index, intent, result,
                        assumptions_active=True if assumptions_active else None)
 
@@ -1571,6 +1643,40 @@ class Orchestrator:
 
         return _ok(sq_index, intent, snapshot,
                    override_state_active=True if assumptions_active else None)
+
+    # ── Skill-gap covered_by enrichment ──────────────────────────────────────
+
+    def _enrich_skill_gap_covered_by(self, result: dict) -> dict:
+        """
+        Enrich covered_skills[*].covered_by with course names from the KG metadata cache.
+        Converts each raw course code string into {"course_code": code, "name": name_or_None}.
+        Dicts already in that shape are passed through unchanged.
+        Never raises; falls back to name=None if metadata is unavailable.
+        """
+        covered = result.get("covered_skills")
+        if not covered:
+            return result
+        enriched = []
+        for skill in covered:
+            if not isinstance(skill, dict):
+                enriched.append(skill)
+                continue
+            cb = skill.get("covered_by")
+            if not cb or not isinstance(cb, list):
+                enriched.append(skill)
+                continue
+            enriched_cb = []
+            for item in cb:
+                if isinstance(item, str):
+                    meta = self._kg.get_course_metadata(item)
+                    name = meta.get("name") if isinstance(meta, dict) else None
+                    enriched_cb.append({"course_code": item, "name": name})
+                elif isinstance(item, dict):
+                    enriched_cb.append(item)
+                else:
+                    enriched_cb.append({"course_code": str(item), "name": None})
+            enriched.append({**skill, "covered_by": enriched_cb})
+        return {**result, "covered_skills": enriched}
 
     # ── Display enrichment finalizer ──────────────────────────────────────────
 

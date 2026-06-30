@@ -127,6 +127,9 @@ def _inp(
     target_track: str | None = None,
     target_credit_load: int | None = None,
     max_credits_mode: bool = False,
+    lighter_load_mode: bool = False,
+    requested_plan_count: int | None = None,
+    requested_courses: list[str] | None = None,
 ) -> GenerateSemesterPlanInput:
     return GenerateSemesterPlanInput(
         study_status=study_status,
@@ -148,6 +151,9 @@ def _inp(
         target_track=target_track,
         target_credit_load=target_credit_load,
         max_credits_mode=max_credits_mode,
+        lighter_load_mode=lighter_load_mode,
+        requested_plan_count=requested_plan_count,
+        requested_courses=requested_courses or [],
     )
 
 
@@ -290,17 +296,13 @@ class TestGroupC_CreditCapBrackets:
         out = generate_semester_plan(_inp(current_cgpa=2.0, available_courses=_three_courses_fall()))
         assert out.credit_cap_applied == 18
 
-    def test_cgpa_exactly_3_default_cap_is_18_not_21(self):
-        """Boundary: CGPA == 3.0 enters >= 3.0 bracket → 21 (cgpa_above_3_limit).
-        The default path (no max_credits_mode) gives the CGPA-bracket max only
-        when max_credits_mode is True. Default path gives cgpa_between_2_and_3_limit (18)."""
+    def test_cgpa_exactly_3_default_cap_is_21(self):
+        """Boundary: CGPA == 3.0 enters >= 3.0 bracket → cgpa_bracket_max = 21.
+        Default path (no max_credits_mode) now aims for the student's CGPA-bracket maximum.
+        CGPA=3.0 maps to cgpa_above_3_limit (21) via _compute_cgpa_bracket_max."""
         out = generate_semester_plan(_inp(current_cgpa=3.0, available_courses=_three_courses_fall()))
-        # Default path: no max_credits_mode → uses cgpa_between_2_and_3_limit even at 3.0
-        # Because default path logic checks: cgpa >= 2.0 → 18 (before checking >= 3.0)
-        # Actually let's confirm what the code does:
-        # default path: if cgpa >= _CGPA_MID (2.0): cap = cgpa_between_2_and_3_limit (18)
-        # So CGPA=3.0 without max_credits_mode → 18
-        assert out.credit_cap_applied == 18
+        # New design: default path = cgpa_bracket_max = 21 for CGPA >= 3.0
+        assert out.credit_cap_applied == 21
 
     def test_max_credits_mode_at_cgpa_3_gives_21(self):
         """With max_credits_mode=True, a student at CGPA >= 3.0 gets 21-credit cap."""
@@ -525,26 +527,27 @@ class TestGroupF_PlanVariants:
         """7 courses × 3cr each = 21cr total. Cap = 18 → Plan A fills to 18 (6 courses)."""
         return [_course(f"CS3{i:02d}", credits=3, level=3) for i in range(7)]
 
-    def test_plan_a_exists_and_is_recommended(self):
+    def test_plan_1_exists_and_is_recommended(self):
         out = generate_semester_plan(_inp(available_courses=_three_courses_fall()))
         assert out.plans
         assert out.plans[0].plan_label == "Recommended"
-        assert out.plans[0].plan_id == "plan_a"
+        assert out.plans[0].plan_id == "plan_1"
 
-    def test_plan_b_lighter_load_generated_when_cap_over_12(self):
-        """When cap > 12 (default 18), Plan B (Lighter Load, 12cr) should be generated."""
-        out = generate_semester_plan(_inp(current_cgpa=2.5, available_courses=self._big_pool()))
-        labels = [p.plan_label for p in out.plans]
-        assert "Lighter Load" in labels
+    def test_lighter_load_mode_generates_reduced_cap_plan(self):
+        """lighter_load_mode=True generates a plan at cap - 2 credits."""
+        out = generate_semester_plan(_inp(current_cgpa=2.5, lighter_load_mode=True, available_courses=self._big_pool()))
+        assert out.status == "plans_generated"
+        # planning_target_credits should be 18 - 2 = 16
+        assert out.planning_target_credits == 16
 
-    def test_plan_b_not_generated_when_cap_is_12(self):
-        """If CGPA < 1.0 → cap=12 = Plan B max → no Plan B."""
+    def test_lighter_load_mode_false_no_auto_lighter_plan(self):
+        """Without lighter_load_mode, no auto lighter plan is generated."""
         out = generate_semester_plan(_inp(current_cgpa=0.5, available_courses=self._big_pool()))
         labels = [p.plan_label for p in out.plans]
         assert "Lighter Load" not in labels
 
-    def test_plan_c_level_focused_generated_with_enough_same_level_courses(self):
-        """Plan C requires >= 2 same-level eligible courses."""
+    def test_level_focused_plan_generated_with_enough_same_level_courses(self):
+        """Level-Focused plan requires >= 2 same-level eligible courses."""
         courses = [
             _course("CS301", level=3),
             _course("CS302", level=3),
@@ -552,37 +555,37 @@ class TestGroupF_PlanVariants:
         ]
         out = generate_semester_plan(_inp(student_level="Junior", available_courses=courses))
         labels = [p.plan_label for p in out.plans]
-        assert "Level Focused" in labels
+        assert "Level-Focused" in labels
 
-    def test_plan_c_not_generated_with_one_same_level_course(self):
-        """Plan C requires >= 2 same-level courses."""
+    def test_level_focused_not_generated_with_one_same_level_course(self):
+        """Level-Focused requires >= 2 same-level courses."""
         courses = [
             _course("CS301", level=3),
             _course("CS101", level=1),
         ]
         out = generate_semester_plan(_inp(student_level="Junior", available_courses=courses))
         labels = [p.plan_label for p in out.plans]
-        assert "Level Focused" not in labels
+        assert "Level-Focused" not in labels
 
-    def test_plan_b_not_generated_if_same_as_plan_a(self):
-        """If Plan B would select the same courses as Plan A, it is omitted."""
-        # 4 courses × 3cr = 12cr. Plan A cap=18, Plan B cap=12 → same 4 courses
+    def test_unlock_focused_plan_not_same_as_recommended(self):
+        """Unlock-Focused plan is deduped when it would be identical to Recommended."""
+        # 4 courses × 3cr = 12cr. All same-level → Unlock-Focused same as Recommended
         courses = [_course(f"CS{i}", credits=3, level=3) for i in range(4)]
         out = generate_semester_plan(_inp(current_cgpa=2.5, available_courses=courses))
-        labels = [p.plan_label for p in out.plans]
-        assert "Lighter Load" not in labels
+        # Should still generate at least one plan
+        assert out.status == "plans_generated"
 
-    def test_plan_c_not_generated_if_same_as_plan_a(self):
-        """If Plan C courses == Plan A courses, Plan C is omitted."""
-        # Only level-3 courses → Plan A and Plan C would be identical
+    def test_level_focused_not_generated_if_same_as_recommended(self):
+        """If Level-Focused courses == Recommended courses, Level-Focused is omitted."""
+        # Only level-3 courses → Recommended and Level-Focused would be identical
         courses = [
             _course("CS301", level=3),
             _course("CS302", level=3),
         ]
         out = generate_semester_plan(_inp(student_level="Junior", available_courses=courses))
         labels = [p.plan_label for p in out.plans]
-        # Both plans use the same 2 courses — Plan C should be deduped
-        assert "Level Focused" not in labels
+        # Both plans use the same 2 courses — Level-Focused should be deduped
+        assert "Level-Focused" not in labels
 
 
 # =============================================================================

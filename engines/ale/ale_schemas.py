@@ -542,6 +542,18 @@ class GenerateSemesterPlanInput(BaseModel):
         default=False,
         description="If True, always applies CGPA-bracket maximum"
     )
+    lighter_load_mode: bool = Field(
+        default=False,
+        description="If True, target approximately 2 credits below official cap"
+    )
+    requested_plan_count: int | None = Field(
+        default=None,
+        description="Number of distinct plans to return. None → auto (1-3 based on variety)"
+    )
+    requested_courses: list[str] = Field(
+        default_factory=list,
+        description="Course codes/names the student wants included if eligible"
+    )
 
 
 class GenerateGraduationRoadmapInput(BaseModel):
@@ -895,6 +907,34 @@ class GenerateSemesterPlanOutput(BaseModel):
         description="Brief summary of why courses were excluded. None if all eligible."
     )
     plans: list[SemesterPlan] = Field(default_factory=list)
+    cgpa_bracket_max: int | None = Field(
+        default=None,
+        description="Student's CGPA-bracket maximum credits (official cap)"
+    )
+    planning_target_credits: int | None = Field(
+        default=None,
+        description="The credit target used for plan generation (may differ from cap for lighter mode)"
+    )
+    excluded_requested_courses: list[dict] = Field(
+        default_factory=list,
+        description="Requested courses that could not be included, with exact reasons"
+    )
+    in_progress_failed_courses: list[str] = Field(
+        default_factory=list,
+        description="Failed courses currently in progress — not re-planned for target semester"
+    )
+    retake_warning_courses: list[str] = Field(
+        default_factory=list,
+        description="Failed-course retakes included in plan; verify prerequisites with advisor"
+    )
+    requested_plans_count: int | None = Field(
+        default=None,
+        description="Number of distinct plans actually generated"
+    )
+    requested_plans_requested: int | None = Field(
+        default=None,
+        description="Number of distinct plans the student requested (from requested_plan_count)"
+    )
 
 
 class GenerateGraduationRoadmapOutput(BaseModel):

@@ -1,4 +1,4 @@
-﻿"""
+"""
 ale/functions/generate_semester_plan.py
 ========================================
 Implements generate_semester_plan following ALE_Step5_Algorithms.md Function 5,
@@ -25,80 +25,71 @@ _CGPA_HIGH = 3.0
 _CGPA_MID  = 2.0
 _CGPA_LOW  = 1.0
 
-# System-design algorithm constants — ALE_Step5_Algorithms.md §Function5 Phase5/6
-_HIGH_UNLOCK_THRESHOLD     = 3   # unlock_score >= 3 earns "high_unlock" priority
-_PLAN_B_MAX_CREDITS        = 12  # Lighter Load fixed credit cap
-_MIN_LEVEL_FOCUSED_COURSES = 2   # Plan C requires at least this many same-level courses
+# System-design algorithm constants
+_HIGH_UNLOCK_THRESHOLD     = 3
+_LIGHTER_LOAD_OFFSET       = 2   # Credits below official cap for lighter mode
+_MIN_LEVEL_FOCUSED_COURSES = 2   # Level-focused plan needs at least this many same-level courses
+_DEFAULT_MAX_PLANS         = 3   # Default when requested_plan_count is None
 
 _LEVEL_MAP = {"Freshman": 1, "Sophomore": 2, "Junior": 3, "Senior": 4}
 
+# Non-universal zero-credit courses — excluded from normal semester plans.
+# These are remedial fundamentals that are NOT required for every student.
+# Field Training is NOT listed here; it may be a universal requirement.
+NON_UNIVERSAL_ZERO_CREDIT_COURSES: frozenset[str] = frozenset({"HUM110", "C-MA110"})
+
 
 def _is_offered_in_semester(semester_offering: list, target_semester_type: str) -> bool:
-    """Return True when the course should be considered for target_semester_type.
-
-    Empty semester_offering means the data is missing/unspecified; treat the
-    course as available in every semester (MVP assumption).  A non-empty list
-    is authoritative — the course is only offered in those semesters.
-    """
     if not semester_offering:
         return True
     return target_semester_type in semester_offering
 
 
-# ---------------------------------------------------------------------------
-# Internal per-course data
-# ---------------------------------------------------------------------------
-
 @dataclass
 class _EligibleCourse:
-    """Fully scored eligible course — populated in Phase 4, sorted in Phase 5."""
     course: AvailableCourse
     is_retake: bool
     unlock_score: int
     level_match: bool
     priority_level: str
+    is_requested: bool = False
 
-
-# ---------------------------------------------------------------------------
-# Public function
-# ---------------------------------------------------------------------------
 
 def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemesterPlanOutput:
-    """Generate up to three semester course plans based on student state and eligibility."""
+    """Generate semester course plans based on student state and eligibility."""
 
     # -----------------------------------------------------------------------
     # Phase 1 — Structural Validation
     # -----------------------------------------------------------------------
 
     required_data_missing: list[str] = []
-    if input.study_status is None:              # type: ignore[comparison-overlap]
+    if input.study_status is None:
         required_data_missing.append("study_status")
-    if input.completed_courses is None:         # type: ignore[comparison-overlap]
+    if input.completed_courses is None:
         required_data_missing.append("completed_courses")
-    if input.failed_courses is None:            # type: ignore[comparison-overlap]
+    if input.failed_courses is None:
         required_data_missing.append("failed_courses")
-    if input.in_progress_courses is None:       # type: ignore[comparison-overlap]
+    if input.in_progress_courses is None:
         required_data_missing.append("in_progress_courses")
-    if input.current_cgpa is None:              # type: ignore[comparison-overlap]
+    if input.current_cgpa is None:
         required_data_missing.append("current_cgpa")
-    if input.cumulative_passed_hours is None:   # type: ignore[comparison-overlap]
+    if input.cumulative_passed_hours is None:
         required_data_missing.append("cumulative_passed_hours")
-    if input.student_level is None:             # type: ignore[comparison-overlap]
+    if input.student_level is None:
         required_data_missing.append("student_level")
-    if input.available_courses is None:         # type: ignore[comparison-overlap]
+    if input.available_courses is None:
         required_data_missing.append("available_courses")
-    if input.target_semester_type is None:      # type: ignore[comparison-overlap]
+    if input.target_semester_type is None:
         required_data_missing.append("target_semester_type")
 
     if required_data_missing:
         return _cannot_compute(["required_data_missing"], required_data_missing)
 
-    # Belt-and-suspenders guards — protect against model_construct() bypass of Literal
     _VALID_SEMESTER_TYPES = frozenset({"Fall", "Spring", "Summer"})
-    if input.target_semester_type not in _VALID_SEMESTER_TYPES:  # type: ignore[comparison-overlap]
+    if input.target_semester_type not in _VALID_SEMESTER_TYPES:
         return _cannot_compute(["invalid_target_semester_type"], [])
 
-    if input.student_level not in _LEVEL_MAP:  # type: ignore[comparison-overlap]
+    if input.student_level not in _LEVEL_MAP:
         return _cannot_compute(["invalid_student_level"], [])
 
     if input.target_semester_type == "Summer" and input.summer_semester_rules is None:
@@ -129,24 +120,34 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
     )
 
     warnings: list[str] = []
-    active_credit_cap: int | None = None   # None for Summer (course-count based)
-    course_count_cap: int | None  = None   # None for non-Summer
+    active_credit_cap: int | None = None
+    course_count_cap: int | None  = None
 
     if is_summer:
-        summer_rules = input.summer_semester_rules  # non-None guaranteed by Phase 1
+        summer_rules = input.summer_semester_rules
         course_count_cap = (
             summer_rules.cgpa_above_3_max_courses
             if input.current_cgpa >= summer_rules.cgpa_threshold_for_extra_course
             else summer_rules.default_max_courses
         )
+        planning_target_credits = None
     else:
         if is_final_semester:
             active_credit_cap = credit_limit_rules.final_semester_override
+            planning_target_credits = active_credit_cap
             warnings.append(
                 "Final semester detected — dean approval required for credits above standard limit."
             )
         elif input.max_credits_mode:
             active_credit_cap = cgpa_bracket_max
+            planning_target_credits = cgpa_bracket_max
+        elif input.lighter_load_mode:
+            lighter_target = max(
+                credit_limit_rules.minimum_per_semester,
+                cgpa_bracket_max - _LIGHTER_LOAD_OFFSET,
+            )
+            active_credit_cap = lighter_target
+            planning_target_credits = lighter_target
         elif input.target_credit_load is not None:
             if input.target_credit_load > cgpa_bracket_max:
                 warnings.append(
@@ -154,16 +155,13 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
                     f"Capped to {cgpa_bracket_max}."
                 )
             active_credit_cap = min(input.target_credit_load, cgpa_bracket_max)
+            planning_target_credits = active_credit_cap
         else:
-            # Default: 18 for CGPA >= 2.0, 15 for >= 1.0, 12 for < 1.0
-            if input.current_cgpa >= _CGPA_MID:
-                active_credit_cap = credit_limit_rules.cgpa_between_2_and_3_limit
-            elif input.current_cgpa >= _CGPA_LOW:
-                active_credit_cap = credit_limit_rules.cgpa_between_1_and_2_limit
-            else:
-                active_credit_cap = credit_limit_rules.cgpa_below_1_limit
+            # Default: aim for the student's CGPA-bracket maximum
+            active_credit_cap = cgpa_bracket_max
+            planning_target_credits = cgpa_bracket_max
 
-    # Minimum credit warning — only for regular semesters (Summer uses course-count cap)
+    # Minimum credit warning
     if not is_summer and input.target_credit_load is not None:
         if input.target_credit_load < credit_limit_rules.minimum_per_semester:
             warnings.append(
@@ -173,7 +171,7 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
             )
 
     # -----------------------------------------------------------------------
-    # Phase 4 — Eligibility Filtering + Phase 5 scoring (interleaved)
+    # Phase 4 — Eligibility Filtering + Phase 5 scoring
     # -----------------------------------------------------------------------
 
     student_level_int = _LEVEL_MAP[input.student_level]
@@ -181,40 +179,129 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
     failed_set      = set(input.failed_courses)
     in_progress_set = set(input.in_progress_courses)
 
+    # Resolve requested courses: match by code (case-insensitive) or name
+    requested_set: set[str] = set()
+    requested_codes: list[str] = []
+    if input.requested_courses:
+        code_to_course = {c.course_code.upper(): c for c in input.available_courses}
+        name_to_code = {c.name.lower(): c.course_code for c in input.available_courses if c.name}
+        for req in input.requested_courses:
+            req_upper = req.strip().upper()
+            req_lower = req.strip().lower()
+            if req_upper in code_to_course:
+                requested_codes.append(code_to_course[req_upper].course_code)
+                requested_set.add(code_to_course[req_upper].course_code)
+            elif req_lower in name_to_code:
+                c = name_to_code[req_lower]
+                requested_codes.append(c)
+                requested_set.add(c)
+            else:
+                # Partial name match
+                matches = [code for name, code in name_to_code.items() if req_lower in name]
+                if len(matches) == 1:
+                    requested_codes.append(matches[0])
+                    requested_set.add(matches[0])
+
+    # Detect in-progress failed courses (failed but currently in progress → don't re-plan)
+    in_progress_failed: list[str] = [
+        code for code in failed_set if code in in_progress_set
+    ]
+
     eligible_pool: list[_EligibleCourse] = []
+    excluded_requested: list[dict] = []
     cnt_in_progress       = 0
     cnt_already_completed = 0
     cnt_missing_prereqs   = 0
     cnt_credit_threshold  = 0
     cnt_wrong_semester    = 0
+    cnt_zero_credit_filtered = 0
 
     for course in input.available_courses:
         code = course.course_code
+        is_requested = code in requested_set
 
         if not _is_offered_in_semester(course.semester_offering, input.target_semester_type):
             cnt_wrong_semester += 1
+            if is_requested:
+                excluded_requested.append({
+                    "course_code": code,
+                    "course_name": course.name,
+                    "reason": "Not offered in the target semester."
+                })
             continue
 
         if code in in_progress_set:
             cnt_in_progress += 1
+            if is_requested:
+                if code in failed_set:
+                    excluded_requested.append({
+                        "course_code": code,
+                        "course_name": course.name,
+                        "reason": "Currently in progress this semester — cannot be planned again."
+                    })
+                else:
+                    excluded_requested.append({
+                        "course_code": code,
+                        "course_name": course.name,
+                        "reason": "Already enrolled in this course this semester."
+                    })
             continue
 
         if code in completed_set and code not in failed_set:
             cnt_already_completed += 1
+            if is_requested:
+                excluded_requested.append({
+                    "course_code": code,
+                    "course_name": course.name,
+                    "reason": "Already completed and passed."
+                })
+            continue
+
+        # Filter non-universal zero-credit fundamentals from normal plans
+        # unless the student explicitly requested the course
+        if (
+            course.credits == 0
+            and code in NON_UNIVERSAL_ZERO_CREDIT_COURSES
+            and not is_requested
+        ):
+            cnt_zero_credit_filtered += 1
             continue
 
         missing_prereqs = [p for p in course.prerequisites if p not in completed_set]
-        if missing_prereqs:
+        is_retake = code in failed_set
+
+        if missing_prereqs and not is_retake:
+            # Non-retake: standard prerequisite block
             cnt_missing_prereqs += 1
+            if is_requested:
+                prereq_str = ", ".join(missing_prereqs[:5])
+                excluded_requested.append({
+                    "course_code": code,
+                    "course_name": course.name,
+                    "reason": f"Missing prerequisites: {prereq_str}."
+                })
             continue
+
+        if missing_prereqs and is_retake:
+            # Failed retake with missing prereqs: include with advisory warning
+            # (student has historical attempt; advisor can clarify prerequisite recovery)
+            pass  # Allow through — warning added below
 
         if course.credit_threshold is not None:
             if input.cumulative_passed_hours < course.credit_threshold:
                 cnt_credit_threshold += 1
+                if is_requested:
+                    excluded_requested.append({
+                        "course_code": code,
+                        "course_name": course.name,
+                        "reason": (
+                            f"Credit threshold not met: need {course.credit_threshold} "
+                            f"passed hours, have {input.cumulative_passed_hours}."
+                        )
+                    })
                 continue
 
-        # Eligible — compute Phase 5 metadata immediately
-        is_retake = code in failed_set
+        # Eligible — compute priority metadata
         unlock_score = sum(
             1 for other in input.available_courses
             if code in other.prerequisites and other.course_code not in completed_set
@@ -228,6 +315,7 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
             unlock_score=unlock_score,
             level_match=level_match,
             priority_level=priority_level,
+            is_requested=is_requested,
         ))
 
     ineligibility_summary = _build_ineligibility_summary(
@@ -244,69 +332,87 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
             is_final_semester=is_final_semester,
             total_eligible_courses=0,
             ineligibility_summary=ineligibility_summary,
+            cgpa_bracket_max=cgpa_bracket_max,
+            planning_target_credits=planning_target_credits if not is_summer else None,
+            excluded_requested_courses=excluded_requested,
+            in_progress_failed_courses=in_progress_failed,
         )
 
     # -----------------------------------------------------------------------
-    # Phase 5 — Sort (metadata already computed above)
+    # Phase 5 — Sort pools
     # -----------------------------------------------------------------------
 
-    sorted_pool = sorted(
-        eligible_pool,
-        key=lambda ec: (
-            0 if ec.is_retake else 1,   # retake first
-            -ec.unlock_score,           # higher unlock score first
-            0 if ec.level_match else 1, # level match before non-match
-        ),
-    )
+    # Main priority sort: requested first, then retake, then unlock, then level match
+    def _main_key(ec: _EligibleCourse):
+        return (
+            0 if ec.is_requested else 1,
+            0 if ec.is_retake else 1,
+            -ec.unlock_score,
+            0 if ec.level_match else 1,
+        )
+
+    def _unlock_key(ec: _EligibleCourse):
+        return (
+            0 if ec.is_requested else 1,
+            -ec.unlock_score,
+            0 if ec.is_retake else 1,
+            0 if ec.level_match else 1,
+        )
+
+    main_sorted = sorted(eligible_pool, key=_main_key)
+    unlock_sorted = sorted(eligible_pool, key=_unlock_key)
+    same_level_pool = [ec for ec in main_sorted if ec.level_match]
 
     # -----------------------------------------------------------------------
     # Phase 6 — Plan Generation
     # -----------------------------------------------------------------------
 
+    # Determine how many plans to generate
+    n_plans = min(input.requested_plan_count or _DEFAULT_MAX_PLANS, 5)
+
+    retake_warning_courses: list[str] = []
     plans: list[SemesterPlan] = []
+    seen_plan_sets: list[frozenset[str]] = []
 
-    # Plan A — Recommended: greedy fill from full priority-sorted pool
-    if is_summer:
-        plan_a_courses = sorted_pool[:course_count_cap]
-    else:
-        plan_a_courses = _greedy_fill_credits(sorted_pool, active_credit_cap)  # type: ignore[arg-type]
-
-    if plan_a_courses:
-        plans.append(_build_plan("plan_a", "Recommended", plan_a_courses))
-
-    plan_a_codes = {ec.course.course_code for ec in plan_a_courses}
-
-    # Plan B — Lighter Load (non-summer, active cap > 15, re-sorted by unlock_score only)
-    plan_b_codes: set[str] = set()
-    if not is_summer and active_credit_cap is not None and active_credit_cap > _PLAN_B_MAX_CREDITS:
-        pool_by_unlock = sorted(eligible_pool, key=lambda ec: -ec.unlock_score)
-        plan_b_courses = _greedy_fill_credits(pool_by_unlock, _PLAN_B_MAX_CREDITS)
-        plan_b_codes = {ec.course.course_code for ec in plan_b_courses}
-        if plan_b_courses and plan_b_codes != plan_a_codes:
-            plans.append(_build_plan("plan_b", "Lighter Load", plan_b_courses))
-        else:
-            plan_b_codes = set()  # not added — treat as non-existent for Plan C dedup
-
-    # Plan C — Level Focused: same-level courses only, up to cap
-    same_level_pool = [ec for ec in sorted_pool if ec.course.level == student_level_int]
-    if len(same_level_pool) >= _MIN_LEVEL_FOCUSED_COURSES:
+    def _try_add_plan(pool, plan_id_prefix, label):
+        nonlocal retake_warning_courses
+        if len(plans) >= n_plans:
+            return
         if is_summer:
-            plan_c_courses = same_level_pool[:course_count_cap]
+            selected = pool[:course_count_cap]
         else:
-            plan_c_courses = _greedy_fill_credits(same_level_pool, active_credit_cap)  # type: ignore[arg-type]
-        plan_c_codes = {ec.course.course_code for ec in plan_c_courses}
-        if (
-            plan_c_courses
-            and plan_c_codes != plan_a_codes
-            and plan_c_codes != plan_b_codes
-        ):
-            plans.append(_build_plan("plan_c", "Level Focused", plan_c_courses))
+            selected = _greedy_fill_credits(pool, active_credit_cap)
+        if not selected:
+            return
+        codes = frozenset(ec.course.course_code for ec in selected)
+        if codes in seen_plan_sets:
+            return
+        seen_plan_sets.append(codes)
+        plan_idx = len(plans) + 1
+        plan_id = f"plan_{plan_idx}"
+        built = _build_plan(plan_id, label, selected)
+        plans.append(built)
+        # Collect retake warnings
+        for ec in selected:
+            if ec.is_retake and ec.course.course_code not in retake_warning_courses:
+                retake_warning_courses.append(ec.course.course_code)
+
+    _try_add_plan(main_sorted, "plan_1", "Recommended")
+    _try_add_plan(unlock_sorted, "plan_2", "Unlock-Focused")
+    if len(same_level_pool) >= _MIN_LEVEL_FOCUSED_COURSES:
+        _try_add_plan(same_level_pool, "plan_3", "Level-Focused")
+
+    # If still short of requested count, try reverse-of-unlock
+    if len(plans) < n_plans:
+        retake_first = [ec for ec in main_sorted if ec.is_retake]
+        non_retake = [ec for ec in main_sorted if not ec.is_retake]
+        alt_pool = retake_first + sorted(non_retake, key=lambda ec: ec.level_match, reverse=True)
+        _try_add_plan(alt_pool, "plan_alt", "Retake-Priority")
 
     # -----------------------------------------------------------------------
     # Phase 7 — Warnings
     # -----------------------------------------------------------------------
 
-    # 1. Eligible credits below semester minimum (non-summer only — summer uses course-count cap)
     if not is_summer:
         eligible_total_credits = sum(ec.course.credits for ec in eligible_pool)
         if eligible_total_credits < credit_limit_rules.minimum_per_semester:
@@ -314,31 +420,48 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
                 "Total eligible credits below minimum — consult your academic advisor."
             )
 
-    # 2. Unresolved Incomplete grade
     if input.incomplete_grade_flag:
         warnings.append(
             "You have an unresolved Incomplete grade. An additional course may be "
             "available with academic council approval."
         )
 
-    # 3. Final semester — non-course requirements reminder
     if is_final_semester:
         warnings.append(
             "This appears to be your final semester — verify all non-course "
             "graduation requirements with the registrar."
         )
 
-    # 4. Summer availability subject to faculty council
     if input.target_semester_type == "Summer":
         warnings.append(
             "Summer course availability is subject to faculty council announcement."
         )
 
-    # 5. Unofficial track advisory — student has no official track assignment in the record
     if input.official_track is None and input.target_track is not None:
         warnings.append(
             "No official track is assigned in your academic record. This plan is based "
             "on your stated target track and is advisory — confirm with your advisor."
+        )
+
+    if retake_warning_courses:
+        codes_str = ", ".join(retake_warning_courses[:5])
+        warnings.append(
+            f"The following failed-course retakes are included in the plan: {codes_str}. "
+            "Confirm with your academic advisor that prerequisite recovery does not affect registration."
+        )
+
+    if in_progress_failed:
+        codes_str = ", ".join(in_progress_failed[:5])
+        warnings.append(
+            f"The following failed courses are already in progress this semester and are not "
+            f"re-planned for the target semester: {codes_str}."
+        )
+
+    # Note if fewer distinct plans were found than requested
+    if input.requested_plan_count and len(plans) < input.requested_plan_count:
+        warnings.append(
+            f"Only {len(plans)} distinct plan(s) are available — "
+            f"fewer than the {input.requested_plan_count} requested."
         )
 
     # -----------------------------------------------------------------------
@@ -355,6 +478,13 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
         total_eligible_courses=len(eligible_pool),
         ineligibility_summary=ineligibility_summary,
         plans=plans,
+        cgpa_bracket_max=cgpa_bracket_max,
+        planning_target_credits=planning_target_credits if not is_summer else None,
+        excluded_requested_courses=excluded_requested,
+        in_progress_failed_courses=in_progress_failed,
+        retake_warning_courses=retake_warning_courses,
+        requested_plans_count=len(plans),
+        requested_plans_requested=input.requested_plan_count,
     )
 
 
@@ -377,7 +507,6 @@ def _compute_cgpa_bracket_max(
     current_cgpa: float,
     credit_limit_rules: CreditLimitRules,
 ) -> int:
-    """Map CGPA to its maximum allowed credit bracket (handbook values via rule bundle)."""
     if current_cgpa >= _CGPA_HIGH:
         return credit_limit_rules.cgpa_above_3_limit
     if current_cgpa >= _CGPA_MID:
@@ -405,7 +534,6 @@ def _greedy_fill_credits(
     pool: list[_EligibleCourse],
     credit_cap: int,
 ) -> list[_EligibleCourse]:
-    """Iterate pool in order, adding each course that fits within the remaining credit cap."""
     selected: list[_EligibleCourse] = []
     total = 0
     for ec in pool:
@@ -464,4 +592,3 @@ def _build_ineligibility_summary(
     if wrong_semester:
         parts.append(f"{wrong_semester} excluded — not offered this semester")
     return ("; ".join(parts) + ".") if parts else None
-

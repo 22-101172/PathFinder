@@ -2738,3 +2738,68 @@ class TestCompareTracksThreePlusGuard:
         assert result[0].entities.track_id == "AI"
         assert result[0].secondary_entities is not None
         assert result[0].secondary_entities.track_id == "DSE"
+
+
+# ── T38: Focus vs plan_semester routing guard ─────────────────────────────────
+
+class TestFocusVsPlanSemesterRouting:
+    """
+    QU must not confuse 'what should I focus on' (get_focus_courses_for_target)
+    with 'what should I register' (plan_semester).
+
+    Tests H and I from the D3 chunk-3 audit.
+    """
+
+    def _focus_sq_json(self, text: str) -> str:
+        sq: dict = {
+            "intent": "get_focus_courses_for_target",
+            "original_text": text,
+            "entities": {"course_code": None, "role": "RL_ML_Engineer", "track": None, "skill": None},
+            "secondary_entities": None,
+            "params": {},
+            "session_overrides": {
+                "added_courses": [], "assumed_passed_courses": [], "assumed_failed_courses": [],
+                "target_role": None, "course_override_type": "none", "override_action": "accumulate",
+            },
+            "student_referential_fallback": True,
+        }
+        return json.dumps({"queries": [sq]})
+
+    def _plan_sq_json(self, text: str) -> str:
+        sq: dict = {
+            "intent": "plan_semester",
+            "original_text": text,
+            "entities": {"course_code": None, "role": None, "track": None, "skill": None},
+            "secondary_entities": None,
+            "params": {},
+            "session_overrides": {
+                "added_courses": [], "assumed_passed_courses": [], "assumed_failed_courses": [],
+                "target_role": None, "course_override_type": "none", "override_action": "accumulate",
+            },
+            "student_referential_fallback": True,
+        }
+        return json.dumps({"queries": [sq]})
+
+    def test_H_future_focus_query_routes_to_focus_not_plan(self, monkeypatch):
+        """
+        H: 'What future courses should I focus on for ML Engineer?' →
+        get_focus_courses_for_target, NOT plan_semester.
+        """
+        user_text = "What future courses should I focus on for ML Engineer?"
+        client = _make_mock_client([self._focus_sq_json(user_text)])
+        result = _run_qu(user_text, client, monkeypatch=monkeypatch)
+        assert len(result) == 1
+        assert result[0].intent == "get_focus_courses_for_target"
+        assert result[0].intent != "plan_semester"
+
+    def test_I_register_next_semester_routes_to_plan_not_focus(self, monkeypatch):
+        """
+        I: 'What should I register next semester for ML Engineer?' →
+        plan_semester (or clarification), NOT get_focus_courses_for_target.
+        """
+        user_text = "What should I register next semester for ML Engineer?"
+        client = _make_mock_client([self._plan_sq_json(user_text)])
+        result = _run_qu(user_text, client, monkeypatch=monkeypatch)
+        assert len(result) == 1
+        assert result[0].intent in ("plan_semester", "clarification_needed")
+        assert result[0].intent != "get_focus_courses_for_target"

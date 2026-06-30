@@ -136,6 +136,12 @@ def _make_kg() -> MagicMock:
             return _ALIGNMENT_IMPROVEMENT_RESULT
         if operation == "get_focus_courses_for_target":
             return _FOCUS_COURSES_RESULT
+        if operation == "resolve_entity":
+            text = params.get("entity_text", "")
+            # Treat any input that already looks like a course code as resolved
+            if text.upper().startswith("C-") or text.upper().startswith("HUM") or text.upper().startswith("C-MA"):
+                return {"status": "ok", "resolved_id": text.upper(), "entity_type": "course"}
+            return {"status": "not_found", "error": "entity_not_found"}
         return {"error": "unknown_operation"}
 
     kg.call.side_effect = _kg_call

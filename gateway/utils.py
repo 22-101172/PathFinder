@@ -103,4 +103,14 @@ def resolve_relative_semester_text(text: str, current_semester: str) -> "tuple[s
             return None
         return (season_map[m.group(2)], current_year + n)
 
+    # "next semester" — generic → derive from current season
+    m = re.fullmatch(r"next\s+semester", text_lower)
+    if m:
+        cur_season = parts[0]
+        if cur_season == "Fall":
+            return ("Spring", current_year + 1)
+        elif cur_season in ("Spring", "Summer"):
+            return ("Fall", current_year)
+        return None
+
     return None

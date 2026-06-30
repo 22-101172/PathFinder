@@ -380,6 +380,33 @@ def _parse_raw_sq(raw: dict[str, Any], fallback_text: str) -> StructuredQuery:
             params["target_semester_text"] = val
         else:
             del params["target_semester_text"]
+    if "lighter_load_mode" in params:
+        params["lighter_load_mode"] = bool(params.get("lighter_load_mode"))
+    if "max_credits_mode" in params:
+        params["max_credits_mode"] = bool(params.get("max_credits_mode"))
+    if "requested_plan_count" in params:
+        try:
+            val = int(params["requested_plan_count"])
+            if 1 <= val <= 10:
+                params["requested_plan_count"] = val
+            else:
+                del params["requested_plan_count"]
+        except (ValueError, TypeError):
+            del params["requested_plan_count"]
+    if "requested_courses" in params:
+        if isinstance(params["requested_courses"], list):
+            params["requested_courses"] = [str(c) for c in params["requested_courses"] if c]
+        else:
+            del params["requested_courses"]
+    if "target_credit_load" in params:
+        try:
+            val = int(params["target_credit_load"])
+            if 1 <= val <= 30:
+                params["target_credit_load"] = val
+            else:
+                del params["target_credit_load"]
+        except (ValueError, TypeError):
+            del params["target_credit_load"]
     if "record_focus" in params:
         if params["record_focus"] not in _VALID_RECORD_FOCUSES:
             del params["record_focus"]
@@ -474,6 +501,23 @@ def _normalize_one_sq(
     try:
         intent = sq.intent
         text_for_extraction = sq.original_text or user_text
+
+        # ── Guard 0: "maximum courses/credits I can take next semester" misrouted to policy_query ──
+        if intent == "policy_query" and sq.student_referential_fallback:
+            lower_text = text_for_extraction.lower()
+            _plan_triggers = ("maximum courses i can take", "max courses i can take",
+                              "maximum credits i can take", "max credits i can take",
+                              "most courses i can take", "most credits i can register",
+                              "lighter plan", "light plan")
+            if any(t in lower_text for t in _plan_triggers):
+                new_params = dict(sq.params)
+                if "maximum" in lower_text or "most" in lower_text:
+                    new_params["max_credits_mode"] = True
+                elif "lighter" in lower_text or "light" in lower_text:
+                    new_params["lighter_load_mode"] = True
+                # Preserve semester params
+                sq = sq.model_copy(update={"intent": "plan_semester", "params": new_params})
+                intent = "plan_semester"
 
         # ── Guard 1: Track-membership question misrouted to track intent ──────
         # "which track does X belong to?" → get_course_info, NOT get_track_overview
@@ -616,6 +660,33 @@ def _normalize_one_sq(
             if style in ("normal", "") and detect_status_yes_no(text_for_extraction):
                 if not sq.params.get("response_style"):
                     sq = sq.model_copy(update={"params": {**sq.params, "response_style": "yes_no"}})
+
+        # plan_semester: detect lighter/max/count/requested-courses from text
+        elif intent == "plan_semester":
+            lower_text = text_for_extraction.lower()
+            # Detect lighter load mode
+            if any(kw in lower_text for kw in ("lighter", "light load", "light plan", "fewer credits", "easy load")):
+                if not sq.params.get("lighter_load_mode"):
+                    sq = sq.model_copy(update={"params": {**sq.params, "lighter_load_mode": True}})
+            # Detect max credits mode (student-personal phrasing with "maximum/most")
+            if any(kw in lower_text for kw in ("maximum courses", "maximum credits", "max courses", "max credits",
+                                                "most courses i can", "most credits i can")):
+                if not sq.params.get("max_credits_mode") and not sq.params.get("target_credit_load"):
+                    sq = sq.model_copy(update={"params": {**sq.params, "max_credits_mode": True}})
+            # Detect requested plan count from "N plans/options/alternatives"
+            import re as _re
+            m = _re.search(r'\b([1-9])\s+(?:different\s+)?(?:plans?|options?|alternatives?)\b', lower_text)
+            if m and not sq.params.get("requested_plan_count"):
+                sq = sq.model_copy(update={"params": {**sq.params, "requested_plan_count": int(m.group(1))}})
+            # Detect target_credit_load from "N credits next semester" or "plan me N credits"
+            m2 = _re.search(r'\b(\d{1,2})\s+credits?\b', lower_text)
+            if m2 and not sq.params.get("target_credit_load") and not sq.params.get("max_credits_mode"):
+                try:
+                    cr = int(m2.group(1))
+                    if 1 <= cr <= 30:
+                        sq = sq.model_copy(update={"params": {**sq.params, "target_credit_load": cr}})
+                except ValueError:
+                    pass
 
     except Exception:
         pass  # Never crash normalization; return original sq

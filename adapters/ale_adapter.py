@@ -507,6 +507,9 @@ def _generate_semester_plan(sc: StudentContext, rule_bundles: dict, kg_data: dic
         target_track=params.get("target_track", None),
         target_credit_load=params.get("target_credit_load", None),
         max_credits_mode=params.get("max_credits_mode", False),
+        lighter_load_mode=params.get("lighter_load_mode", False),
+        requested_plan_count=params.get("requested_plan_count"),
+        requested_courses=params.get("requested_courses", []),
     )
     return generate_semester_plan(inp).model_dump()
 

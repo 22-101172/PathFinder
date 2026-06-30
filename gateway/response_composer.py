@@ -264,6 +264,23 @@ def _cap_list(val: list, limit: int = 20) -> list:
     return val[:limit] if len(val) > limit else val
 
 
+def _resolve_alignment_pct(data: dict) -> str | None:
+    """Return user-facing percentage string for alignment data.
+
+    Prefers alignment_percentage (already 0-100) over alignment_score (0-1 decimal).
+    Converts alignment_score ∈ [0,1] → ×100; values >1 treated as already percentage-like.
+    Formats cleanly: 60.0 → "60%", 69.12 → "69.12%" (no trailing zeros via :g).
+    """
+    pct = data.get("alignment_percentage")
+    if isinstance(pct, (int, float)):
+        return f"{pct:g}%"
+    score = data.get("alignment_score")
+    if isinstance(score, (int, float)):
+        pct_val = score * 100 if 0.0 <= score <= 1.0 else score
+        return f"{pct_val:g}%"
+    return None
+
+
 def _extract_packet(result: PerSQResult) -> dict:
     """Build a compact, safe narration packet from a single PerSQResult."""
     packet: dict = {
@@ -342,6 +359,10 @@ def _extract_packet(result: PerSQResult) -> dict:
         "estimate_alignment_improvement", "get_focus_courses_for_target",
     ):
         _extract_career(packet, data, intent)
+        if intent == "compute_alignment_score":
+            pct = _resolve_alignment_pct(packet)
+            if pct:
+                packet["alignment_pct_display"] = pct
     elif intent in (
         "get_track_overview", "compare_tracks",
         "recommend_track_for_role", "recommend_track_for_skill",
@@ -469,6 +490,10 @@ def _extract_plan(packet: dict, data: dict) -> None:
         "reason_codes", "non_course_blockers", "remaining_graduation_gaps",
         "projected_graduation_semester", "required_data_missing",
         "total_passes", "semester_plans", "simulation_disclaimer",
+        # new redesign fields
+        "cgpa_bracket_max", "planning_target_credits",
+        "excluded_requested_courses", "in_progress_failed_courses",
+        "retake_warning_courses", "requested_plans_count", "requested_plans_requested",
     ):
         if k in data:
             val = data[k]
@@ -589,11 +614,20 @@ def _extract_roles_by_track(packet: dict, data: dict) -> None:
 
 def _extract_career(packet: dict, data: dict, intent: str) -> None:
     for k in (
-        "role_id", "role_name", "alignment_score",
+        "role_id", "role_name", "alignment_score", "alignment_percentage",
         "missing_skills", "covered_skills",
         "recommended_courses", "ranked_roles",
         "projected_improvement", "current_alignment", "new_alignment",
         "focus_courses", "skill_gap_count",
+        # estimate_alignment_improvement — KG field names
+        "current_alignment_score", "current_alignment_percentage",
+        "projected_alignment_score", "projected_alignment_percentage",
+        "alignment_improvement",
+        "newly_covered_skills", "still_missing_skills",
+        "total_newly_covered", "total_still_missing",
+        "unresolved_planned_names",
+        # get_focus_courses_for_target enrichment
+        "personalized_focus", "completed_courses_excluded",
         "error", "reason", "message",
     ):
         if k in data:
@@ -1135,15 +1169,35 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                     skill_label = _fmt_skill_label(str(s))
                 lines.append(f"    • {skill_label}")
         if covered:
-            lines.append(f"  Skills already covered: {len(covered)}")
+            lines.append(f"  Skills already covered ({len(covered)}):")
+            for s in covered[:10]:
+                if isinstance(s, dict):
+                    skill_label = _fmt_skill_label(s.get("skill_id", ""), s.get("name", ""))
+                    cb_list = s.get("covered_by") or []
+                    cb_parts: list[str] = []
+                    for cb in cb_list:
+                        if isinstance(cb, dict):
+                            code = cb.get("course_code", "")
+                            name = cb.get("name")
+                            if name and code:
+                                cb_parts.append(f"{name} ({code})")
+                            elif code:
+                                cb_parts.append(code)
+                        elif isinstance(cb, str):
+                            cb_parts.append(cb)
+                    if cb_parts:
+                        lines.append(f"    • {skill_label} — covered by {', '.join(cb_parts)}")
+                    else:
+                        lines.append(f"    • {skill_label}")
+                else:
+                    lines.append(f"    • {_fmt_skill_label(str(s))}")
 
     elif intent == "compute_alignment_score":
         role_name = p.get("role_name", "")
         role_id = p.get("role_id", "")
         role_display = _fmt_role_label(role_id, role_name) or "the target role"
-        score = p.get("alignment_score")
-        score_str = f"{score:.0%}" if isinstance(score, (int, float)) else "N/A"
-        lines.append(f"Your curriculum alignment with {role_display}: {score_str}")
+        pct_str = p.get("alignment_pct_display") or _resolve_alignment_pct(p) or "N/A"
+        lines.append(f"Your curriculum alignment with {role_display}: {pct_str}")
 
     elif intent == "recommend_courses_to_close_gap":
         role_name = p.get("role_name", "")
@@ -1174,12 +1228,29 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
         role_name = p.get("role_name", "")
         role_id = p.get("role_id", "")
         role_display = _fmt_role_label(role_id, role_name) or "the target role"
-        curr = p.get("current_alignment")
-        new = p.get("new_alignment") or p.get("projected_improvement")
-        if isinstance(curr, (int, float)) and isinstance(new, (int, float)):
-            delta = new - curr
+        # Prefer percentage fields (0-100) from KG; fall back to score fields (0-1)
+        curr_pct = p.get("current_alignment_percentage")
+        proj_pct = p.get("projected_alignment_percentage")
+        curr_score = p.get("current_alignment_score") or p.get("current_alignment")
+        proj_score = (
+            p.get("projected_alignment_score")
+            or p.get("new_alignment")
+            or p.get("projected_improvement")
+        )
+        if isinstance(curr_pct, (int, float)) and isinstance(proj_pct, (int, float)):
+            delta = proj_pct - curr_pct
+            delta_str = f"{'+' if delta >= 0 else ''}{delta:g}%"
+            lines.append(
+                f"Estimated alignment with {role_display}: "
+                f"{curr_pct:g}% → {proj_pct:g}% ({delta_str})"
+            )
+        elif isinstance(curr_score, (int, float)) and isinstance(proj_score, (int, float)):
+            delta = proj_score - curr_score
             delta_str = f"{'+' if delta >= 0 else ''}{delta:.0%}"
-            lines.append(f"Curriculum alignment with {role_display}: {curr:.0%} → {new:.0%} ({delta_str})")
+            lines.append(
+                f"Estimated alignment with {role_display}: "
+                f"{curr_score:.0%} → {proj_score:.0%} ({delta_str})"
+            )
         else:
             msg = p.get("message") or ""
             if msg and "ready" not in msg.lower():
@@ -1189,6 +1260,15 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
                     f"Could not compute alignment improvement for {role_display}. "
                     "Make sure the planned courses are identified (resolved course codes) and try again."
                 )
+        newly = p.get("newly_covered_skills") or []
+        if newly:
+            lines.append(f"Newly covered skills ({len(newly)}):")
+            for sk in newly[:5]:
+                sname = sk.get("name", sk.get("skill_id", "?")) if isinstance(sk, dict) else str(sk)
+                lines.append(f"  • {sname}")
+        unresolved = p.get("unresolved_planned_names") or []
+        if unresolved:
+            lines.append(f"Note: Could not identify: {', '.join(str(n) for n in unresolved[:5])}.")
 
     elif intent == "get_focus_courses_for_target":
         role_name = p.get("role_name", "")
@@ -1200,14 +1280,30 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
             target = _fmt_track_label(track_id)
         else:
             target = "your target"
+        personalized = p.get("personalized_focus", False)
+        completed_excluded = p.get("completed_courses_excluded", 0)
         courses = p.get("focus_courses") or p.get("recommended_courses") or []
+        _FOCUS_CAP = 8
         if courses:
-            lines.append(f"Courses to focus on for {target}:")
-            for c in courses[:15]:
+            if personalized and completed_excluded:
+                lines.append(
+                    f"Based on what you haven't completed yet, key courses for {target}:"
+                )
+            else:
+                lines.append(f"Key courses to focus on for {target}:")
+            for c in courses[:_FOCUS_CAP]:
                 label = _safe_code_name(c, "course_code", "name") if isinstance(c, dict) else str(c)
                 lines.append(f"  • {label}")
+            if len(courses) > _FOCUS_CAP:
+                lines.append(f"  … and {len(courses) - _FOCUS_CAP} more.")
         else:
-            lines.append(f"No focus courses found for {target}.")
+            if personalized and completed_excluded:
+                lines.append(
+                    f"No remaining focus courses found for {target} — "
+                    "you may have already covered the key areas."
+                )
+            else:
+                lines.append(f"No focus courses found for {target}.")
 
     elif intent == "get_track_overview":
         track_id = p.get("track_id", "")

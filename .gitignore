@@ -11,5 +11,6 @@ env/
 .ruff_cache/
 *.sqlite3
 *.db
+!gateway/session_store/pathfinder_sessions.db
 engines/rag/chroma_db/
 engines/rag/chunks.pkl

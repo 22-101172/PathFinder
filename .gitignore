@@ -14,3 +14,6 @@ env/
 !gateway/session_store/pathfinder_sessions.db
 engines/rag/chroma_db/
 engines/rag/chunks.pkl
+
+.env
+main.py.backup

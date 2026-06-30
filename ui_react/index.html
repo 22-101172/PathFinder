@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PathFinder · EUI Academic Advisor</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ── Configure the backend URL here ───────────────────────────────────── -->
+<script>
+  // Change this to wherever your PathFinder FastAPI backend is running.
+  // SAE endpoints are mounted into the same backend at /sae/* (see main.py).
+  window.__PF_API_BASE__ = "http://localhost:8000";
+</script>
+
+<!-- ── React / ReactDOM / Babel (bundled locally — no CDN dependency) ──── -->
+<script src="vendor/react.development.js"></script>
+<script src="vendor/react-dom.development.js"></script>
+<script src="vendor/babel.min.js"></script>
+
+<!-- ── App scripts (JSX, transformed in-browser by Babel) ──────────────── -->
+<script type="text/babel" src="js/components.js"></script>
+<script type="text/babel" src="js/api.js"></script>
+<script type="text/babel" src="js/data_flows.js"></script>
+<script type="text/babel" src="js/sae_pages.js"></script>
+<script type="text/babel" src="js/main_app.js"></script>
+
+</body>
+</html>

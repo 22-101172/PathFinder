@@ -41,6 +41,7 @@ from adapters.kg_adapter import KGAdapter
 from adapters.rag_adapter import RAGAdapter
 from adapters.ale_adapter import ALEAdapter
 from adapters.sae_adapter import SAEAdapter
+from gateway.sae_rules_bridge import build_sae_rules
 
 logging.basicConfig(
     level=logging.INFO,
@@ -413,20 +414,23 @@ async def sae_health():
 @app.get("/sae/student/{student_id}")
 async def sae_student_analysis(student_id: str):
     _require_sae()
-    result = _sae.get_student_analysis(student_id)
+    sae_rules = build_sae_rules(_rule_bundles)
+    result = _sae.get_student_analysis(student_id, rules=sae_rules)
     return _sae_or_502(result, not_found_detail=f"Student {student_id!r} not found")
 
 
 @app.get("/sae/advisor/overview")
 async def sae_advisor_overview(advisor_id: str):
     _require_sae()
-    return _sae_or_502(_sae.get_advisor_overview(advisor_id))
+    sae_rules = build_sae_rules(_rule_bundles)
+    return _sae_or_502(_sae.get_advisor_overview(advisor_id, rules=sae_rules))
 
 
 @app.get("/sae/student/{student_id}/analysis")
 async def sae_advisor_student_analysis(student_id: str):
     _require_sae()
-    result = _sae.get_advisor_analysis(student_id)
+    sae_rules = build_sae_rules(_rule_bundles)
+    result = _sae.get_advisor_analysis(student_id, rules=sae_rules)
     return _sae_or_502(result, not_found_detail=f"Student {student_id!r} not found")
 
 
@@ -439,4 +443,5 @@ async def sae_course_risk(level: Optional[str] = None):
 @app.post("/sae/student/{student_id}/simulate")
 async def sae_simulate_gpa(student_id: str, body: dict):
     _require_sae()
-    return _sae_or_502(_sae.simulate_gpa(student_id, body.get("grades", {})))
+    sae_rules = build_sae_rules(_rule_bundles)
+    return _sae_or_502(_sae.simulate_gpa(student_id, body.get("grades", {}), rules=sae_rules))

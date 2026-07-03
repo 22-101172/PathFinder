@@ -1,0 +1,411 @@
+{
+  "program": "Computing and Information Sciences",
+  "version": "2026",
+  "graduation_requirements": [
+    "C-CS111", "C-CS112", "C-CS213", "C-CS214", "C-CS215",
+    "C-CS218", "C-CS219", "C-CS316", "C-CS341", "C-CS351", "C-CS352",
+    "C-MA111", "C-MA112", "C-MA213", "C-ST211",
+    "C-PH111", "C-PH112",
+    "C-DE211",
+    "C-GP411", "C-GP411A", "C-GP411B",
+    "HUM111", "HUM221", "HUM125"
+  ],
+  "courses": {
+    "C-MA110": {
+      "name": "Pre-calculus",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": false
+    },
+    "C-MA111": {
+      "name": "Calculus I",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": true
+    },
+    "C-MA112": {
+      "name": "Calculus II",
+      "credits": 3,
+      "prerequisites": ["C-MA111"],
+      "is_graduation_requirement": true
+    },
+    "C-MA213": {
+      "name": "Linear Algebra",
+      "credits": 3,
+      "prerequisites": ["C-MA112"],
+      "is_graduation_requirement": true
+    },
+    "C-MA321": {
+      "name": "Numerical Methods",
+      "credits": 3,
+      "prerequisites": ["C-MA213", "C-CS112"],
+      "is_graduation_requirement": false
+    },
+    "C-MA425": {
+      "name": "Advanced Mathematics",
+      "credits": 3,
+      "prerequisites": ["C-MA321"],
+      "is_graduation_requirement": false
+    },
+    "C-PH111": {
+      "name": "Physics I — Mechanics",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": true
+    },
+    "C-PH112": {
+      "name": "Physics II — Electricity & Magnetism",
+      "credits": 3,
+      "prerequisites": ["C-PH111"],
+      "is_graduation_requirement": true
+    },
+    "C-PH113": {
+      "name": "Physics III — Modern Physics",
+      "credits": 3,
+      "prerequisites": ["C-PH112"],
+      "is_graduation_requirement": false
+    },
+    "C-ST211": {
+      "name": "Probability & Statistics",
+      "credits": 3,
+      "prerequisites": ["C-MA112"],
+      "is_graduation_requirement": true
+    },
+    "C-CS111": {
+      "name": "Introduction to Computer Science",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": true
+    },
+    "C-CS112": {
+      "name": "Programming Fundamentals",
+      "credits": 3,
+      "prerequisites": ["C-CS111"],
+      "is_graduation_requirement": true
+    },
+    "C-CS213": {
+      "name": "Discrete Structures",
+      "credits": 3,
+      "prerequisites": ["C-CS111", "C-MA111"],
+      "is_graduation_requirement": true
+    },
+    "C-CS214": {
+      "name": "Object-Oriented Programming",
+      "credits": 3,
+      "prerequisites": ["C-CS112"],
+      "is_graduation_requirement": true
+    },
+    "C-CS215": {
+      "name": "Data Structures & Algorithms",
+      "credits": 3,
+      "prerequisites": ["C-CS214", "C-MA213"],
+      "is_graduation_requirement": true
+    },
+    "C-CS218": {
+      "name": "Computer Organization & Architecture",
+      "credits": 3,
+      "prerequisites": ["C-DE211", "C-CS112"],
+      "is_graduation_requirement": true
+    },
+    "C-CS219": {
+      "name": "Theory of Computation",
+      "credits": 3,
+      "prerequisites": ["C-CS213"],
+      "is_graduation_requirement": true
+    },
+    "C-CS316": {
+      "name": "Operating Systems",
+      "credits": 3,
+      "prerequisites": ["C-CS215", "C-CS218"],
+      "is_graduation_requirement": true
+    },
+    "C-CS341": {
+      "name": "Design & Analysis of Algorithms",
+      "credits": 3,
+      "prerequisites": ["C-CS215", "C-MA213"],
+      "is_graduation_requirement": true
+    },
+    "C-CS351": {
+      "name": "Computer Networks",
+      "credits": 3,
+      "prerequisites": ["C-CS218"],
+      "is_graduation_requirement": true
+    },
+    "C-CS352": {
+      "name": "Database Systems",
+      "credits": 3,
+      "prerequisites": ["C-CS215"],
+      "is_graduation_requirement": true
+    },
+    "C-CS417": {
+      "name": "Advanced Algorithms",
+      "credits": 3,
+      "prerequisites": ["C-CS341"],
+      "is_graduation_requirement": false
+    },
+    "C-CS426": {
+      "name": "Computer & Network Security",
+      "credits": 3,
+      "prerequisites": ["C-CS316", "C-CS351"],
+      "is_graduation_requirement": false
+    },
+    "C-CS435": {
+      "name": "Parallel & Distributed Computing",
+      "credits": 3,
+      "prerequisites": ["C-CS316"],
+      "is_graduation_requirement": false
+    },
+    "C-CS442": {
+      "name": "Computer Graphics",
+      "credits": 3,
+      "prerequisites": ["C-CS341", "C-MA213"],
+      "is_graduation_requirement": false
+    },
+    "C-CS443": {
+      "name": "Computer Vision",
+      "credits": 3,
+      "prerequisites": ["C-CS442", "C-AI321"],
+      "is_graduation_requirement": false
+    },
+    "C-CS495": {
+      "name": "Research Project I",
+      "credits": 3,
+      "prerequisites": ["C-CS341", "C-CS316", "C-CS351"],
+      "is_graduation_requirement": false
+    },
+    "C-CS496": {
+      "name": "Research Project II",
+      "credits": 3,
+      "prerequisites": ["C-CS495"],
+      "is_graduation_requirement": false
+    },
+    "C-DE211": {
+      "name": "Digital Logic Design",
+      "credits": 3,
+      "prerequisites": ["C-CS111", "C-PH111"],
+      "is_graduation_requirement": true
+    },
+    "C-DE312": {
+      "name": "Advanced Digital Design",
+      "credits": 3,
+      "prerequisites": ["C-DE211", "C-CS218"],
+      "is_graduation_requirement": false
+    },
+    "C-DE324": {
+      "name": "VLSI Design",
+      "credits": 3,
+      "prerequisites": ["C-DE312"],
+      "is_graduation_requirement": false
+    },
+    "C-DE413": {
+      "name": "Digital System Design",
+      "credits": 3,
+      "prerequisites": ["C-DE324"],
+      "is_graduation_requirement": false
+    },
+    "C-DE414": {
+      "name": "Embedded Systems",
+      "credits": 3,
+      "prerequisites": ["C-DE312", "C-CS218"],
+      "is_graduation_requirement": false
+    },
+    "C-DE416": {
+      "name": "Digital Signal Processing",
+      "credits": 3,
+      "prerequisites": ["C-DE312", "C-MA321"],
+      "is_graduation_requirement": false
+    },
+    "C-DE421": {
+      "name": "Microprocessor Systems",
+      "credits": 3,
+      "prerequisites": ["C-DE312", "C-CS218"],
+      "is_graduation_requirement": false
+    },
+    "C-DE422": {
+      "name": "Advanced Embedded Systems",
+      "credits": 3,
+      "prerequisites": ["C-DE414", "C-DE421"],
+      "is_graduation_requirement": false
+    },
+    "C-DE423": {
+      "name": "IoT & Smart Systems",
+      "credits": 3,
+      "prerequisites": ["C-DE422"],
+      "is_graduation_requirement": false
+    },
+    "C-DE426": {
+      "name": "Hardware Security",
+      "credits": 3,
+      "prerequisites": ["C-DE413", "C-CS426"],
+      "is_graduation_requirement": false
+    },
+    "C-AI311": {
+      "name": "Introduction to Artificial Intelligence",
+      "credits": 3,
+      "prerequisites": ["C-CS215", "C-MA213"],
+      "is_graduation_requirement": false
+    },
+    "C-AI321": {
+      "name": "Machine Learning",
+      "credits": 3,
+      "prerequisites": ["C-CS215", "C-MA213", "C-ST211"],
+      "is_graduation_requirement": false
+    },
+    "C-AI412": {
+      "name": "Deep Learning",
+      "credits": 3,
+      "prerequisites": ["C-AI321", "C-CS341"],
+      "is_graduation_requirement": false
+    },
+    "C-AI415": {
+      "name": "Natural Language Processing",
+      "credits": 3,
+      "prerequisites": ["C-AI412"],
+      "is_graduation_requirement": false
+    },
+    "C-AI422": {
+      "name": "Reinforcement Learning",
+      "credits": 3,
+      "prerequisites": ["C-AI412", "C-CS341"],
+      "is_graduation_requirement": false
+    },
+    "C-AI423": {
+      "name": "AI Ethics & Society",
+      "credits": 3,
+      "prerequisites": ["C-AI311"],
+      "is_graduation_requirement": false
+    },
+    "C-AI424": {
+      "name": "Advanced AI Topics",
+      "credits": 3,
+      "prerequisites": ["C-AI412", "C-AI422"],
+      "is_graduation_requirement": false
+    },
+    "C-SW311": {
+      "name": "Software Engineering",
+      "credits": 3,
+      "prerequisites": ["C-CS215", "C-CS214"],
+      "is_graduation_requirement": false
+    },
+    "C-SW312": {
+      "name": "Software Architecture & Design",
+      "credits": 3,
+      "prerequisites": ["C-SW311"],
+      "is_graduation_requirement": false
+    },
+    "C-SW413": {
+      "name": "Software Testing & Quality",
+      "credits": 3,
+      "prerequisites": ["C-SW312"],
+      "is_graduation_requirement": false
+    },
+    "C-SW421": {
+      "name": "Software Project Management",
+      "credits": 3,
+      "prerequisites": ["C-SW311"],
+      "is_graduation_requirement": false
+    },
+    "C-SW422": {
+      "name": "Advanced Software Development",
+      "credits": 3,
+      "prerequisites": ["C-SW413", "C-SW421"],
+      "is_graduation_requirement": false
+    },
+    "C-SW423": {
+      "name": "Software Maintenance & Evolution",
+      "credits": 3,
+      "prerequisites": ["C-SW422"],
+      "is_graduation_requirement": false
+    },
+    "C-SW425": {
+      "name": "Cloud Computing",
+      "credits": 3,
+      "prerequisites": ["C-SW312", "C-CS351"],
+      "is_graduation_requirement": false
+    },
+    "C-GP411": {
+      "name": "Graduation Project",
+      "credits": 3,
+      "prerequisites": ["C-CS341", "C-CS316", "C-CS351", "C-CS352"],
+      "is_graduation_requirement": true
+    },
+    "C-GP411A": {
+      "name": "Graduation Project A",
+      "credits": 3,
+      "prerequisites": ["C-GP411"],
+      "is_graduation_requirement": true
+    },
+    "C-GP411B": {
+      "name": "Graduation Project B",
+      "credits": 3,
+      "prerequisites": ["C-GP411A"],
+      "is_graduation_requirement": true
+    },
+    "C-TR304": {
+      "name": "Technical Report Writing",
+      "credits": 3,
+      "prerequisites": ["HUM125"],
+      "is_graduation_requirement": false
+    },
+    "HUM011": {
+      "name": "Language Skills",
+      "credits": 1,
+      "prerequisites": [],
+      "is_graduation_requirement": false
+    },
+    "HUM111": {
+      "name": "English I",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": true
+    },
+    "HUM125": {
+      "name": "Technical Writing",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": true
+    },
+    "HUM126": {
+      "name": "Arabic Language",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": false
+    },
+    "HUM129": {
+      "name": "Islamic Studies & Ethics",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": false
+    },
+    "HUM131": {
+      "name": "Humanities",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": false
+    },
+    "HUM221": {
+      "name": "English II",
+      "credits": 3,
+      "prerequisites": ["HUM111"],
+      "is_graduation_requirement": true
+    },
+    "HUM224": {
+      "name": "Humanities II",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": false
+    },
+    "HUM228": {
+      "name": "Media & Communication",
+      "credits": 3,
+      "prerequisites": [],
+      "is_graduation_requirement": false
+    },
+    "HUM412": {
+      "name": "Advanced Humanities",
+      "credits": 3,
+      "prerequisites": ["HUM221"],
+      "is_graduation_requirement": false
+    }
+  }
+}

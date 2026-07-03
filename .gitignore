@@ -14,3 +14,9 @@ env/
 !gateway/session_store/pathfinder_sessions.db
 engines/rag/chroma_db/
 engines/rag/chunks.pkl
+
+# SAE runtime artifacts
+engines/sae/cache/
+
+**/__pycache__/
+main.py.backup

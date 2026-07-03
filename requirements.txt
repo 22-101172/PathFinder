@@ -4,9 +4,12 @@ pydantic
 python-dotenv
 httpx
 pandas
+numpy
 openpyxl
 streamlit
+plotly
 requests
+APScheduler
 neo4j
 langchain
 langchain-community

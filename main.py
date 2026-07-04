@@ -40,8 +40,6 @@ from gateway.turn_memory_builder import build_turn_memory
 from adapters.kg_adapter import KGAdapter
 from adapters.rag_adapter import RAGAdapter
 from adapters.ale_adapter import ALEAdapter
-from adapters.sae_adapter import SAEAdapter
-from gateway.sae_rules_bridge import build_sae_rules
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,7 +52,6 @@ _rag: Optional[RAGAdapter] = None
 _ale: Optional[ALEAdapter] = None
 _orchestrator: Optional[Orchestrator] = None
 _composer: Optional[ResponseComposer] = None
-_sae: Optional[SAEAdapter] = None
 _rule_bundles: dict = {}
 _resolver: Optional[Callable] = None
 
@@ -94,7 +91,7 @@ def _is_dev_mode() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _kg, _rag, _ale, _sae, _orchestrator, _composer, _rule_bundles, _resolver
+    global _kg, _rag, _ale, _orchestrator, _composer, _rule_bundles, _resolver
 
     logger.info("PathFinder: starting up...")
 
@@ -104,14 +101,8 @@ async def lifespan(app: FastAPI):
     _kg = KGAdapter()
     _rag = RAGAdapter()
     _ale = ALEAdapter()
-    _sae = SAEAdapter()
     _orchestrator = Orchestrator(_kg, _rag, _ale)
     _composer = ResponseComposer()
-
-    if _sae.health_check():
-        logger.info("PathFinder: SAE connected at %s", os.getenv("SAE_BASE_URL", "http://localhost:8502"))
-    else:
-        logger.warning("PathFinder: SAE not reachable — analytics dashboard will show 'service unavailable' until it is started.")
 
     logger.info("PathFinder: loading rule bundles from RAG...")
     _rule_bundles = _rag.get_rule_bundles()
@@ -372,70 +363,3 @@ async def dev_delete_all_sessions():
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "PathFinder"}
-
-
-# ── SAE — Student Analysis Engine proxy endpoints ────────────────────────────
-# SAE is a separate service (see adapters/sae_adapter.py). These routes proxy
-# requests to it so the frontend only ever talks to this one backend origin.
-
-def _require_sae():
-    if _sae is None:
-        raise HTTPException(status_code=503, detail="SAE not initialized")
-
-
-def _is_not_found(result: dict) -> bool:
-    if not isinstance(result, dict) or "error" not in result:
-        return False
-    if result.get("status_code") == 404:
-        return True
-    return "not found" in str(result.get("error", "")).lower()
-
-
-def _sae_or_502(result: dict, not_found_detail: Optional[str] = None) -> dict:
-    if isinstance(result, dict) and "error" in result:
-        if not_found_detail and _is_not_found(result):
-            raise HTTPException(status_code=404, detail=not_found_detail)
-        raise HTTPException(status_code=502, detail=result["error"])
-    return result
-
-
-@app.get("/sae/health")
-async def sae_health():
-    _require_sae()
-    return {"status": "ok" if _sae.health_check() else "unavailable"}
-
-
-@app.get("/sae/student/{student_id}")
-async def sae_student_analysis(student_id: str):
-    _require_sae()
-    sae_rules = build_sae_rules(_rule_bundles)
-    result = _sae.get_student_analysis(student_id, rules=sae_rules)
-    return _sae_or_502(result, not_found_detail=f"Student {student_id!r} not found")
-
-
-@app.get("/sae/advisor/overview")
-async def sae_advisor_overview(advisor_id: str):
-    _require_sae()
-    sae_rules = build_sae_rules(_rule_bundles)
-    return _sae_or_502(_sae.get_advisor_overview(advisor_id, rules=sae_rules))
-
-
-@app.get("/sae/student/{student_id}/analysis")
-async def sae_advisor_student_analysis(student_id: str):
-    _require_sae()
-    sae_rules = build_sae_rules(_rule_bundles)
-    result = _sae.get_advisor_analysis(student_id, rules=sae_rules)
-    return _sae_or_502(result, not_found_detail=f"Student {student_id!r} not found")
-
-
-@app.get("/sae/courses/risk")
-async def sae_course_risk(level: Optional[str] = None):
-    _require_sae()
-    return _sae_or_502(_sae.get_course_risk(level))
-
-
-@app.post("/sae/student/{student_id}/simulate")
-async def sae_simulate_gpa(student_id: str, body: dict):
-    _require_sae()
-    sae_rules = build_sae_rules(_rule_bundles)
-    return _sae_or_502(_sae.simulate_gpa(student_id, body.get("grades", {}), rules=sae_rules))

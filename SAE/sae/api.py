@@ -88,9 +88,31 @@ async def student_analysis(
     track performance, CGPA trend history, and risk flags.
     """
     try:
-        return get_advisor_analysis(student_id)
+        analysis = get_advisor_analysis(student_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+    # LLM advising session guide — llm_session_guide is null whenever the
+    # Groq key is missing, the call fails, or the response can't be parsed.
+    guide = None
+    if "error" not in analysis:
+        try:
+            from sae.llm_advisor import generate_advisor_session_guide
+
+            profile = analysis.get("profile") or {}
+            categories = (analysis.get("category_performance") or {}).get("categories") or None
+            guide = generate_advisor_session_guide(
+                profile=profile,
+                key_points=analysis.get("key_points") or [],
+                cgpa=analysis.get("official_cgpa"),
+                credits=int(profile.get("official_credits_passed") or 0),
+                cohort_stats=analysis.get("cohort_stats") or {},
+                category_performance=categories,
+            )
+        except Exception:
+            guide = None
+    analysis["llm_session_guide"] = guide
+    return analysis
 
 
 @router.get("/student/{student_id}/alerts")

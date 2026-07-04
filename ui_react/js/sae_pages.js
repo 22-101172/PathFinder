@@ -1,11 +1,53 @@
 /* ============================================================
    PathFinder — Student Analysis Engine pages
    window: StudentAnalysisPage, AdvisorConsole
-   Wired to the real backend via PF_API (no mock data).
+   Rebuilt against the real SAE payloads:
+     GET /sae/student/{id}            → student analytics profile
+     GET /sae/student/{id}/analysis   → advisor analysis (key_points…)
+     GET /sae/advisor/overview        → flat array of student summaries
    ============================================================ */
-const { useState: useAS, useRef: useAR, useEffect: useAE } = React;
+const { useState: useAS, useRef: useAR, useEffect: useAE, useMemo: useAM } = React;
 
 let _gpaUid = 0;
+
+/* ---------------- helpers ---------------- */
+
+/* Some backend strings arrive UTF-8-bytes-as-latin1 ("â€”", "ðŸ”´").
+   Re-decode when high-latin lead bytes are present; fall back untouched. */
+function fixText(s){
+  if (typeof s !== "string" || !/[\u00c2-\u00f4][\u0080-\u00bf]/.test(s)) return s;
+  try { return decodeURIComponent(escape(s)); } catch (e) { return s; }
+}
+
+const RISK_META = {
+  high:     { label: "At Risk",         cls: "atrisk" },
+  moderate: { label: "Needs Attention", cls: "warn2"  },
+  low:      { label: "On Track",        cls: "ontrack"},
+};
+
+function cohortStandingLabel(pct, level){
+  if (pct === null || pct === undefined) return "Not enough cohort data";
+  const isTop = pct >= 50;
+  const display = Math.round(isTop ? (100 - pct) : pct);
+  return `${isTop ? "Top" : "Bottom"} ${display}% of ${level || "student"}s`;
+}
+
+/* Grade-point → bar color: A range green, B range blue, C range orange, below red */
+function gradeBarColor(gp){
+  if (gp >= 3.4) return "var(--success)";
+  if (gp >= 2.8) return "var(--info)";
+  if (gp >= 2.0) return "var(--warning)";
+  return "var(--danger)";
+}
+
+/* Credits progress: color by how far along vs expected pace */
+function creditsBarColor(earned, expected){
+  if (!expected) return "var(--teal)";
+  const ratio = earned / expected;
+  if (ratio >= 0.95) return "var(--success)";
+  if (ratio >= 0.8)  return "var(--warning)";
+  return "var(--danger)";
+}
 
 /* ---------------- GPA-over-time line chart (theme-aware SVG) ---------------- */
 function GpaChart({ history, min, minLabel }){
@@ -59,52 +101,19 @@ function GpaChart({ history, min, minLabel }){
   );
 }
 
-/* ---------------- mapping helpers: raw SAE JSON -> UI shape ---------------- */
-const RISK_META = {
-  high:     { label: "At Risk",         cls: "atrisk" },
-  moderate: { label: "Needs Attention", cls: "warn2"  },
-  low:      { label: "On Track",        cls: "ontrack"},
-};
-
-function cohortStandingLabel(pct, level){
-  if (pct === null || pct === undefined) return "Not enough cohort data";
-  const isTop = pct >= 50;
-  const display = isTop ? (100 - pct) : pct;
-  return `${isTop ? "Top" : "Bottom"} ${display}% of ${level || "students"}s`;
-}
-
-function letterFromGp(gp){
-  if (gp === null || gp === undefined) return "—";
-  if (gp >= 4.0) return "A+"; if (gp >= 3.7) return "A"; if (gp >= 3.4) return "A-";
-  if (gp >= 3.2) return "B+"; if (gp >= 3.0) return "B"; if (gp >= 2.8) return "B-";
-  if (gp >= 2.6) return "C+"; if (gp >= 2.4) return "C"; if (gp >= 2.2) return "C-";
-  if (gp >= 2.0) return "D+"; if (gp >= 1.5) return "D"; if (gp >= 1.0) return "D-";
-  return "F";
-}
-
-/** Maps a /sae/student/{id} response into the shape StudentDashboard expects. */
-function mapAnalysisToDashboard(data){
+/* ---------------- mapping: /sae/student/{id} JSON → banner/metric shape ---------------- */
+function mapStudentToDashboard(data){
   const profile = data.profile || {};
-  const name = profile.name || data.student_id || "—";
+  const name = profile.name || profile.id || "—";
   const initials = name.split(" ").map(w=>w[0]).filter(Boolean).slice(0,2).join("").toUpperCase() || "?";
   const riskMeta = RISK_META[data.risk_level] || RISK_META.low;
-  const history = (data.cgpa_trend_history || []).map(t => ({ term: t.semester_label, gpa: t.cgpa_at_end_of_semester }));
+  // Real field names: semester_label + cgpa_at_end_of_semester
+  const history = (data.cgpa_trend_history || [])
+    .map(t => ({ term: t.semester_label, gpa: t.cgpa_at_end_of_semester }))
+    .filter(t => t.gpa !== null && t.gpa !== undefined);
   const cgpa = data.official_cgpa;
-
   const cohortStats = data.cohort_stats || {};
-  const metrics = [];
-  metrics.push({
-    label: "Cumulative GPA",
-    value: cgpa != null ? cgpa.toFixed(2) : "N/A",
-    note: cohortStats.cohort_avg_cgpa != null ? `cohort avg ${cohortStats.cohort_avg_cgpa.toFixed(2)}` : "",
-    good: cohortStats.cohort_avg_cgpa == null ? true : (cgpa >= cohortStats.cohort_avg_cgpa),
-  });
-  metrics.push({
-    label: "Passed Credits",
-    value: String(Math.round(data.credits_completed || 0)),
-    note: data.expected_credits != null ? `expected ${Math.round(data.expected_credits)}` : "",
-    good: data.expected_credits == null ? true : (data.credits_completed >= data.expected_credits),
-  });
+  const rules = data.rules || {};
 
   return {
     name, initials,
@@ -113,13 +122,15 @@ function mapAnalysisToDashboard(data){
     id: profile.id || "",
     status: riskMeta.label,
     statusCls: riskMeta.cls,
-    gpa: cgpa != null ? cgpa.toFixed(2) : "—",
-    creditsEarned: Math.round(data.credits_completed || 0),
-    creditsTotal: 133,
+    gpa: cgpa !== null && cgpa !== undefined ? cgpa.toFixed(2) : "—",
+    gpaTrend: data.gpa_trend || "",                    // "improving" | "declining" | "stable"
+    creditsEarned: Math.round(data.credits_completed || profile.official_credits_passed || 0),
+    creditsTotal: rules.total_credits_required || 133,
+    creditsExpected: data.expected_credits,
     cohortStanding: cohortStandingLabel(cohortStats.student_percentile, profile.level),
-    minLine: 2.0,
-    gpaHistory: history.length ? history : [{ term: "—", gpa: 0 }],
-    metrics,
+    cohortAvg: cohortStats.cohort_avg_cgpa,
+    minLine: rules.minimum_cgpa || 2.0,
+    gpaHistory: history,
     raw: data,
   };
 }
@@ -138,12 +149,30 @@ function StubBtn({ icon, label, primary, sm }){
   );
 }
 
-/* ---------------- profile banner + metrics + chart (shared) ---------------- */
+/* ---------------- risk flag banners (critical=red, high=orange) ---------------- */
+function RiskFlagBanners({ flags }){
+  if (!flags || !flags.length) return null;
+  return (
+    <div className="pf-flag-stack">
+      {flags.map((f,i)=>(
+        <div key={i} className={"pf-flag lg "+(f.severity === "critical" ? "critical" : "high")}>
+          <span className="pf-flag-ic"><Icon name="target" /></span>
+          <span>{fixText(f.message)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- banner + 3 metric cards + CGPA chart (shared) ---------------- */
 function StudentDashboard({ s, L, actions }){
   const [cw, setCw] = useAS(0);
-  useAE(()=>{ const t=setTimeout(()=>setCw(Math.round(s.creditsEarned/s.creditsTotal*100)),120); return ()=>clearTimeout(t); },[s]);
+  useAE(()=>{ const t=setTimeout(()=>setCw(Math.min(100, Math.round(s.creditsEarned/s.creditsTotal*100))),120); return ()=>clearTimeout(t); },[s]);
   const h = s.gpaHistory;
-  const rising = h.length>1 && h[h.length-1].gpa >= h[h.length-2].gpa;
+  // Trend arrow from the real gpa_trend field, falling back to the history slope
+  const trend = s.gpaTrend || (h.length>1 ? (h[h.length-1].gpa >= h[h.length-2].gpa ? "improving" : "declining") : "");
+  const arrow = trend === "improving" ? <span className="up">▲</span>
+              : trend === "declining" ? <span className="dn">▼</span> : null;
 
   return (
     <>
@@ -166,15 +195,21 @@ function StudentDashboard({ s, L, actions }){
         </div>
       )}
 
+      <RiskFlagBanners flags={(s.raw || {}).risk_flags} />
+
       <div className="metric-row">
         <div className="metric accentv">
           <div className="mk">{L.cumGpa}</div>
-          <div className="mv">{s.gpa}{h.length>1 && <span className={rising?"up":"dn"}>{rising?"▲":"▼"}</span>}</div>
+          <div className="mv">{s.gpa}{arrow}</div>
+          {s.cohortAvg !== null && s.cohortAvg !== undefined &&
+            <div className="pf-metric-note">cohort avg {s.cohortAvg.toFixed(2)}</div>}
         </div>
         <div className="metric">
           <div className="mk">{L.creditsProgress}</div>
           <div className="credits-v">{s.creditsEarned} / {s.creditsTotal} credits</div>
-          <div className="credits-bar"><i style={{width:cw+"%"}} /></div>
+          <div className="credits-bar"><i style={{width:cw+"%", background:creditsBarColor(s.creditsEarned, s.creditsExpected)}} /></div>
+          {s.creditsExpected !== null && s.creditsExpected !== undefined &&
+            <div className="pf-metric-note">expected by now: {Math.round(s.creditsExpected)}</div>}
         </div>
         <div className="metric">
           <div className="mk">{L.cohortStanding}</div>
@@ -182,138 +217,150 @@ function StudentDashboard({ s, L, actions }){
         </div>
       </div>
 
-      <div className="analysis-grid">
-        <div className="an-card">
-          <h3 className="an-title"><span className="ti-ic"><Icon name="trend" /></span>{L.gpaOverTime}</h3>
-          {h.length >= 2
-            ? <GpaChart history={s.gpaHistory} min={s.minLine} minLabel={L.minLine} />
-            : <div className="pf-empty-note">Not enough graded semesters yet to chart a trend.</div>}
-        </div>
-        <div className="an-card standing-card">
-          <h3 className="an-title"><span className="ti-ic"><Icon name="chart" /></span>{L.yourStanding}</h3>
-          <div className="std-lbl">{L.yourMetrics}</div>
-          {s.metrics.map((m,i)=>(
-            <div className="std-row" key={i}>
-              <div className="sr-l">
-                <div className="sr-name">{m.label}</div>
-                <div className="sr-sub">{m.note}</div>
-              </div>
-              <div className="sr-v">{m.value}</div>
-              <span className={"sr-dot "+(m.good?"ok":"bad")} />
-            </div>
-          ))}
-        </div>
+      <div className="an-card">
+        <h3 className="an-title"><span className="ti-ic"><Icon name="trend" /></span>{L.gpaOverTime}</h3>
+        {h.length >= 2
+          ? <GpaChart history={h} min={s.minLine} minLabel={L.minLine} />
+          : <div className="pf-empty-note">Not enough graded semesters yet to chart a trend.</div>}
       </div>
     </>
   );
 }
 
-/* ---------------- Deeper analysis: real SAE data cards ---------------- */
-function DeeperAnalysis({ data }){
-  if (!data) return null;
-  const cat = data.category_performance || {};
-  const catKeys = Object.keys(cat);
-  const flags = data.risk_flags || [];
-  const suggestions = data.suggestions || [];
-  const anomalies = data.anomalies || {};
-  const bottleneck = data.prerequisite_bottleneck || {};
-  const blockers = bottleneck.blockers || [];
-  const sdi = data.semester_difficulty || {};
-  const grad = (data.trajectory || {}).graduation_projection;
-
-  const anomalyMsgs = [];
-  const anomalyFlags = anomalies.flags || [];
-  if (anomalyFlags.includes("silent_decline")) anomalyMsgs.push("CGPA trending down with no formal warning issued yet — act now before it becomes official.");
-  if (anomalyFlags.includes("repeated_course")) anomalyMsgs.push("Same course attempted 3 or more times.");
-  if (anomalyFlags.includes("undercredited_senior")) anomalyMsgs.push("Behind on credits expected for senior level.");
-
-  const hasAnything = flags.length || suggestions.length || catKeys.length || blockers.length || anomalyMsgs.length || sdi.flag_message || grad;
-  if (!hasAnything) return null;
-
+/* ---------------- Performance by Subject Area (horizontal SVG-free bars) ---------------- */
+function CategoryBars({ categoryPerformance }){
+  // Real shape: { categories: {name: {...}}, strongest_category, weakest_category }
+  const cats = (categoryPerformance || {}).categories || {};
+  const names = Object.keys(cats);
+  if (!names.length) return null;
   return (
-    <div style={{marginTop:18}}>
-      <h3 className="an-title" style={{marginBottom:14}}>Deeper Analysis</h3>
-      <div className="pf-card-grid">
-
-        {flags.length > 0 && (
-          <div className="an-card">
-            <h3 className="an-title"><span className="ti-ic"><Icon name="target" /></span>Risk Flags</h3>
-            {flags.map((f,i)=>(
-              <div key={i} className={"pf-flag "+(f.severity||"medium")}>
-                <span className="pf-flag-ic"><Icon name="target" /></span>
-                <span>{f.message}</span>
-              </div>
-            ))}
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="chart" /></span>Performance by Subject Area</h3>
+      {names.map(n=>{
+        const c = cats[n];
+        const gp = c.avg_grade_points || 0;
+        return (
+          <div className="pf-catbar" key={n}>
+            <div className="cb-top">
+              <span className="cb-name">{n}</span>
+              <span className="cb-meta">
+                {c.avg_letter_grade || "—"} · {Math.round((c.pass_rate||0)*100)}% pass · {c.courses_attempted} course{c.courses_attempted===1?"":"s"}
+              </span>
+            </div>
+            <div className="cb-track">
+              <i className="cb-fill" style={{width:Math.max(3,(gp/4)*100)+"%", background:gradeBarColor(gp)}} />
+            </div>
           </div>
-        )}
+        );
+      })}
+    </div>
+  );
+}
 
-        {anomalyMsgs.length > 0 && (
-          <div className="an-card">
-            <h3 className="an-title"><span className="ti-ic"><Icon name="sparkle" /></span>Anomaly Alerts</h3>
-            {anomalyMsgs.map((m,i)=>(
-              <div key={i} className="pf-flag high">
-                <span className="pf-flag-ic"><Icon name="target" /></span><span>{m}</span>
-              </div>
-            ))}
-          </div>
-        )}
+/* ---------------- Prerequisite bottlenecks ---------------- */
+function BottleneckCard({ bottleneck }){
+  const blockers = (bottleneck || {}).blockers || [];
+  if (!blockers.length) return null;
+  return (
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="route" /></span>Prerequisite Bottlenecks</h3>
+      {blockers.map((b,i)=>(
+        <div key={i} className={"pf-flag "+(b.severity === "high" ? "high" : "medium")}>
+          <span className="pf-flag-ic"><Icon name="route" /></span>
+          <span>
+            <b className="mono">{b.course_code}</b> is blocking {b.unlock_count} course{b.unlock_count===1?"":"s"} — recommended retake
+            {b.blocks_graduation_requirement ? " (graduation requirement)" : ""}
+          </span>
+        </div>
+      ))}
+      {bottleneck.total_courses_currently_blocked > 0 &&
+        <div className="pf-metric-note" style={{textAlign:"start"}}>
+          {bottleneck.total_courses_currently_blocked} course(s) in the catalogue are currently out of reach until these are cleared.
+        </div>}
+    </div>
+  );
+}
 
-        {catKeys.length > 0 && (
-          <div className="an-card">
-            <h3 className="an-title"><span className="ti-ic"><Icon name="chart" /></span>Performance by Subject Area</h3>
-            {catKeys.map(k=>{
-              const c = cat[k];
-              const letter = c.avg_letter_grade || letterFromGp(c.avg_grade_points);
-              return (
-                <div className="pf-kv-row" key={k}>
-                  <span className="k">{k}</span>
-                  <span className="v">{letter}{c.pass_rate != null ? ` · ${Math.round(c.pass_rate*100)}% pass` : ""}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
+/* ---------------- Anomaly alerts ---------------- */
+const ANOMALY_TEXT = {
+  silent_decline:       "CGPA trending down with no formal warning issued yet — act now before it becomes official.",
+  repeated_course:      "Same course attempted 3 or more times.",
+  undercredited_senior: "Behind on credits expected for senior level.",
+};
+function AnomalyCard({ anomalies }){
+  const a = anomalies || {};
+  if (!a.flagged || !(a.flags || []).length) return null;
+  const details = a.details || {};
+  const repeated = details.repeated_courses || {};
+  return (
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="sparkle" /></span>Anomaly Alerts</h3>
+      {a.flags.map((f,i)=>(
+        <div key={i} className="pf-flag high">
+          <span className="pf-flag-ic"><Icon name="target" /></span>
+          <span>
+            {ANOMALY_TEXT[f] || f}
+            {f === "repeated_course" && Object.keys(repeated).length > 0 &&
+              " (" + Object.keys(repeated).map(c=>`${c}: ${repeated[c]}×`).join(", ") + ")"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
-        {blockers.length > 0 && (
-          <div className="an-card">
-            <h3 className="an-title"><span className="ti-ic"><Icon name="route" /></span>Recommended Retakes</h3>
-            {blockers.map((b,i)=>(
-              <div className="pf-kv-row" key={i}>
-                <span className="k">{b.course_code}</span>
-                <span className="v">blocking {b.unlock_count} course{b.unlock_count===1?"":"s"}</span>
-              </div>
-            ))}
-          </div>
-        )}
+/* ---------------- Semester difficulty ---------------- */
+function SemesterLoadCard({ sdi }){
+  if (!sdi || !sdi.flag_message) return null;
+  return (
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="gear" /></span>Current Semester Load{sdi.semester_label ? ` · ${sdi.semester_label}` : ""}</h3>
+      <div className="pf-kv-row"><span className="k">Difficulty Index (SDI)</span><span className="v">{(sdi.sdi_score||0).toFixed(2)} / 3.00</span></div>
+      <div className="pf-kv-row"><span className="k">Courses this semester</span><span className="v">{sdi.course_count}</span></div>
+      <div style={{fontSize:12.5,color:"var(--text-dim)",marginTop:6}}>{fixText(sdi.flag_message)}</div>
+    </div>
+  );
+}
 
-        {sdi.flag_message && (
-          <div className="an-card">
-            <h3 className="an-title"><span className="ti-ic"><Icon name="gear" /></span>Current Semester Load</h3>
-            <div className="pf-kv-row"><span className="k">Difficulty Index</span><span className="v">{(sdi.sdi_score||0).toFixed(2)} / 3.00</span></div>
-            <div style={{fontSize:12.5,color:"var(--text-dim)",marginTop:6}}>{sdi.flag_message}</div>
-          </div>
-        )}
+/* ---------------- Graduation outlook (real field names) ---------------- */
+function GraduationCard({ trajectory }){
+  const grad = (trajectory || {}).graduation_projection;
+  if (!grad) return null;
+  return (
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="calendar" /></span>Graduation Outlook</h3>
+      <div className="pf-kv-row"><span className="k">At current pace</span><span className="v">{grad.estimated_graduation_semester || "—"}</span></div>
+      {grad.optimistic_semester && <div className="pf-kv-row"><span className="k">Optimistic</span><span className="v">{grad.optimistic_semester}</span></div>}
+      {grad.pessimistic_semester && <div className="pf-kv-row"><span className="k">Pessimistic</span><span className="v">{grad.pessimistic_semester}</span></div>}
+      {grad.avg_credits_per_semester !== null && grad.avg_credits_per_semester !== undefined &&
+        <div className="pf-kv-row"><span className="k">Avg credits / semester</span><span className="v">{grad.avg_credits_per_semester}</span></div>}
+    </div>
+  );
+}
 
-        {grad && (
-          <div className="an-card">
-            <h3 className="an-title"><span className="ti-ic"><Icon name="calendar" /></span>Graduation Outlook</h3>
-            <div className="pf-kv-row"><span className="k">At current pace</span><span className="v">{grad.estimated_graduation || "—"}</span></div>
-            {grad.optimistic && <div className="pf-kv-row"><span className="k">Optimistic</span><span className="v">{grad.optimistic}</span></div>}
-            {grad.pessimistic && <div className="pf-kv-row"><span className="k">Pessimistic</span><span className="v">{grad.pessimistic}</span></div>}
-          </div>
-        )}
+/* ---------------- Suggestions ---------------- */
+function SuggestionsCard({ suggestions, wide }){
+  if (!suggestions || !suggestions.length) return null;
+  return (
+    <div className="an-card" style={wide ? {gridColumn:"1 / -1"} : null}>
+      <h3 className="an-title"><span className="ti-ic"><Icon name="sparkle" /></span>What You Should Do</h3>
+      {suggestions.map((s,i)=>(
+        <div className="pf-suggestion" key={i}>
+          <span className="num">{i+1}</span><span>{fixText(s)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
-        {suggestions.length > 0 && (
-          <div className="an-card" style={{gridColumn: catKeys.length||blockers.length ? "auto" : "1 / -1"}}>
-            <h3 className="an-title"><span className="ti-ic"><Icon name="sparkle" /></span>What You Should Do</h3>
-            {suggestions.slice(0,4).map((s,i)=>(
-              <div className="pf-suggestion" key={i}>
-                <span className="num">{i+1}</span><span>{s}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+/* ---------------- LLM focus statement (rendered only when the API sends one) ---------------- */
+function FocusStatement({ data }){
+  const text = data.llm_focus_statement || data.focus_statement || data.plain_english_reason;
+  if (!text) return null;
+  return (
+    <div className="pf-focus">
+      <b>Focus for this semester</b>
+      {fixText(text)}
     </div>
   );
 }
@@ -346,11 +393,193 @@ function StudentAnalysisPage({ L, rtl, studentId }){
         {!loading && error && <ErrorState message={error} onRetry={load} />}
         {!loading && !error && data && (
           <>
-            <StudentDashboard s={mapAnalysisToDashboard(data)} L={L} />
-            <DeeperAnalysis data={data} />
+            <StudentDashboard s={mapStudentToDashboard(data)} L={L} />
+            <FocusStatement data={data} />
+            <div className="pf-card-grid">
+              <CategoryBars categoryPerformance={data.category_performance} />
+              <BottleneckCard bottleneck={data.prerequisite_bottleneck} />
+              <AnomalyCard anomalies={data.anomalies} />
+              <SemesterLoadCard sdi={data.semester_difficulty} />
+              <GraduationCard trajectory={data.trajectory} />
+              <SuggestionsCard suggestions={data.suggestions} />
+            </div>
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Advisor: key points grouped into Issues / Strengths ---------------- */
+function KeyPointsCard({ keyPoints }){
+  const pts = keyPoints || [];
+  if (!pts.length) return null;
+  const issues    = pts.filter(p => p.severity !== "positive");
+  const strengths = pts.filter(p => p.severity === "positive");
+  const sevCls = (s) => s === "critical" ? "critical" : s === "high" ? "high" : "medium";
+  return (
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="target" /></span>Academic Key Points</h3>
+      {issues.length > 0 && <div className="pf-group-lbl">Issues</div>}
+      {issues.map((k,i)=>(
+        <div key={"i"+i} className={"pf-flag "+sevCls(k.severity)}>
+          <span>{fixText(k.emoji)} {fixText(k.message)}</span>
+        </div>
+      ))}
+      {strengths.length > 0 && <div className="pf-group-lbl">Strengths</div>}
+      {strengths.map((k,i)=>(
+        <div key={"s"+i} className="pf-flag positive">
+          <span>{fixText(k.emoji)} {fixText(k.message)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- Advisor: LLM session guide (only when present in payload) ---------------- */
+function SessionGuideCard({ guide }){
+  if (!guide || !guide.opening) return null;
+  return (
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="quote" /></span>Advising Session Guide</h3>
+      <div className="pf-guide-card pf-guide-open"><b>How to open</b>{fixText(guide.opening)}</div>
+      <div className="pf-guide-card pf-guide-question"><b>Key question to ask</b>{fixText(guide.key_question)}</div>
+      <div className="pf-guide-card pf-guide-goal"><b>Aim to agree on</b>{fixText(guide.session_goal)}</div>
+    </div>
+  );
+}
+
+/* ---------------- Advisor: subject-area table ---------------- */
+function CategoryTable({ categoryPerformance }){
+  const cats = (categoryPerformance || {}).categories || {};
+  const names = Object.keys(cats);
+  if (!names.length) return null;
+  return (
+    <div className="an-card">
+      <h3 className="an-title"><span className="ti-ic"><Icon name="chart" /></span>Performance by Subject Area</h3>
+      <div className="pf-tbl-wrap">
+        <table className="plan">
+          <thead><tr><th>Category</th><th>Avg Grade</th><th>Attempted</th><th>Pass Rate</th><th>Status</th></tr></thead>
+          <tbody>
+            {names.map(n=>{
+              const c = cats[n];
+              const struggling = c.status === "struggling";
+              return (
+                <tr key={n}>
+                  <td className="ptitle">{n}</td>
+                  <td className="pcr">{c.avg_letter_grade || "—"}</td>
+                  <td className="pcr">{c.courses_attempted}</td>
+                  <td className="pcr">{Math.round((c.pass_rate||0)*100)}%</td>
+                  <td><span className={"cc-status "+(struggling?"st-lock":"st-done")} style={struggling?{background:"var(--danger-soft)",color:"var(--danger)"}:null}>{c.status}</span></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Advisor: full registration history ---------------- */
+function RegistrationsCard({ registrations }){
+  const regs = registrations || [];
+  if (!regs.length) return null;
+  return (
+    <div className="an-card" style={{gridColumn:"1 / -1"}}>
+      <h3 className="an-title"><span className="ti-ic"><Icon name="book" /></span>Registration History</h3>
+      <div className="pf-scroll pf-tbl-wrap">
+        <table className="plan">
+          <thead><tr><th>Semester</th><th>Course</th><th>Grade</th><th>Status</th></tr></thead>
+          <tbody>
+            {regs.map((r,i)=>{
+              const failed = r.letter_grade === "F" || r.letter_grade === "Abs";
+              return (
+                <tr key={i}>
+                  <td>{r.semester}</td>
+                  <td className="pcode">{r.course_code}</td>
+                  <td className={"pcr"+(failed?" pf-grade-red":"")}>{r.letter_grade || "—"}</td>
+                  <td className="why">{r.registration_status}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Advisor: all-students list (filter + sort) ---------------- */
+const RISK_ORDER = { high: 0, moderate: 1, low: 2 };
+const SORTS = [
+  { key: "risk",     label: "Risk",       fn: (a,b)=>(RISK_ORDER[a.risk_level]-RISK_ORDER[b.risk_level]) || (a.official_cgpa||0)-(b.official_cgpa||0) },
+  { key: "cgpa_asc", label: "CGPA ↑",     fn: (a,b)=>(a.official_cgpa||0)-(b.official_cgpa||0) },
+  { key: "cgpa_desc",label: "CGPA ↓",     fn: (a,b)=>(b.official_cgpa||0)-(a.official_cgpa||0) },
+  { key: "warnings", label: "Warnings",   fn: (a,b)=>(b.consecutive_warning||0)-(a.consecutive_warning||0) },
+  { key: "name",     label: "Name",       fn: (a,b)=>String(a.name).localeCompare(String(b.name)) },
+];
+const PAGE_SIZE = 25;
+
+function AllStudentsList({ students, onView }){
+  const [filter, setFilter] = useAS("all");
+  const [sortKey, setSortKey] = useAS("risk");
+  const [q, setQ] = useAS("");
+  const [limit, setLimit] = useAS(PAGE_SIZE);
+
+  const shown = useAM(()=>{
+    const needle = q.trim().toLowerCase();
+    let list = students;
+    if (filter !== "all") list = list.filter(s => s.risk_level === filter);
+    if (needle) list = list.filter(s =>
+      String(s.name).toLowerCase().includes(needle) || String(s.id).toLowerCase().includes(needle));
+    const sort = SORTS.find(s=>s.key===sortKey) || SORTS[0];
+    return list.slice().sort(sort.fn);
+  }, [students, filter, sortKey, q]);
+
+  useAE(()=>{ setLimit(PAGE_SIZE); }, [filter, sortKey, q]);
+
+  return (
+    <div className="an-card" style={{marginTop:6}}>
+      <h3 className="an-title"><span className="ti-ic"><Icon name="user" /></span>All Students <span className="pf-count-chip">{shown.length}</span></h3>
+
+      <div className="pf-filter-row">
+        {[["all","All"],["high","At Risk"],["moderate","Needs Attention"],["low","On Track"]].map(([k,lbl])=>(
+          <button key={k} className={"pf-fchip"+(filter===k?" on":"")} onClick={()=>setFilter(k)}>{lbl}</button>
+        ))}
+        <span className="spring" />
+        <select className="pf-sort-sel" value={sortKey} onChange={e=>setSortKey(e.target.value)}>
+          {SORTS.map(s=><option key={s.key} value={s.key}>Sort: {s.label}</option>)}
+        </select>
+        <input className="pf-mini-search" value={q} onChange={e=>setQ(e.target.value)} placeholder="Search name or ID…" />
+      </div>
+
+      <div className="pf-tbl-wrap" style={{marginTop:12}}>
+        <table className="plan">
+          <thead><tr><th>Student</th><th>Level</th><th>CGPA</th><th>Warnings</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {shown.slice(0, limit).map(s=>{
+              const meta = RISK_META[s.risk_level] || RISK_META.low;
+              const lowGpa = (s.official_cgpa||0) < 2.0;
+              return (
+                <tr key={s.id}>
+                  <td><div className="ptitle">{s.name}</div><div className="pcode">{s.id}</div></td>
+                  <td>{s.level}</td>
+                  <td className={"pcr"+(lowGpa?" pf-grade-red":"")}>{s.official_cgpa !== null && s.official_cgpa !== undefined ? s.official_cgpa.toFixed(2) : "—"}</td>
+                  <td className="pcr">{s.consecutive_warning || 0}</td>
+                  <td><span className={"pill "+meta.cls}><span className="pdot" />{meta.label}</span></td>
+                  <td style={{textAlign:"end"}}><button className="act-btn sm" onClick={()=>onView(s.id)}>View Profile</button></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {shown.length > limit && (
+        <div style={{textAlign:"center",marginTop:12}}>
+          <button className="act-btn sm" onClick={()=>setLimit(l=>l+PAGE_SIZE)}>Show {Math.min(PAGE_SIZE, shown.length-limit)} more</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -371,12 +600,13 @@ function AdvisorConsole({ L, rtl, advisorId }){
     setLoadingOv(true); setOvError(null);
     const res = await PF_API.getAdvisorOverview(advisorId);
     if (res.__error) { setOvError(res.detail || "Could not load overview."); setLoadingOv(false); return; }
+    // Real payload: a flat array of student summaries — counts are computed here.
     const students = Array.isArray(res) ? res : (res.students || []);
     setOverview({
       total_students: students.length,
-      high_risk: students.filter(s => s.risk_level === "high").length,
+      high_risk:     students.filter(s => s.risk_level === "high").length,
       moderate_risk: students.filter(s => s.risk_level === "moderate").length,
-      low_risk: students.filter(s => s.risk_level === "low").length,
+      low_risk:      students.filter(s => s.risk_level === "low").length,
       students,
     });
     setLoadingOv(false);
@@ -398,9 +628,10 @@ function AdvisorConsole({ L, rtl, advisorId }){
       setLookupLoading(false);
       return;
     }
-    setLooked(mapAnalysisToDashboard(base));
+    setLooked(base);
     setLookedAnalysis(analysis.__error ? null : analysis);
     setLookupLoading(false);
+    try { document.querySelector(".page").scrollTo({top:0, behavior:"smooth"}); } catch(e){}
   }
   function clearLookup(){ setLooked(null); setLookedAnalysis(null); setQuery(""); setLookupError(null); }
   function onKey(e){ if(e.key==="Enter") lookUp(); }
@@ -412,8 +643,15 @@ function AdvisorConsole({ L, rtl, advisorId }){
     { cls:"low",   k:L.lowRisk,       v:overview.low_risk },
   ] : [];
 
-  const attention = overview ? (overview.students || []).filter(s=>s.immediate_action) : [];
-  const shownAttention = attention.slice(0, 5);
+  // immediate_action + immediate_reason are the real field names.
+  // No severity field exists on overview rows — approximate severity by
+  // consecutive warnings (desc), then CGPA (asc).
+  const attention = overview
+    ? (overview.students || [])
+        .filter(s => s.immediate_action)
+        .sort((a,b)=>(b.consecutive_warning||0)-(a.consecutive_warning||0) || (a.official_cgpa||0)-(b.official_cgpa||0))
+    : [];
+  const shownAttention = attention.slice(0, 6);
   const moreCount = Math.max(0, attention.length - shownAttention.length);
 
   return (
@@ -438,75 +676,71 @@ function AdvisorConsole({ L, rtl, advisorId }){
           {lookupError && <div className="pf-login-err">{lookupError}</div>}
         </div>
 
-        {/* looked-up profile */}
+        {/* ── looked-up student: full dashboard + advisor-only additions ── */}
         {looked && (
           <>
             <div className="act-bar" style={{justifyContent:"flex-end"}}>
               <button className="act-btn sm" onClick={clearLookup}><Icon name="plus" style={{transform:"rotate(45deg)"}} />{L.clearLookup}</button>
             </div>
-            <StudentDashboard s={looked} L={L} actions />
+            <StudentDashboard s={mapStudentToDashboard(looked)} L={L} actions />
 
-            {lookedAnalysis && (
-              <div className="pf-card-grid" style={{marginTop:16}}>
-                {(lookedAnalysis.key_points||[]).length > 0 && (
-                  <div className="an-card">
-                    <h3 className="an-title"><span className="ti-ic"><Icon name="target" /></span>Academic Key Points</h3>
-                    {lookedAnalysis.key_points.map((k,i)=>(
-                      <div key={i} className={"pf-flag "+(k.severity||"medium")}>
-                        <span>{k.emoji} {k.message}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {lookedAnalysis.llm_session_guide && (
-                  <div className="an-card">
-                    <h3 className="an-title"><span className="ti-ic"><Icon name="quote" /></span>Advising Session Guide</h3>
-                    <div className="pf-guide-card pf-guide-open"><b>How to open</b>{lookedAnalysis.llm_session_guide.opening}</div>
-                    <div className="pf-guide-card pf-guide-question"><b>Key question to ask</b>{lookedAnalysis.llm_session_guide.key_question}</div>
-                    <div className="pf-guide-card pf-guide-goal"><b>Aim to agree on</b>{lookedAnalysis.llm_session_guide.session_goal}</div>
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="pf-card-grid">
+              <KeyPointsCard keyPoints={(lookedAnalysis||{}).key_points} />
+              <SessionGuideCard guide={(lookedAnalysis||{}).llm_session_guide} />
+              <CategoryTable categoryPerformance={(lookedAnalysis||looked).category_performance} />
+              <BottleneckCard bottleneck={looked.prerequisite_bottleneck} />
+              <SemesterLoadCard sdi={looked.semester_difficulty} />
+              <GraduationCard trajectory={looked.trajectory} />
+              <RegistrationsCard registrations={(lookedAnalysis||looked).registrations} />
+            </div>
           </>
         )}
 
-        {/* cohort risk overview */}
-        {loadingOv && <Spinner label="Loading advisor overview…" />}
-        {!loadingOv && ovError && <ErrorState message={ovError} onRetry={loadOverview} />}
-        {!loadingOv && !ovError && overview && (
+        {/* ── overview: summary tiles + immediate actions + all students ── */}
+        {!looked && (
           <>
-            <div className="risk-row">
-              {risk.map((r,i)=>(
-                <div className={"risk "+r.cls} key={i}>
-                  <div className="rk">{r.k}</div>
-                  <div className="rv">{r.v}</div>
+            {loadingOv && <Spinner label="Loading advisor overview…" />}
+            {!loadingOv && ovError && <ErrorState message={ovError} onRetry={loadOverview} />}
+            {!loadingOv && !ovError && overview && (
+              <>
+                <div className="risk-row">
+                  {risk.map((r,i)=>(
+                    <div className={"risk "+r.cls} key={i}>
+                      <div className="rk">{r.k}</div>
+                      <div className="rv">{r.v}</div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
 
-            <div>
-              <div className="attn-head">{L.attentionTitle}</div>
-              <div className="attn">
-                {shownAttention.length === 0 && <div className="pf-empty-note">No students currently need immediate attention.</div>}
-                {shownAttention.map((a,i)=>(
-                  <div className="attn-row" key={i}>
-                    <div className="attn-l">
-                      <div className="attn-top">
-                        <span className="attn-name">{a.name}</span>
-                        <span className="attn-badge">{a.level}</span>
+                <div>
+                  <div className="attn-head">{L.attentionTitle}</div>
+                  <div className="attn">
+                    {shownAttention.length === 0 && <div className="pf-empty-note">No students currently need immediate attention.</div>}
+                    {shownAttention.map((a,i)=>(
+                      <div className="attn-row" key={i}>
+                        <div className="attn-l">
+                          <div className="attn-top">
+                            <span className="attn-name">{a.name}</span>
+                            <span className="attn-badge">{a.level}</span>
+                            <span className="pcode">{a.id}</span>
+                          </div>
+                          <div className="attn-flag"><Icon name="target" />{fixText(a.immediate_reason)}</div>
+                        </div>
+                        <div className="attn-r">
+                          <span className="attn-gpa" style={(a.official_cgpa||0) >= 2.0 ? {color:"var(--text)",borderColor:"var(--border)"} : null}>
+                            CGPA {a.official_cgpa !== null && a.official_cgpa !== undefined ? a.official_cgpa.toFixed(2) : "N/A"}
+                          </span>
+                          <button className="act-btn sm" onClick={()=>lookUp(a.id)}>View Profile</button>
+                        </div>
                       </div>
-                      <div className="attn-flag"><Icon name="target" />{a.immediate_reason}</div>
-                    </div>
-                    <div className="attn-r">
-                      <span className="attn-gpa">CGPA {a.official_cgpa != null ? a.official_cgpa.toFixed(2) : "N/A"}</span>
-                      <button className="act-btn sm" onClick={()=>lookUp(a.id)}>{L.actReview}</button>
-                    </div>
+                    ))}
+                    {moreCount > 0 && <div className="attn-more">{L.moreHigh(moreCount)}</div>}
                   </div>
-                ))}
-                {moreCount > 0 && <div className="attn-more">{L.moreHigh(moreCount)}</div>}
-              </div>
-            </div>
+                </div>
+
+                <AllStudentsList students={overview.students || []} onView={(id)=>lookUp(id)} />
+              </>
+            )}
           </>
         )}
       </div>

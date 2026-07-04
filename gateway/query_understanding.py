@@ -465,7 +465,7 @@ _TRACK_INTENTS_MISROUTED: frozenset[str] = frozenset({
 # Purpose: detect obvious 3+ track mentions so we don't silently drop one track.
 _TRACK_MENTION_PATTERNS: dict[str, re.Pattern] = {
     "AI": re.compile(r'\b(?:artificial intelligence|ai track|ai)\b', re.IGNORECASE),
-    "DSE": re.compile(r'\b(?:data science and engineering|data science track|dse)\b', re.IGNORECASE),
+    "DSE": re.compile(r'\b(?:data science and engineering|data science track|data science|dse)\b', re.IGNORECASE),
     "SWE": re.compile(r'\b(?:software engineering track|software engineering|swe)\b', re.IGNORECASE),
     "CYS": re.compile(r'\b(?:cybersecurity track|cyber security track|cybersecurity|cyber security|cys)\b', re.IGNORECASE),
     "GEN": re.compile(r'\b(?:general track|general|gen)\b', re.IGNORECASE),
@@ -478,6 +478,62 @@ _TRACK_FRIENDLY_NAMES: dict[str, str] = {
     "CYS": "Cybersecurity (CYS)",
     "GEN": "General (GEN)",
 }
+
+# GPA-threshold / enrollment questions phrased without any _POLICY_KEYWORDS term
+# ("What is the minimum GPA to stay enrolled?"). Routed to policy_query.
+_POLICY_GPA_RE = re.compile(
+    r"\b(?:minimum|min\.?|lowest|required)\s+(?:c?gpa|grade\s*point)"
+    r"|\bc?gpa\b[^.?!]*\b(?:stay|remain|keep|enrolled|enrol+ment|dismiss\w*|probation|graduat\w+|requirement)"
+    r"|\b(?:stay|remain)\s+enrolled\b"
+    r"|\bc?gpa\s+requirements?\b",
+    re.IGNORECASE,
+)
+
+# Career/role gap: "I want to become a data scientist, what am I missing?"
+_ROLE_GAP_BECOME_RE = re.compile(
+    r"(?:want(?:\s+to)?|wanna|would\s+like\s+to|planning\s+to|hoping\s+to|aim\s+to)\s+"
+    r"be(?:come)?\s+(?:a\s+|an\s+)?(?P<role>[A-Za-z][A-Za-z /-]{2,40}?)\s*(?:[,.?!;]|$)",
+    re.IGNORECASE,
+)
+_ROLE_GAP_FOR_RE = re.compile(
+    r"(?:what\s+am\s+i\s+missing|skills?\s+gap|missing\s+skills?)\s+"
+    r"(?:for|to\s+be(?:come)?)\s+(?:a\s+|an\s+)?(?P<role>[A-Za-z][A-Za-z /-]{2,40}?)\s*(?:[,.?!;]|$)",
+    re.IGNORECASE,
+)
+
+# Semester planning without a personal pronoun: "give me a semester plan for Fall 2026"
+_PLAN_SIGNAL_RE = re.compile(
+    r"\bsemester\s+plan\b"
+    r"|\bplan\b[^.?!]{0,40}\bsemester\b"
+    r"|\bplan\s+(?:for\s+)?(?:fall|spring|summer)\s+\d{4}\b"
+    r"|\bwhat\s+should\s+i\s+(?:take|register)\b",
+    re.IGNORECASE,
+)
+
+
+def _skill_mention_variants(mention: str) -> list[str]:
+    """Cleanup variants for a failed skill mention: 'machine learning skills' → 'machine learning'."""
+    base = mention.strip()
+    lowered = base.lower()
+    variants: list[str] = []
+    for suffix in (" skills", " skill"):
+        if lowered.endswith(suffix):
+            variants.append(base[: -len(suffix)].strip())
+            break
+    if lowered.startswith("the "):
+        variants.append(base[4:].strip())
+    return [v for v in variants if v and v.lower() != lowered]
+
+
+def _canonicalize_track(mention: str | None) -> str | None:
+    """Map a track mention to its canonical KG ID (AI/DSE/SWE/CYS/GEN), or None."""
+    if not mention:
+        return None
+    upper = mention.strip().upper()
+    if upper in _CANONICAL_TRACKS:
+        return upper
+    hits = _detect_track_mentions(mention)
+    return hits[0] if len(hits) == 1 else None
 
 
 def _detect_track_mentions(text: str) -> list[str]:
@@ -518,6 +574,19 @@ def _normalize_one_sq(
                 # Preserve semester params
                 sq = sq.model_copy(update={"intent": "plan_semester", "params": new_params})
                 intent = "plan_semester"
+
+        # ── Guard 0b: GPA/enrollment threshold question misrouted to a course intent ──
+        # "What is the minimum GPA to stay enrolled?" → policy_query, not get_course_info
+        if intent in ("get_course_info", "get_course_prerequisites") \
+                and not pre.course_codes \
+                and _POLICY_GPA_RE.search(user_text):
+            sq = sq.model_copy(update={
+                "intent": "policy_query",
+                "entities": EntitySet(),
+                "secondary_entities": None,
+                "params": {},
+            })
+            intent = "policy_query"
 
         # ── Guard 1: Track-membership question misrouted to track intent ──────
         # "which track does X belong to?" → get_course_info, NOT get_track_overview
@@ -978,6 +1047,11 @@ def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[Struc
     if pre.policy_signal and not pre.override_signal:
         return [StructuredQuery(intent="policy_query", original_text=user_text)]
 
+    # GPA-threshold / enrollment questions phrased without any _POLICY_KEYWORDS term
+    # ("What is the minimum GPA to stay enrolled?")
+    if _POLICY_GPA_RE.search(user_text) and not pre.override_signal:
+        return [StructuredQuery(intent="policy_query", original_text=user_text)]
+
     if pre.course_codes:
         code = pre.course_codes[0]
         if any(kw in lower for kw in ("can i take", "am i eligible", "eligible for", "can i register")):
@@ -1055,6 +1129,53 @@ def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[Struc
                 params={"attempted_skill": candidate},
             )]
 
+    # Track comparison: "compare AI and Data Science tracks" / "AI vs DSE"
+    if any(kw in lower for kw in ("compare", " vs ", " vs. ", "versus", "difference between")):
+        tracks = _detect_track_mentions(user_text)
+        if len(tracks) >= 3:
+            friendly = [_TRACK_FRIENDLY_NAMES.get(t, t) for t in tracks]
+            prompt = (
+                "I can compare two tracks at a time. Which two would you like to compare: "
+                + ", ".join(friendly[:-1]) + ", or " + friendly[-1] + "?"
+            )
+            return [_clarification(prompt)]
+        if len(tracks) == 2:
+            return [StructuredQuery(
+                intent="compare_tracks",
+                original_text=user_text,
+                entities=EntitySet(track_id=tracks[0]),
+                secondary_entities=EntitySet(track_id=tracks[1]),
+            )]
+
+    # Career/role gap: "I want to become a data scientist, what am I missing?"
+    role_match = _ROLE_GAP_BECOME_RE.search(user_text) or _ROLE_GAP_FOR_RE.search(user_text)
+    if role_match:
+        role_mention = (role_match.group("role") or "").strip(" ?.!,;")
+        if role_mention:
+            return [StructuredQuery(
+                intent="compute_skill_gap",
+                original_text=user_text,
+                entities=EntitySet(role_id=role_mention),
+                student_referential_fallback=True,
+            )]
+
+    # Semester planning without a personal pronoun: "give me a semester plan for Fall 2026"
+    if _PLAN_SIGNAL_RE.search(lower):
+        plan_params: dict = {}
+        if pre.semester:
+            plan_params["target_semester"] = pre.semester
+            plan_params["target_semester_type"] = pre.semester.split()[0]
+            plan_params["semester_resolution_source"] = "explicit"
+        elif "next semester" in lower:
+            plan_params["target_semester_text"] = "next semester"
+            plan_params["semester_resolution_source"] = "relative"
+        return [StructuredQuery(
+            intent="plan_semester",
+            original_text=user_text,
+            params=plan_params,
+            student_referential_fallback=True,
+        )]
+
     if pre.student_referential:
         if any(kw in lower for kw in ("graduate", "graduation", "how many credits left to graduate")):
             return [StructuredQuery(
@@ -1095,6 +1216,16 @@ def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[Struc
             intent="get_student_record",
             original_text=user_text,
             params=params,
+            student_referential_fallback=True,
+        )]
+
+    # "what is my (current) cgpa/gpa" — record lookup even when the D6 detector
+    # missed the exact phrase ("my current CGPA" vs "my cgpa")
+    if re.search(r"\bmy\b[^.?!]{0,30}\bc?gpa\b", lower):
+        return [StructuredQuery(
+            intent="get_student_record",
+            original_text=user_text,
+            params={"record_focus": "cgpa"},
             student_referential_fallback=True,
         )]
 
@@ -1285,7 +1416,11 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
         failures.append(fail)
         failure_info.append(("role", fail_status))
 
-    track_id, fail, fail_status = _resolve_entity("track", entities.track_id, resolver)
+    _canon_track = _canonicalize_track(entities.track_id)
+    if _canon_track:
+        track_id, fail, fail_status = _canon_track, None, None
+    else:
+        track_id, fail, fail_status = _resolve_entity("track", entities.track_id, resolver)
     if fail:
         failures.append(fail)
         failure_info.append(("track", fail_status))
@@ -1312,6 +1447,19 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
                     sq.intent, cand, res_cand,
                 )
                 break
+        # Retry with cleaned-up variants: "machine learning skills" → "machine learning"
+        if fail and primary_skill:
+            for cand in _skill_mention_variants(primary_skill):
+                res_cand, _, _ = _resolve_entity("skill", cand, resolver)
+                if res_cand:
+                    skill_id = res_cand
+                    fail = None
+                    fail_status = None
+                    logger.info(
+                        "QU.resolve_skill_variant_success intent=%s variant=%r resolved=%r",
+                        sq.intent, cand, res_cand,
+                    )
+                    break
         if fail:
             failures.append(fail)
             failure_info.append(("skill", fail_status))
@@ -1367,7 +1515,11 @@ def _resolve_sq(sq: StructuredQuery, resolver: Resolver) -> StructuredQuery:
     new_secondary: EntitySet | None = None
     if sq.secondary_entities is not None:
         sec = sq.secondary_entities
-        sec_track, fail, fail_status = _resolve_entity("track", sec.track_id, resolver)
+        _canon_sec = _canonicalize_track(sec.track_id)
+        if _canon_sec:
+            sec_track, fail, fail_status = _canon_sec, None, None
+        else:
+            sec_track, fail, fail_status = _resolve_entity("track", sec.track_id, resolver)
         if fail:
             logger.warning(
                 "QU.resolve_failed intent=%s entity_type=track status=%s -> clarification_needed",

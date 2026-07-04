@@ -1,7 +1,6 @@
 .env
 SAE/.env
 __pycache__/
-**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -13,11 +12,12 @@ env/
 .ruff_cache/
 *.sqlite3
 *.db
-!gateway/session_store/pathfinder_sessions.db
+*.log
 engines/rag/chroma_db/
 engines/rag/chunks.pkl
 
 # SAE runtime artifacts
 SAE/sae/cache/
 
+**/__pycache__/
 main.py.backup

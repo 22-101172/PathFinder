@@ -52,9 +52,9 @@ logger = logging.getLogger(__name__)
 _kg: Optional[KGAdapter] = None
 _rag: Optional[RAGAdapter] = None
 _ale: Optional[ALEAdapter] = None
-_sae: Optional[SAEAdapter] = None
 _orchestrator: Optional[Orchestrator] = None
 _composer: Optional[ResponseComposer] = None
+_sae: Optional[SAEAdapter] = None
 _rule_bundles: dict = {}
 _resolver: Optional[Callable] = None
 
@@ -384,12 +384,6 @@ def _require_sae():
 
 
 def _is_not_found(result: dict) -> bool:
-    """
-    SAE may signal 'student not found' two different ways depending on how
-    its own FastAPI layer was implemented: a real HTTP 404, OR an HTTP 200
-    with {"error": "..."} in the body. Handle both so the frontend always
-    gets a clean 404 either way.
-    """
     if not isinstance(result, dict) or "error" not in result:
         return False
     if result.get("status_code") == 404:

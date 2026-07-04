@@ -1,346 +1,476 @@
-# PathFinder Integration
+# PathFinder
 
-PathFinder is an academic advising assistant for Egyptian University of Informatics (EUI). It combines structured curriculum and career data, handbook retrieval, student transcript context, and rule-based academic logic behind a single chat interface.
+PathFinder is an AI-powered academic advising system for Egyptian University of Informatics (EUI). It combines a curriculum knowledge graph, handbook retrieval, academic logic, student context, and a student analytics engine behind a single conversational interface, with a separate analytics dashboard for students and advisors.
 
-The project is split into a FastAPI backend and a Streamlit frontend. A student logs in with a student ID, asks advising questions in natural language, and the system routes the request to the most suitable engine:
+The system is split into a FastAPI backend, a React browser UI (primary), and a Streamlit chat UI (alternative). A user logs in with a student ID or advisor ID. Students get a chat advisor and a personal analytics dashboard. Advisors get a cohort-level console with per-student drill-down. All academic advising flows through the chat pipeline; the analytics dashboard is served by a separate Student Analysis Engine (SAE) service.
 
-- Knowledge Graph for curriculum, tracks, skills, and career-role relationships
-- RAG for handbook and policy questions
-- Academic Logic Engine (ALE) for eligibility checking, graduation audit, semester planning, graduation roadmap generation, GPA simulation, and target GPA solving
-- LLM-based query understanding and response composition to make the experience conversational
+## What The System Does
 
-## What The Project Does
+### Chat Advisor (students)
 
-PathFinder supports several advising workflows:
+The conversational advisor handles 26 locked intents across six domains:
 
-- Course exploration: course profile, credits, description, level, prerequisites, and career-focus classification
-- Skill exploration: what a course teaches and which courses teach a given skill
-- Career guidance: role profiles, role-track fit, best matching roles, skill gaps, and focus-course recommendations for a target role or track
-- Track guidance: track overviews, comparisons, and recommendations
-- Policy Q&A: handbook-based answers with citations
-- Student-aware advising: uses the logged-in student's academic context from the Excel dataset
-- Eligibility checking: whether a student can take a specific course under a given attempt type
-- Graduation audit: checks all graduation requirements and honors eligibility in one call
-- Semester planning: generates multiple plan variants (recommended, lighter load, level-focused) for a target semester
-- Graduation roadmap: builds a full semester-by-semester plan from current standing to projected graduation with simulated GPA
-- GPA simulation: projects CGPA forward given hypothetical grades, with retake-cap enforcement
-- Target GPA solving: determines the grades needed across planned courses to reach a target CGPA, with multi-semester projection and personalized per-course targets
-- Session-based chat: keeps conversation history and resolves follow-up references like "that course" or "that track"; supports per-session course and role overrides
+- **Course exploration** — course profile, credits, description, level, prerequisites (direct and full recursive tree), skills taught, and courses that teach a given skill
+- **Career guidance** — role profiles, role-track fit, skill gap analysis, alignment scoring, course recommendations to close a skill gap, best-matching role ranking, alignment improvement estimation for planned courses, and focus-course recommendations for a role or track
+- **Track guidance** — track overviews, side-by-side track comparisons, and track recommendations by role or skill
+- **Academic planning** — semester plan generation with multiple variants (recommended, lighter load, level-focused, max-credits, requested-courses fill); graduation roadmap with per-semester CGPA simulation; eligibility checking per course and attempt type; graduation audit including honors eligibility
+- **GPA tools** — forward CGPA projection given hypothetical grades with retake-cap enforcement; target-GPA solving with per-course grade distribution and multi-semester fallback
+- **Policy Q&A** — handbook-based answers with page citations
+- **Student record** — snapshot of academic standing, credits, CGPA, course history, and warnings
+
+Session management supports follow-up references ("that course", "the second one"), per-session what-if overrides (assume passed / assume failed / planned courses / clear assumptions), and persistent conversation history in SQLite.
+
+### SAE Analytics Dashboard (students and advisors)
+
+The Student Analysis Engine runs as a separate service and exposes analytics built on the full cohort dataset:
+
+- **Student dashboard** — GPA trend with trajectory projection, credit pace vs. expected pace, risk level classification (low / moderate / high), anomaly detection (grade spikes, sudden drops, credit stalls), cohort percentile, semester difficulty timeline, prerequisite bottleneck map, and course category performance
+- **Student analysis** — structured advisor-facing key points, LLM-generated talking points for advising sessions, track performance, CGPA trend history, and risk flags
+- **Advisor console** — all active students sorted by risk level with immediate-action flags and cohort-wide statistics
+- **Course risk analytics** — course pass-rate analytics across all historical first attempts, filterable by academic level
+- **GPA simulation** — project CGPA impact of hypothetical grades on currently enrolled courses
+
+### React UI Features
+
+The primary browser UI (`ui_react/`) supports:
+
+- English and Arabic interface (RTL-aware layout)
+- Dual role: student view (chat + analytics dashboard) and advisor view (cohort console + per-student drill-down)
+- Student login with live backend validation; advisor login by ID prefix (`ADV-…`)
+- Full chat interface with session history sidebar, citation toggle, and new-chat button
+- SAE analytics pages rendered as interactive dashboards alongside the chat
+
+---
 
 ## Architecture
 
-### 1. API Layer
+### 1. API Layer — `main.py`
 
-`main.py` exposes the backend service using FastAPI:
+FastAPI entrypoint. All routes are exposed from a single process.
 
-- `POST /chat` handles user questions; returns `session_id`, `session_name`, `answer_text`, `citations`, `status`
-- `GET /sessions/{student_id}` returns previous chat sessions for a student
-- `GET /students/{student_id}/sessions/{session_id}/history` returns conversation history with ownership verification
-- `DELETE /students/{student_id}/sessions/{session_id}` deletes a specific session owned by the student
-- `DELETE /dev/students/{student_id}/sessions` deletes all sessions for one student; available only in dev mode
-- `DELETE /dev/sessions` deletes all sessions globally; available only in dev mode
-- `GET /health` returns a basic health response
-- `GET /session/{session_id}/history` — **deprecated, returns 410 Gone**; clients must use the ownership-safe endpoint above
+**Chat and session endpoints:**
 
-### 2. Gateway Layer
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/chat` | Submit a message; returns `session_id`, `session_name`, `answer_text`, `citations`, `status` |
+| GET | `/sessions/{student_id}` | List all sessions for a student |
+| GET | `/students/{student_id}/sessions/{session_id}/history` | Session turn history (ownership-verified) |
+| DELETE | `/students/{student_id}/sessions/{session_id}` | Delete one session owned by the student |
+| DELETE | `/dev/students/{student_id}/sessions` | Delete all sessions for one student (dev mode only) |
+| DELETE | `/dev/sessions` | Delete all sessions globally (dev mode only) |
+| GET | `/health` | Basic health check |
+| GET | `/session/{session_id}/history` | **Deprecated — returns 410 Gone**; use the ownership-safe path above |
 
-The `gateway/` package coordinates the system:
+**SAE proxy endpoints** (forwarded to the SAE service):
 
-- `query_understanding.py`: classifies the question into one of 26 locked intents and an engine pattern
-- `orchestrator.py`: routes the request to KG, RAG, ALE, or mixed execution
-- `response_composer.py`: turns raw engine output into a user-friendly answer
-- `student_context_provider.py`: loads student data from Excel and builds a normalized `StudentContext`; computes per-course retake counts, lifetime improve-retake totals, completed regular semesters (Fall/Spring only, all-withdrawn semesters excluded), and zero-credit P-grade course lists; applies best-outcome resolution when a student has multiple attempts at the same course; handles Con grades (graduation project spanning semesters), I grades (incomplete), and withdrawal exclusion
-- `session_manager.py`: manages sessions and conversation history, persisted to SQLite via the `gateway/session_store` package; exposes a context-windowed turn history to query understanding (controlled by `QU_CONTEXT_TURNS`); tracks the last-referenced entity (course, role, track) per session for follow-up resolution; maintains per-session course and role overrides with three merge strategies (`accumulate`, `replace`, `clear`); builds an effective student context by merging `assumed_done` override courses into the student's completed-course list; supports `delete_session`
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/sae/health` | SAE service liveness |
+| GET | `/sae/student/{student_id}` | Full analytics profile for a student |
+| GET | `/sae/student/{student_id}/analysis` | Advisor-focused analysis with talking points |
+| POST | `/sae/student/{student_id}/simulate` | GPA simulation for a student |
+| GET | `/sae/advisor/overview` | All active students sorted by risk level |
+| GET | `/sae/courses/risk` | Course pass-rate analytics, optionally filtered by level |
 
-### 3. Engine Layer
+### 2. Gateway Layer — `gateway/`
 
-The `engines/` package contains the reasoning backends:
+Coordinates the chat pipeline and shared infrastructure:
 
-- `engines/kg/`: Neo4j-backed knowledge graph queries for courses, tracks, skills, and roles; includes a multi-step entity resolver that maps natural-language names to graph IDs
-- `engines/rag/`: handbook retrieval pipeline using Chroma, BM25, and a cross-encoder reranker
-- `engines/ale/`: academic logic modules for eligibility checking, graduation audit, semester planning, graduation roadmap generation, GPA simulation, and target GPA solving
+- `query_understanding.py` — classifies the user message into one or more of the 26 locked intents using an LLM model chain with keyword fallback; resolves follow-up references using session context and structured turn memory
+- `qu_intents.py` — single source of truth for all locked intents, forbidden intents, and intent descriptions
+- `qu_llm_chain.py` — LLM fallback chain; tries models in order on timeout, 429, bad JSON, or intent validation failure
+- `qu_preprocessing.py` — input normalization and follow-up reference resolution before the LLM prompt
+- `qu_prompt.py` — QU system and user prompt templates
+- `orchestrator.py` — routes each intent to KG, RAG, ALE, or mixed execution; assembles a `TurnWrapper` with one `PerSQResult` per intent; wraps every result individually so failures do not cascade
+- `response_composer.py` — narrates the `TurnWrapper` into a student-facing `QueryResponse` using an LLM model chain with deterministic fallback; never calls engines
+- `student_context_provider.py` — loads student data from the Excel dataset; builds a normalized `StudentContext` with per-course retake counts, lifetime improve-retake totals, active-course inference, completed regular semester count (Fall/Spring only, all-withdrawn semesters excluded), and zero-credit P-grade lists; applies best-outcome grade resolution across multiple attempts; handles Con, I, and withdrawal grades
+- `session_manager.py` — manages session lifecycle; persists to SQLite via `gateway/session_store`; exposes a windowed turn history to QU (controlled by `QU_CONTEXT_TURNS`); tracks the last-referenced entity (course, role, track, skill) per session; maintains per-session course and role overrides with three merge strategies (`accumulate`, `replace`, `clear`); builds effective student context by merging what-if assumptions at query time
+- `turn_memory_builder.py` — builds one compact `TurnMemory` per completed turn; extracts safe-to-inject context for follow-up resolution (courses, skills, roles, tracks, policy text, ordered display items) without storing raw student PII
+- `sae_rules_bridge.py` — converts PathFinder's RAG rule bundles into the flat dict format the SAE rule engine expects; enables the SAE to use live policy-sourced thresholds instead of hardcoded defaults
+- `llm_client.py` — shared OpenAI-compatible LLM client used by QU and Composer
+- `utils.py` — shared utilities (current semester label derived from system date)
+- `models/schemas.py` — all shared Pydantic models: `QueryRequest`, `QueryResponse`, `StudentContext`, `SessionState`, `TurnWrapper`, `PerSQResult`, `TurnMemory`, `StructuredQuery`, and more
 
-### 4. Adapter Layer
+### 3. Engine Layer — `engines/`
 
-The `adapters/` package gives the orchestrator a clean interface for each engine:
+#### Academic Logic Engine — `engines/ale/`
 
-- `KGAdapter`
-- `RAGAdapter`
-- `ALEAdapter`
+Six operations driven entirely by rule bundles injected at runtime from RAG. No academic thresholds are hardcoded:
 
-### 5. UI Layer
+- `check_course_eligibility` — validates prerequisites, credit thresholds, and retake caps; returns `eligible`, `not_eligible`, `already_completed`, `in_progress`, or `retake_cap_exceeded`
+- `run_graduation_audit` — evaluates all graduation requirements (credits, CGPA, semester count, military training, zero-credit courses) and honors eligibility; returns per-check breakdowns and next-step guidance; uses the official student record and excludes what-if session assumptions
+- `generate_semester_plan` — generates multiple plan variants for a target semester; respects CGPA-bracket credit caps, retake priority, student level, and requested-courses fill; supports `max_credits_mode`, `lighter_load_mode`, `target_credit_load`, `requested_plan_count`, and `requested_courses`; resolves relative semester references ("next semester"); excludes non-universal zero-credit courses (HUM110, C-MA110) from normal planning
+- `generate_graduation_roadmap` — builds a full semester-by-semester plan from current standing to projected graduation; simulates CGPA after each semester; detects non-course blockers; supports accelerated (summer) and max-credits modes
+- `simulate_gpa_forward` — projects CGPA forward given hypothetical grades; enforces retake caps; handles grade-point replacement vs. addition; returns per-course breakdowns and applied overrides
+- `solve_target_gpa` — determines the required grade average to reach a target CGPA; generates a multi-semester projection when impossible in one semester; produces personalized per-course grade targets based on prerequisite history
 
-`ui/streamlit_app.py` provides a simple student-facing chat UI with:
+Rule bundles consumed: `grading_scale_rules`, `retake_rules`, `credit_limit_rules`, `graduation_requirement_rules`, `academic_warning_rules`, `honors_rules`, `summer_semester_rules`, `student_level_rules`.
 
-- Student ID login
-- New chat / session history selection
-- Chat-style message flow
-- Citation display for handbook answers
+#### Knowledge Graph Engine — `engines/kg/`
 
-## How A Request Flows
+Neo4j-backed curriculum and career graph. Exposes 19 operations across four groups:
 
-1. The student sends a message from the Streamlit UI.
-2. FastAPI receives the request on `POST /chat`.
-3. The system loads or reuses the student's session and academic context.
-4. **Query Understanding** (`understand_query`) classifies the message into one or more structured intents, resolving follow-up references (e.g. "it", "that course") using session context.
-5. **Orchestrator** (`execute_turn`) routes each intent to the matching backend and returns a `TurnWrapper` with ordered `PerSQResult` objects:
-   - KG for structured curriculum/career questions
-   - RAG for handbook/policy questions
-   - ALE for academic decision logic
-   - Mixed for questions that need both structured data and handbook context
-6. **Response Composer** (`compose`) narrates the `TurnWrapper` into a student-facing `QueryResponse`. It tries an LLM model chain (primary then fallbacks) and falls back to deterministic narration if all models fail.
-7. The `QueryResponse` (fields: `answer_text`, `citations`, `status`, `session_id`, `session_name`) is returned to the UI and the composed answer is stored in session history.
+- **Course catalogue** — course profile, direct and recursive prerequisites, prerequisite constraints (non-course requirements stored as `PrerequisiteConstraint` nodes), skills taught by a course, course search by skill name, course focus classification, and focus-course recommendations for a target role or track
+- **Career role exploration** — role profiles with weighted required skills, and roles reachable through a track's courses and skills
+- **Skill gap and alignment** — skill gap analysis, weighted alignment scoring, gap-closing course recommendations, alignment improvement estimation for planned courses, and full role ranking by alignment
+- **Track guidance** — track overview (courses, skills, supported roles), side-by-side track comparison, track recommendations by role or skill, and full course list for a track with prerequisites (used by ALE for planning and roadmap generation)
 
-## Data Sources
+Skills carry a numeric weight driving all alignment calculations: `core` (≥ 0.8), `supporting` (≥ 0.6), `optional` (< 0.6).
 
-This project currently depends on several local and external data sources:
+The `resolve_entity` operation maps natural-language names to graph IDs via a six-step pipeline: input validation → exact ID match → exact normalized name match → alias lookup → ambiguous-term lookup → partial name match. Alias table: `engines/kg/data/entity_aliases.json`.
 
-- `data/students_anonymous.xlsx`
-  - `data` sheet for student profile fields
-  - `registrations` sheet for transcript and registration history
-- `engines/rag/CIS_Handbook.md`
-  - source document used to build the RAG index
-- `engines/rag/chroma_db/` and `engines/rag/chunks.pkl`
-  - generated retrieval artifacts
-- Neo4j database
-  - stores the curriculum / skills / role knowledge graph
-- `engines/kg/data/entity_aliases.json`
-  - alias and ambiguous-term table used by the KG entity resolver; maintained manually
+#### RAG Handbook Engine — `engines/rag/`
 
-## RAG Pipeline
-
-The handbook QA engine uses a hybrid retrieval pipeline:
+Hybrid retrieval pipeline for university policy Q&A:
 
 - Parent/child chunking during ingestion
-- Dense vector retrieval with `BAAI/bge-small-en-v1.5`
+- Dense vector retrieval with `BAAI/bge-small-en-v1.5` (Chroma)
 - Sparse retrieval with BM25
 - Reciprocal rank fusion
 - Cross-encoder reranking with `cross-encoder/ms-marco-MiniLM-L-6-v2`
 
-You only need to rebuild the index when the handbook source changes.
+Also extracts rule bundles at startup (11 structured policy extractions via Groq) that feed ALE and the SAE rules bridge.
 
-## Knowledge Graph Engine
+#### Student Analysis Engine — `engines/sae/`
 
-The KG engine exposes 18 operations across four query groups:
+A self-contained analytics service. Runs as a separate FastAPI process on port 8502. PathFinder's main API proxies all `/sae/*` requests to it. The SAE never shares a process or database with the chat pipeline.
 
-- **Course catalogue (A2)**: course profile, prerequisites (direct or full recursive tree; non-course constraints are stored as `PrerequisiteConstraint` nodes), skills taught by a course, course search by skill name, course focus classification (primary track/skill-category focus of a course), and focus-course recommendations for a target track or role (courses the student has not yet taken that teach the most relevant skills)
-- **Career role exploration (B1)**: role profiles with weighted required skills, and roles reachable through a track's courses and skills
-- **Skill gap and alignment (B2)**: skill gap analysis, weighted alignment scoring, gap-closing course recommendations, alignment improvement estimation for planned courses, and full role ranking by alignment
-- **Track guidance (B3)**: track overview (courses, skills, supported roles), side-by-side track comparison, track recommendations for a given role or skill, and full course list for a track with prerequisites included (used by ALE for semester planning and graduation roadmap generation)
+Key modules:
 
-Skills carry a numeric weight that drives all alignment calculations. Weights map to three tiers: `core` (≥ 0.8), `supporting` (≥ 0.6), and `optional` (< 0.6).
+- `api.py` — FastAPI router; all SAE endpoints live here
+- `engine.py` — single entry point for all analytical functions; delegates all data I/O to the adapter layer
+- `rule_engine.py` — all analysis rules parameterized by a `rules` dict; thresholds can be overridden at runtime by values from the RAG policy bridge
+- `cgpa_calculator.py` — CGPA recalculation from raw transcript using best-grade-per-course logic; credit-hour sources: course catalogue Excel → curriculum JSON fallback
+- `feature_engineering.py` — computes engineered features per student (GPA slope, credit pace ratio, failed-core rate, warning risk, pass rate)
+- `data_loader.py` — loads and validates the student Excel dataset (two sheets: `data` and `registrations`)
+- `scheduler.py` — periodic background cache refresh for the advisor overview
+- `sae_adapter.py` — internal data adapter; lazy-loads DataFrames, exposes student context, cohort stats, and credit-hour map
+- `providers/` — injectable data providers for testing (`FakeStudentContextProvider`, `FakeRulesProvider`)
+- `ml_research/` — ML model training, augmentation, and saved model artifacts (used during model development)
+- `data/` — SAE-local data files (student Excel dataset, course catalogue)
+- `rules/curriculum_2026.json` — curriculum course list and credit-hour map used as JSON fallback by the CGPA calculator
 
-The engine also includes a `resolve_entity` operation that maps a natural-language name to a graph ID for any entity type (course, role, track, skill). The resolver runs a six-step pipeline — input validation, exact ID match, exact normalized name match, alias lookup, explicit ambiguous-term lookup, partial name match — and loads its alias table from `engines/kg/data/entity_aliases.json`.
+SAE analytics output includes: GPA trend (slope + classification), credit pace vs. expected pace, risk flags and risk level, anomaly detection (grade spikes, sudden drops, credit stalls, chronic course failures), trajectory projection (semester-by-semester CGPA forecast), semester difficulty timeline, prerequisite bottleneck map, cohort percentile, course category performance, mitigation suggestions, advisor key points, and LLM-generated talking points.
 
-## Academic Logic Engine
+Rules are injected at request time via `gateway/sae_rules_bridge.py`, which converts PathFinder's loaded RAG rule bundles into the flat threshold dict the SAE expects. If no rules are supplied, the SAE falls back to its own `DEFAULT_RULES`.
 
-The ALE exposes 6 operations, all driven by rule bundles injected at runtime from RAG (no rules are hardcoded in the engine):
+### 4. Adapter Layer — `adapters/`
 
-- **check_course_eligibility**: checks whether a student can register for a course under a given attempt type (`first_attempt`, `failed_retake`, `improve_retake`); validates prerequisites, credit thresholds, and retake caps; returns `eligible`, `not_eligible`, `already_completed`, `in_progress`, or `retake_cap_exceeded`
-- **run_graduation_audit**: evaluates all graduation requirements (credits, CGPA, semester count, military training, zero-credit courses) and computes honors eligibility based on full transcript history; returns per-check breakdowns and next-step guidance
-- **generate_semester_plan**: generates two or three plan variants (e.g. Recommended, Lighter Load, Level Focused) for a single target semester (Fall / Spring / Summer); respects CGPA-bracket credit caps, retake priority, and student level
-- **generate_graduation_roadmap**: builds a full semester-by-semester projection from current standing to projected graduation; simulates CGPA after each semester; detects non-course blockers (CGPA, military, zero-credit); supports accelerated (summer) and max-credits modes
-- **simulate_gpa_forward**: projects CGPA forward given hypothetical grades for planned courses; enforces retake caps and handles grade-point replacement vs addition; returns per-course breakdowns and applied grade overrides
-- **solve_target_gpa**: determines the required grade average across planned courses to reach a target CGPA; when impossible in a single semester, generates a multi-semester projection; produces a personalized per-course grade distribution based on prerequisite history
+Thin wrappers giving the orchestrator and main API a clean interface for each engine:
 
-Rule bundles consumed by ALE operations:
+- `kg_adapter.py` — `KGAdapter`: wraps all 19 KG operations
+- `rag_adapter.py` — `RAGAdapter`: wraps handbook retrieval and rule bundle extraction
+- `ale_adapter.py` — `ALEAdapter`: wraps all 6 ALE operations
+- `sae_adapter.py` — `SAEAdapter`: HTTP client from PathFinder's main API to the SAE service; handles connection errors, timeouts, and HTTP errors gracefully — SAE unavailability never crashes the chat pipeline
 
-- `grading_scale` — letter-to-grade-points mapping and percentage ranges
-- `retake_rules` — failed retake caps, improve-retake caps and limits
-- `credit_limit_rules` — CGPA-bracket credit maxima and minimums per semester
-- `graduation_rules` — total credits, minimum CGPA, semester count bounds, and auxiliary requirements
-- `warning_rules` — warning thresholds and dismissal conditions
-- `honors_rules` — honors eligibility criteria
-- `summer_rules` — summer course count limits
-- `student_level_rules` — credit-hour thresholds for Freshman / Sophomore / Junior / Senior classification
+### 5. UI Layer
+
+#### React UI — `ui_react/` (primary)
+
+Browser-based frontend. No build step required — Babel transforms JSX in-browser.
+
+- `index.html` — entry point; configure the backend URL via `window.__PF_API_BASE__` at the top of the file
+- `js/api.js` — all backend calls (chat, sessions, SAE endpoints)
+- `js/components.js` — shared UI components (icons, layout primitives, charts)
+- `js/data_flows.js` — data fetching and state management hooks
+- `js/sae_pages.js` — `StudentDashboard`, `StudentAnalysisPage`, `AdvisorConsole` components
+- `js/main_app.js` — top-level app, routing, login screen, chat view
+- `app.css` — full stylesheet
+- `vendor/` — bundled React, ReactDOM, and Babel (no CDN dependency)
+
+#### Streamlit UI — `ui/` (alternative)
+
+Python-based chat-only frontend. Supports student ID login, session history sidebar, chat message flow, and citation display.
+
+---
+
+## How A Chat Request Flows
+
+1. The student types a message in the React UI (or Streamlit).
+2. FastAPI receives `POST /chat` with `{ user_text, student_id, session_id? }`.
+3. The system loads or creates the student's session and fetches the `StudentContext` from the Excel dataset.
+4. **Query Understanding** (`understand_query`) classifies the message into one or more `StructuredQuery` objects with locked intents. It uses session history, last-referenced entities, and the previous turn's `TurnMemory` to resolve follow-up references.
+5. **Orchestrator** (`execute_turn`) routes each structured query to the right backend (KG / RAG / ALE / mixed) and assembles a `TurnWrapper` with one `PerSQResult` per intent. Every result is wrapped individually; a failure in one intent does not cascade to others.
+6. **TurnMemory** (`build_turn_memory`) extracts a compact, PII-safe memory object from the completed turn for injection into the next QU call.
+7. **Response Composer** (`compose`) narrates the `TurnWrapper` into a student-facing `QueryResponse`. It tries an LLM model chain (primary then fallbacks) and falls back to deterministic narration if all models fail. It never calls engines.
+8. The session is updated with the new turn and the built `TurnMemory`.
+9. The `QueryResponse` (`answer_text`, `citations`, `status`, `session_id`, `session_name`) is returned to the UI.
+
+---
+
+## Data Sources
+
+| Source | Location | Contents |
+|--------|----------|----------|
+| Student dataset | `data/students_anonymous.xlsx` | `data` sheet (profiles) + `registrations` sheet (transcript history) |
+| SAE student dataset | `engines/sae/data/students_anonymous.xlsx` | Same file mirrored for SAE-local use |
+| Course catalogue | `engines/sae/data/Course_Catalogue_Correct_Version.xlsx` | Credit-hour map for CGPA recalculation |
+| Curriculum rules | `engines/sae/rules/curriculum_2026.json` | Course list, prerequisites, credits (CGPA calculator fallback) |
+| KG entity aliases | `engines/kg/data/entity_aliases.json` | Alias and ambiguous-term table for the entity resolver |
+| Handbook | `engines/rag/CIS_Handbook.md` | Source document for handbook ingestion |
+| RAG artifacts | `engines/rag/chroma_db/`, `engines/rag/chunks.pkl` | Generated vector index and BM25 artifacts |
+| Neo4j database | external | Curriculum / skills / roles knowledge graph |
+
+---
 
 ## Project Structure
 
 ```text
 PathFinder_Integration/
-|- adapters/              # Thin wrappers around KG, RAG, and ALE
-|- data/                  # Student dataset
-|- engines/
-|  |- ale/                # Academic logic engine
-|  |- kg/                 # Neo4j queries and client
-|  |- rag/                # Handbook ingestion and retrieval
-|- gateway/               # Routing, context, session, response composition
-|  |- session_store/      # SessionStore ABC and SQLiteSessionStore implementation
-|- ui/                    # Streamlit frontend
-|- main.py                # FastAPI entrypoint
-|- requirements.txt       # Backend dependencies
-|- README.md
+├── main.py                           # FastAPI entrypoint; chat pipeline + SAE proxy routes
+├── requirements.txt                  # Python dependencies for the backend
+├── .env.example                      # Environment variable template
+├── pytest.ini                        # Pytest configuration
+│
+├── adapters/
+│   ├── ale_adapter.py                # ALEAdapter
+│   ├── kg_adapter.py                 # KGAdapter
+│   ├── rag_adapter.py                # RAGAdapter
+│   └── sae_adapter.py                # SAEAdapter (HTTP client to SAE service)
+│
+├── data/
+│   └── students_anonymous.xlsx       # Student dataset (profiles + transcript history)
+│
+├── engines/
+│   ├── ale/                          # Academic Logic Engine
+│   │   ├── ale_schemas.py            # ALE Pydantic input/output schemas
+│   │   ├── functions/
+│   │   │   ├── check_course_eligibility.py
+│   │   │   ├── run_graduation_audit.py
+│   │   │   ├── generate_semester_plan.py
+│   │   │   ├── generate_graduation_roadmap.py
+│   │   │   ├── simulate_gpa_forward.py
+│   │   │   └── solve_target_gpa.py
+│   │   ├── utils/
+│   │   │   └── grade_resolver.py     # Shared grade-point and retake resolution
+│   │   └── tests/                    # ALE unit + real-record tests (14 files)
+│   │
+│   ├── kg/                           # Knowledge Graph Engine (Neo4j)
+│   │   ├── neo4j_client.py           # Neo4j driver and connection management
+│   │   ├── queries.py                # All 19 KG operations
+│   │   ├── cypher/
+│   │   │   ├── load.cypher           # Load graph from CSVs
+│   │   │   ├── reset.cypher          # Reset the graph
+│   │   │   └── verify.cypher         # Verify graph integrity
+│   │   ├── data/
+│   │   │   ├── courses.csv
+│   │   │   ├── prerequisites.csv
+│   │   │   ├── course_track.csv
+│   │   │   ├── tracks.csv
+│   │   │   └── entity_aliases.json   # Alias + ambiguous-term table
+│   │   └── tests/                    # KG adapter + query tests
+│   │
+│   ├── rag/                          # RAG Handbook Engine
+│   │   ├── ingest.py                 # Index builder (run once or when handbook changes)
+│   │   ├── rag_core.py               # Hybrid retrieval pipeline
+│   │   ├── retriever.py              # Retriever interface
+│   │   ├── CIS_Handbook.md           # Source handbook document
+│   │   ├── chroma_db/                # Generated vector index (not in git)
+│   │   ├── chunks.pkl                # Generated BM25 artifact (not in git)
+│   │   └── manual_eval/              # Manual RAG evaluation logs
+│   │
+│   └── sae/                          # Student Analysis Engine
+│       ├── api.py                    # FastAPI router for all SAE endpoints
+│       ├── engine.py                 # Main analytics entry point
+│       ├── rule_engine.py            # All analysis rules (GPA trend, risk, anomaly, etc.)
+│       ├── cgpa_calculator.py        # CGPA recalculation from raw transcript
+│       ├── feature_engineering.py    # ML feature computation
+│       ├── data_loader.py            # Student Excel dataset loader
+│       ├── sae_adapter.py            # Internal data adapter (lazy DataFrames)
+│       ├── scheduler.py              # Background cache refresh
+│       ├── llm_client.py             # SAE-local LLM client (talking points)
+│       ├── llm_advisor.py            # LLM-driven advisor text generation
+│       ├── providers/
+│       │   ├── rules_provider.py     # Injectable rules provider
+│       │   └── student_context_provider.py  # Injectable student context provider
+│       ├── ml_research/              # ML training and model artifacts
+│       │   ├── augmentation.py
+│       │   ├── trainer.py
+│       │   └── saved_models/graduation_model.pkl
+│       ├── data/
+│       │   ├── students_anonymous.xlsx
+│       │   └── Course_Catalogue_Correct_Version.xlsx
+│       └── rules/
+│           └── curriculum_2026.json
+│
+├── gateway/
+│   ├── llm_client.py                 # Shared OpenAI-compatible LLM client
+│   ├── query_understanding.py        # QU entrypoint
+│   ├── qu_intents.py                 # Locked intent taxonomy (26 intents)
+│   ├── qu_llm_chain.py               # LLM model chain with fallback logic
+│   ├── qu_preprocessing.py           # Input normalization and follow-up resolution
+│   ├── qu_prompt.py                  # QU prompt templates
+│   ├── orchestrator.py               # Intent routing and TurnWrapper assembly
+│   ├── response_composer.py          # LLM-based answer narration
+│   ├── session_manager.py            # Session lifecycle and override management
+│   ├── student_context_provider.py   # Loads and normalizes StudentContext from Excel
+│   ├── turn_memory_builder.py        # Builds compact TurnMemory per completed turn
+│   ├── sae_rules_bridge.py           # Converts RAG rule bundles to SAE threshold dict
+│   ├── utils.py                      # Shared utilities
+│   ├── models/
+│   │   └── schemas.py                # All shared Pydantic models
+│   ├── session_store/
+│   │   ├── __init__.py
+│   │   ├── base.py                   # SessionStore ABC
+│   │   └── sqlite_store.py           # SQLiteSessionStore
+│   └── Documentation/                # Technical documentation per component
+│
+├── ui/
+│   ├── streamlit_app.py              # Streamlit chat frontend (alternative)
+│   └── requirements.txt              # Streamlit-specific dependencies
+│
+├── ui_react/                         # React browser UI (primary)
+│   ├── index.html                    # Entry point — configure backend URL here
+│   ├── app.css                       # Full stylesheet
+│   ├── js/
+│   │   ├── api.js                    # All backend API calls
+│   │   ├── components.js             # Shared UI components
+│   │   ├── data_flows.js             # Data fetching and state management
+│   │   ├── sae_pages.js              # Student dashboard + advisor console components
+│   │   └── main_app.js               # Top-level app, routing, login, chat view
+│   └── vendor/                       # Bundled React, ReactDOM, Babel (no CDN)
+│
+├── tests/                            # Main test suite
+│   ├── conftest.py                   # Shared fixtures
+│   ├── test_main.py                  # API endpoint tests
+│   ├── test_orchestrator.py          # Orchestrator routing tests
+│   ├── test_query_understanding.py   # QU classification tests
+│   ├── test_response_composer.py     # Composer narration tests
+│   ├── test_session_manager.py       # Session lifecycle and override tests
+│   ├── test_student_context_provider.py
+│   ├── test_turn_memory.py           # TurnMemory builder tests
+│   ├── test_ale_adapter.py           # ALE adapter tests
+│   ├── test_kg_adapter.py            # KG adapter tests
+│   ├── test_kg_adapter_logging.py
+│   ├── test_rag_adapter.py
+│   ├── test_rag_adapter_execute.py
+│   ├── test_rag_adapter_structured.py
+│   ├── test_rag_core_structured.py
+│   ├── test_rag_rule_bundles.py
+│   ├── test_semester_plan_redesign.py
+│   ├── test_semester_offering_filter.py
+│   ├── test_integration_contracts.py # Cross-component contract tests
+│   ├── test_integration_domain1.py   # Domain 1 integration tests
+│   ├── test_phase2_d2_course_info.py
+│   ├── test_phase2_d3_career.py
+│   ├── test_phase2_d4_track_guidance.py
+│   ├── test_phase2_d6_student_record.py
+│   ├── test_op4_matched_skills.py
+│   ├── test_utils.py
+│   ├── test_streamlit_app.py
+│   ├── acceptance_orchestrator.py    # End-to-end orchestrator acceptance tests
+│   ├── acceptance_qu.py              # End-to-end QU acceptance tests
+│   ├── smoke_test_qu.py              # QU smoke tests (live LLM)
+│   ├── smoke_test_ale_adapter.py     # ALE smoke tests (live data)
+│   └── rag_manual_test.py            # Manual RAG retrieval test
+│
+└── scripts/
+    ├── live_qu_behavior_check.py     # Multi-query QU live behavior check
+    └── one_query_qu_trial.py         # Single-query QU trial runner
 ```
 
-## Detailed Project Structure
-
-```text
-PathFinder_Integration/
-|- main.py                                          # FastAPI entrypoint; exposes /chat, /sessions, /session, /health
-|- requirements.txt                                 # Backend Python dependencies
-|- .env.example                                     # Environment variable template
-|- .env
-|- pytest.ini                                       # Pytest configuration
-|- .gitignore
-|- PathFinder_Orchestrator_Handoff.md               # Orchestrator design handoff doc
-|- PathFinder_Orchestrator_Phases_1_6_Locked_Design.md  # Locked orchestrator design (phases 1–6)
-|- PathFinder_Query_Understanding_Locked_Design.md  # Locked QU design doc
-|
-|- adapters/                          # Thin wrappers giving the orchestrator a clean engine interface
-|  |- kg_adapter.py                   # KGAdapter: wraps all KG query operations
-|  |- rag_adapter.py                  # RAGAdapter: wraps handbook retrieval
-|  |- ale_adapter.py                  # ALEAdapter: wraps all ALE academic logic operations
-|
-|- data/
-|  |- students_anonymous.xlsx         # Student dataset (profile + transcript/registration history)
-|
-|- engines/
-|  |- ale/                            # Academic Logic Engine
-|  |  |- schemas.py                   # ALE input/output Pydantic schemas
-|  |  |- functions/
-|  |  |  |- check_course_eligibility.py     # Eligibility check for a course + attempt type
-|  |  |  |- run_graduation_audit.py         # Full graduation requirements + honors check
-|  |  |  |- generate_semester_plan.py       # Multi-variant semester plan generator
-|  |  |  |- generate_graduation_roadmap.py  # Full semester-by-semester graduation roadmap
-|  |  |  |- simulate_gpa_forward.py         # CGPA projection given hypothetical grades
-|  |  |  |- solve_target_gpa.py             # Grade targets needed to reach a CGPA goal
-|  |  |- utils/
-|  |     |- grade_resolver.py               # Shared grade-point and retake resolution utilities
-|  |
-|  |- kg/                             # Knowledge Graph engine (Neo4j)
-|  |  |- neo4j_client.py              # Neo4j connection and driver management
-|  |  |- queries.py                   # All 19 KG operations (courses, skills, roles, tracks, resolver)
-|  |  |- cypher/
-|  |  |  |- load.cypher               # Cypher script to load graph data from CSVs into Neo4j
-|  |  |  |- verify.cypher             # Cypher script to verify graph integrity after loading
-|  |  |- data/
-|  |  |  |- courses.csv               # Course nodes
-|  |  |  |- course_skill.csv          # Course→Skill edges with weights
-|  |  |  |- course_track.csv          # Course→Track membership edges
-|  |  |  |- prerequisites.csv         # Course→Course prerequisite edges
-|  |  |  |- roles.csv                 # Career role nodes
-|  |  |  |- role_skill.csv            # Role→Skill edges with weights
-|  |  |  |- skills.csv                # Skill nodes
-|  |  |  |- tracks.csv                # Track nodes
-|  |  |  |- entity_aliases.json       # Alias + ambiguous-term table for the KG entity resolver
-|  |  |- Original Data source/
-|  |     |- Course Catalogue_Correct Version.xlsx   # Raw source used to build the KG CSVs
-|  |
-|  |- rag/                            # RAG handbook engine
-|     |- ingest.py                    # Index builder: chunks handbook, builds Chroma + BM25 index
-|     |- rag_core.py                  # Hybrid retrieval pipeline (dense + BM25 + cross-encoder reranker)
-|     |- retriever.py                 # Retriever interface used by the RAG adapter
-|     |- CIS_Handbook.md              # Source handbook document
-|     |- chunks.pkl                   # Generated BM25/parent-chunk artifact (rebuilt by ingest.py)
-|     |- chroma_db/                   # The vector embeddings DB for the handbook
-|        |- chroma.sqlite3
-|
-|- gateway/                           # Routing, query understanding, session, and response composition
-|  |- llm_client.py                   # Shared OpenAI-compatible LLM client with model-chain fallback
-|  |- query_understanding.py          # QU entrypoint: orchestrates preprocessing, LLM chain, and keyword fallback
-|  |- qu_intents.py                   # Intent and engine-pattern definitions (all recognized intents)
-|  |- qu_llm_chain.py                 # LLM-based intent classification chain with retry/fallback logic
-|  |- qu_preprocessing.py             # Input normalization and follow-up reference resolution
-|  |- qu_prompt.py                    # QU system and user prompt templates
-|  |- orchestrator.py                 # Routes intents to KG / RAG / ALE; assembles TurnWrapper
-|  |- response_composer.py            # Narrates TurnWrapper into a student-facing QueryResponse
-|  |- session_manager.py              # Session lifecycle, context window, entity tracking, course/role overrides
-|  |- student_context_provider.py     # Loads student data from Excel; builds normalized StudentContext
-|  |- utils.py                        # Shared utilities (current semester label, etc.)
-|  |- models/
-|  |  |- schemas.py                   # Shared Pydantic models (QueryRequest, QueryResponse, TurnWrapper, etc.)
-|  |- session_store/
-|     |- __init__.py                  # Package init; exports SessionStore and SQLiteSessionStore
-|     |- base.py                      # SessionStore abstract base class (ABC)
-|     |- sqlite_store.py              # SQLiteSessionStore: persists sessions and history to SQLite
-|     |- pathfinder_sessions.db       # The SQLite DB that holds the sessions
-|
-|- ui/
-|  |- streamlit_app.py                # Streamlit student-facing chat frontend
-|  |- requirements.txt                # UI-specific Python dependencies (Streamlit, requests)
-|
-|- tests/
-   |- conftest.py                     # Shared pytest fixtures
-   |- test_main.py                    # API endpoint tests (/chat, /sessions, /health)
-   |- test_orchestrator.py            # Orchestrator routing and intent-dispatch tests
-   |- test_query_understanding.py     # QU classification and fallback tests
-   |- test_rag_adapter.py             # RAG adapter tests
-   |- test_kg_adapter.py              # KG adapter tests
-   |- test_response_composer.py       # Response composer narration tests
-   |- test_session_manager.py         # Session manager lifecycle and override tests
-   |- test_student_context_provider.py  # Student context loading and normalization tests
-   |- test_semester_offering_filter.py  # Semester offering filter logic tests
-   |- acceptance_orchestrator.py      # End-to-end orchestrator acceptance tests
-   |- acceptance_qu.py                # End-to-end QU acceptance tests
-   |- smoke_test_qu.py                # QU smoke tests (live LLM call)
-   |- smoke_test_ale_adapter.py       # ALE adapter smoke tests
-   |- rag_manual_test.py              # Manual RAG retrieval test script
-```
+---
 
 ## Requirements
 
-- Python environment with the packages in `requirements.txt`
+- Python 3.10+
 - Neo4j instance populated with the knowledge graph
-- An OpenAI-compatible LLM endpoint for query understanding / response composition
-- Student dataset Excel file present at `data/students_anonymous.xlsx`
+- An OpenAI-compatible LLM endpoint (e.g. Groq) for QU and Composer
+- Groq API key for RAG rule bundle extraction at startup
+- Student dataset at `data/students_anonymous.xlsx`
+- RAG index built via `python engines/rag/ingest.py` (first time or on handbook change)
+
+---
 
 ## Configuration
 
-The code reads configuration from `.env`. Copy `.env.example` to `.env` and fill in the values.
+Copy `.env.example` to `.env` and fill in the values.
 
-**Shared LLM client** (used by Query Understanding and Response Composer):
+**Shared LLM client** (QU and Composer):
 
-- `LLM_PROVIDER` — LLM provider label (e.g. `groq`)
-- `LLM_BASE_URL` — OpenAI-compatible endpoint base URL
-- `LLM_API_KEY` — API key for the LLM provider
-- `LLM_MODEL` — default model fallback when no per-component model is set (default: `llama-3.1-8b-instant`)
-- `LLM_TIMEOUT_SECONDS` — request timeout in seconds (default: `20`)
+```env
+LLM_PROVIDER=groq
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_API_KEY=your_key_here
+LLM_MODEL=llama-3.1-8b-instant
+LLM_TIMEOUT_SECONDS=20
+```
 
-**Query Understanding model chain** (QU tries models in order; falls back to keyword matching):
+**Query Understanding model chain:**
 
-- `QU_PRIMARY_MODEL` — primary model for intent classification (recommended: `llama-3.3-70b-versatile`)
-- `QU_FALLBACK_MODELS` — comma-separated fallback models tried on timeout, 429, or bad JSON
-- `QU_TIMEOUT_SECONDS` — per-call LLM timeout for QU (default: `30`)
+```env
+QU_PRIMARY_MODEL=llama-3.3-70b-versatile
+QU_FALLBACK_MODELS=openai/gpt-oss-120b,openai/gpt-oss-20b
+QU_TIMEOUT_SECONDS=30
+```
 
-**Response Composer model chain** (Composer tries models in order; falls back to deterministic narration):
+**Response Composer model chain:**
 
-- `COMPOSER_USE_LLM` — set to `false` to skip LLM and always use deterministic fallback (useful in CI)
-- `COMPOSER_PRIMARY_MODEL` — primary model for answer narration (recommended: `qwen/qwen3-32b`)
-- `COMPOSER_FALLBACK_MODELS` — comma-separated fallback models tried on failure
-- `COMPOSER_TIMEOUT_SECONDS` — per-call LLM timeout for Composer (default: `30`)
+```env
+COMPOSER_USE_LLM=true
+COMPOSER_PRIMARY_MODEL=qwen/qwen3-32b
+COMPOSER_FALLBACK_MODELS=llama-3.1-8b-instant,openai/gpt-oss-20b
+COMPOSER_TIMEOUT_SECONDS=30
+```
 
-**Knowledge Graph**:
+**Knowledge Graph:**
 
-- `NEO4J_URI`
-- `NEO4J_USER`
-- `NEO4J_PASSWORD`
-- `NEO4J_DATABASE`
+```env
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=neo4j
+```
 
-**RAG** (Groq-based generator used for rule bundle extraction at startup):
+**RAG** (Groq used for rule bundle extraction at startup):
 
-- `GROQ_API_KEY`
-- `GROQ_MODEL`
+```env
+GROQ_API_KEY=your_groq_key
+RAG_GROQ_MODEL=llama-3.1-8b-instant
+RAG_FALLBACK_MODELS=llama-3.1-8b-instant
+RAG_TIMEOUT_SECONDS=60
+RAG_RULE_BUNDLE_DELAY_SECONDS=2.0
+```
 
-**Session and UI**:
+**Session:**
 
-- `PATHFINDER_API_URL` — backend URL used by the Streamlit UI (default: `http://localhost:8000`)
-- `SESSION_DB_PATH` — path to the SQLite session file (default: `pathfinder_sessions.db`)
-- `QU_CONTEXT_TURNS` — number of recent turns passed to QU for context (default: `5`)
+```env
+SESSION_DB_PATH=./pathfinder_sessions.db
+QU_CONTEXT_TURNS=5
+```
 
-**Dev/environment flags** (do not set in production):
+**React UI:**
 
-- `APP_ENV` — set to `dev` to enable developer-only endpoints (`DELETE /dev/...`)
-- `DEV_MODE` — set to `true` as an alternative to `APP_ENV=dev` for enabling dev endpoints
+```env
+PATHFINDER_API_URL=http://localhost:8000
+```
+
+**Student Analysis Engine:**
+
+```env
+SAE_BASE_URL=http://localhost:8502
+SAE_TIMEOUT_SECONDS=30
+```
+
+**Dev-only flags** (do not set in production):
+
+```env
+APP_ENV=dev
+DEV_MODE=true
+PATHFINDER_TRACE=false
+```
+
+---
 
 ## Setup
 
-**1. Create and activate a virtual environment (Python 3.10+):**
+**1. Create a virtual environment (Python 3.10+):**
 
 ```bash
 python -m venv .venv
-# On Windows:
+# Windows:
 .venv\Scripts\activate
-# On macOS/Linux:
+# macOS/Linux:
 source .venv/bin/activate
 ```
 
@@ -356,326 +486,239 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and fill in:
-- `LLM_API_KEY` — your LLM provider API key (e.g. Groq)
-- `LLM_BASE_URL` — OpenAI-compatible base URL for your provider
-- `QU_PRIMARY_MODEL`, `COMPOSER_PRIMARY_MODEL` — see Recommended Model Configuration below
-- Neo4j credentials (`NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`)
-- `GROQ_API_KEY` — required for RAG rule bundle extraction at startup
+Fill in at minimum: `LLM_API_KEY`, `LLM_BASE_URL`, `GROQ_API_KEY`, and Neo4j credentials.
 
-**4. Start Neo4j:**
+**4. Start Neo4j** and verify the knowledge graph is loaded. To load from scratch:
 
-Ensure your Neo4j instance is running and the knowledge graph is loaded. To load the graph from scratch, run the Cypher scripts in `engines/kg/cypher/`.
+```bash
+# Run load.cypher in the Neo4j browser or via cypher-shell
+engines/kg/cypher/load.cypher
+```
 
 **5. Place the student dataset:**
 
 Ensure `data/students_anonymous.xlsx` is present with a `data` sheet and a `registrations` sheet.
 
-**6. Build the RAG index** (first time, or whenever the handbook changes):
+**6. Build the RAG index** (first time, or when the handbook changes):
 
 ```bash
-python engines/RAG/ingest.py
+python engines/rag/ingest.py
 ```
 
-This creates `engines/RAG/chroma_db/` and `engines/RAG/chunks.pkl`. Startup will fail without these.
+This creates `engines/rag/chroma_db/` and `engines/rag/chunks.pkl`. The backend will not start without them.
 
-**7. Start the backend:**
+**7. Start the main backend:**
 
 ```bash
 python -m uvicorn main:app --reload
 ```
 
-Startup takes 25–110 seconds (RAG model loading + rule bundle extraction). Check the log for `PathFinder: ready.`
+Startup takes 25–110 seconds (RAG model loading + 11 rule bundle extractions). Watch for `PathFinder: ready.` in the log.
 
-Backend API docs: `http://localhost:8000/docs`
+API docs: `http://localhost:8000/docs`
 
-**8. Start the UI** (separate terminal, same virtual environment):
+**8. Start the SAE service** (separate terminal, same virtual environment):
+
+```bash
+uvicorn engines.sae.api:app --port 8502
+```
+
+The SAE loads the student dataset and course catalogue on first request. The main backend will log `SAE not reachable` at startup if the SAE is not running yet — the chat pipeline continues to work without it; only the analytics dashboard will be unavailable.
+
+**9. Open the React UI:**
+
+Open `ui_react/index.html` directly in a browser, or serve it with any static file server:
+
+```bash
+python -m http.server 5500 --directory ui_react
+```
+
+Then open `http://localhost:5500`. The backend URL is configured via `window.__PF_API_BASE__` at the top of `index.html` — change it if your backend is not on port 8000.
+
+**10. (Alternative) Start the Streamlit UI:**
 
 ```bash
 python -m streamlit run ui/streamlit_app.py
 ```
 
-UI: `http://localhost:8501`
+Streamlit UI: `http://localhost:8501`. Configure `PATHFINDER_API_URL` in `.env` to match the backend address.
 
-## Session Deletion And Developer Cleanup
+---
 
-PathFinder stores chat sessions in SQLite (`SESSION_DB_PATH`). There are two deletion workflows:
+## Session Deletion and Developer Cleanup
 
-- Student/UI deletion: delete one session at a time from the Streamlit sidebar, or call `DELETE /students/{student_id}/sessions/{session_id}`
-- Developer cleanup: call the dev-only bulk delete endpoints directly against the backend; the Streamlit UI is not required
+Sessions are persisted in SQLite at `SESSION_DB_PATH`. Three deletion flows are available:
 
-### Student-Safe Single Session Delete
-
-Use this when you want to remove one specific chat session for a student:
-
-- Endpoint: `DELETE /students/{student_id}/sessions/{session_id}`
-- Ownership check: yes; the backend verifies that the session belongs to the given student
-- Typical use: the trash button in the Streamlit sidebar calls this endpoint
-
-### Developer Bulk Delete For One Student
-
-Use this when you want to clear all old sessions for one student before testing, without affecting other students.
-
-**Prerequisite:** dev mode must be enabled for the backend process.
-
-- Set `APP_ENV=dev` in `.env`, or set `DEV_MODE=true`
-- Restart the backend after changing `.env`
-- If dev mode is not enabled, the endpoint returns `403 Forbidden`
-
-**Step-by-step:**
-
-1. Start the backend:
+### Per-student session delete (production-safe)
 
 ```bash
-python -m uvicorn main:app --reload
+# Via React UI — trash button in the session sidebar
+# Via API:
+curl -X DELETE http://localhost:8000/students/STU000001/sessions/<session_id>
 ```
 
-2. In a second terminal, optionally list the student's current sessions:
+Ownership is verified: the session must belong to the given student ID.
+
+### Bulk delete for one student (dev mode)
+
+Enable dev mode in `.env` (`APP_ENV=dev`), then:
 
 ```powershell
-Invoke-RestMethod -Method Get http://localhost:8000/sessions/STU000001
-```
-
-3. Delete all sessions for that student:
-
-```powershell
+# Delete all sessions for one student
 Invoke-RestMethod -Method Delete http://localhost:8000/dev/students/STU000001/sessions
+
+# Expected response:
+# { "deleted": true, "student_id": "STU000001", "count": 12 }
 ```
 
-4. Verify that the session list is now empty:
-
-```powershell
-Invoke-RestMethod -Method Get http://localhost:8000/sessions/STU000001
-```
-
-Expected delete response:
-
-```json
-{
-  "deleted": true,
-  "student_id": "STU000001",
-  "count": 12
-}
-```
-
-Notes:
-
-- This deletes only rows whose `student_id` matches the requested student
-- It does not delete student Excel data, KG data, RAG data, or any other student sessions
-- This is the recommended fast cleanup flow for Phase 2 testing of one student
-
-### Developer Global Session Reset
-
-Use this only when you intentionally want to wipe every stored chat session for every student.
-
-- Endpoint: `DELETE /dev/sessions`
-
-PowerShell example:
+### Global session reset (dev mode)
 
 ```powershell
 Invoke-RestMethod -Method Delete http://localhost:8000/dev/sessions
+# { "deleted": true, "count": 57 }
 ```
 
-Expected response:
-
-```json
-{
-  "deleted": true,
-  "count": 57
-}
-```
-
-Notes:
-
-- Requires dev mode, just like the per-student bulk delete endpoint
-- Deletes all session rows from the SQLite session store
-- Does not delete Excel data, KG data, RAG data, or code
-- Use with caution; this is a full session reset for the whole app
-
-### Direct SQLite Cleanup
-
-If the backend is unavailable, a developer can delete session rows directly from the SQLite database file referenced by `SESSION_DB_PATH`.
-
-- Default DB path: `pathfinder_sessions.db`
-- Example repo-local DB path: `gateway/session_store/pathfinder_sessions.db`
-
-Typical scoped SQL for one student:
+### Direct SQLite cleanup (when backend is offline)
 
 ```sql
+-- Inspect sessions for one student
 SELECT session_id, session_name, last_updated
 FROM sessions
 WHERE student_id = 'STU000001'
 ORDER BY last_updated DESC;
 
-DELETE FROM sessions
-WHERE student_id = 'STU000001';
+-- Delete
+DELETE FROM sessions WHERE student_id = 'STU000001';
 ```
 
-Use direct DB deletion only when necessary, because it bypasses the API's normal guards and logging.
+---
 
-## Example Questions
+## Test Commands
+
+Run targeted component tests (no live LLM or Neo4j required for most):
+
+```bash
+# Core pipeline
+python -m pytest tests/test_main.py -v --tb=short
+python -m pytest tests/test_orchestrator.py -v --tb=short
+python -m pytest tests/test_query_understanding.py -v --tb=short
+python -m pytest tests/test_response_composer.py -v --tb=short
+python -m pytest tests/test_session_manager.py -v --tb=short
+python -m pytest tests/test_turn_memory.py -v --tb=short
+python -m pytest tests/test_student_context_provider.py -v --tb=short
+
+# ALE engine (offline)
+python -m pytest tests/test_ale_adapter.py tests/test_semester_plan_redesign.py -v --tb=short
+
+# Integration contracts
+python -m pytest tests/test_integration_contracts.py -v --tb=short
+
+# Full offline suite
+python -m pytest tests/ -v --tb=short -k "not smoke"
+```
+
+Do not run `smoke_test_*.py` or `acceptance_*.py` without live LLM and Neo4j configured.
+
+---
+
+## Example Queries
 
 **Policy and handbook:**
-
 - "What is the grading scale at EUI?"
-- "What is the minimum GPA to stay enrolled?"
 - "What is the retake policy for failed courses?"
-- "What is the withdrawal deadline?"
+- "How many credits can I register with my current GPA?"
 
 **Course information:**
-
 - "Tell me about C-CS301"
 - "What are the prerequisites for C-AI421?"
 - "What skills does Deep Learning teach?"
 - "Which courses teach machine learning?"
 
-**Academic decisions (student-aware):**
-
+**Academic decisions:**
 - "Can I take C-CS401 now?"
-- "Am I eligible to register for next semester?"
-- "What is my current GPA?"
 - "Can I graduate this semester?"
 - "What courses do I still need to graduate?"
 - "Give me my graduation roadmap"
 - "What courses can I take next semester?"
+- "Give me the maximum load I can take next semester"
+- "Plan next semester with Introduction to Database Systems and fill the rest"
+
+**GPA tools:**
+- "If I get A in Introduction to Database Systems, what will my CGPA be?"
+- "What grades do I need to reach a 3.0 CGPA?"
 
 **Career and track guidance:**
-
+- "I want to become a data scientist — what skills am I missing?"
 - "What roles can I get with the AI track?"
-- "What skills does a Machine Learning Engineer need?"
-- "Tell me about the Data Science track"
+- "Compare AI and Data Science tracks."
 
-**Student record:**
-
-- "What is my study status?"
-- "What program am I enrolled in?"
-- "What level am I in?"
-
-**Session chaining (follow-ups):**
-
+**Session chaining:**
 - "Tell me about C-CS301" → "What are its prerequisites?" → "Can I take it?"
+- "Assume I passed Operating Systems. Now plan my semester." → "Reset assumptions."
+
+---
 
 ## Current Limitations
 
-These are worth knowing if you continue developing the project:
-
-- Sessions are persisted in a local SQLite file (`SESSION_DB_PATH`). Horizontal scaling or a shared remote store is not yet supported.
-- The current semester label is derived dynamically from the system date in `gateway/utils.py` (`get_current_semester`). There is no administrative override if the academic calendar differs from the calendar mapping (Sep–Jan → Fall, Feb–Jun → Spring, Jul–Aug → Summer).
-- Student login is based only on IDs found in the Excel sheet.
-- The backend assumes the student Excel file has the expected sheet names and columns.
-- Semester planning and graduation roadmap both receive the available course list from the KG (`get_courses_by_track`). The orchestrator must populate `kg_data["available_courses"]` correctly; if it passes an empty list, ALE will return `no_eligible_courses`.
-- GPA simulation and target GPA solving are implemented in ALE, but the chat flow does not yet gather a rich simulation scenario (e.g. planned courses with attempt types and old grades) automatically from the conversation.
-- The frontend is a lightweight internal UI and does not include authentication beyond student ID entry.
-- Rule bundle loading at startup calls the Groq API 11 times with a 2-second inter-call delay. On a cold start this takes roughly 25–35 seconds. `student_level_rules` is the most rate-limit-sensitive bundle and may fail on the first attempt if Groq returns a 429; a backend restart resolves it.
-- Full end-to-end behavioral validation (intent-by-intent, domain correctness) happens in Phase 2. Phase 1 validates components individually.
-- `qwen/qwen3-32b` (Composer primary) is a preview model; production model hardening is deferred to a later phase.
+- Sessions are persisted in a local SQLite file. Horizontal scaling or a shared remote store is not yet supported.
+- The current semester label is derived from the system date in `gateway/utils.py`. There is no administrative calendar override.
+- Student login is based only on IDs found in the Excel sheet; the SAE validates student IDs against its own loaded dataset.
+- Rule bundle loading at startup calls the Groq API 11 times with a configurable inter-call delay (`RAG_RULE_BUNDLE_DELAY_SECONDS`). Cold start takes roughly 25–110 seconds depending on rate limits.
+- `qwen/qwen3-32b` (Composer primary) is a preview model; production model selection is deferred.
 - The `/health` endpoint returns a basic `{"status": "ok"}` response only. Per-component health checks are not yet implemented.
-- The Composer deterministic reset-assumptions wording improvement is deferred pending an `assumptions_cleared=True` signal from the Orchestrator.
+- The SAE advisor overview is cached to disk for 24 hours by default; forced refresh via `force_refresh=true` query parameter.
+- The React UI uses in-browser Babel transformation which is suitable for development and demos but not for a production deployment — a proper build step (Vite, Create React App) should replace it before production use.
+
+---
 
 ## Troubleshooting
 
 **Backend fails to start / rule bundles not loaded:**
-Run `uvicorn main:app` and check the startup log. The RAG retriever must initialise before rule bundles are loaded. If you see `retriever not ready at import time`, the `engines/rag/chroma_db/` or `engines/rag/chunks.pkl` artifacts are missing — run `python engines/rag/ingest.py` first.
+Check the startup log. The RAG retriever must initialise before rule bundles are extracted. If you see `retriever not ready at import time`, the `engines/rag/chroma_db/` or `engines/rag/chunks.pkl` artifacts are missing — run `python engines/rag/ingest.py` first.
 
 **Rule bundle partial load (e.g. `student_level_rules` fails with 429):**
-This is a Groq rate-limit transient error at startup. The bundle loads as `None`; the ALE will use a safe default for that bundle. Restart the backend after a few seconds to retry.
+Groq rate-limit transient error at startup. The affected bundle loads as `None`; ALE uses a safe default for that bundle. Restart the backend after a few seconds.
+
+**SAE not reachable at startup:**
+The chat pipeline continues to work. Start `uvicorn engines.sae.api:app --port 8502` in a separate terminal. The main backend will pick it up on the next `/sae/*` request without restart.
 
 **Answer text starts with `<think>` tag:**
-Reasoning models (Qwen3 and similar) emit chain-of-thought in `<think>` blocks. The Composer strips these automatically. If you see them in responses, ensure `gateway/response_composer.py` is up to date.
+Reasoning models emit chain-of-thought in `<think>` blocks. The Composer strips these automatically. If they appear in responses, ensure `gateway/response_composer.py` is up to date.
 
 **Neo4j unavailable:**
-The KG adapter degrades gracefully: KG-dependent intents return `kg_unavailable` and the Composer narrates the error. The system still serves policy and record queries.
+The KG adapter degrades gracefully — KG-dependent intents return `kg_unavailable` and the Composer narrates the error. Policy and record queries continue to work.
 
-**Streamlit cannot reach backend:**
-Set `PATHFINDER_API_URL=http://127.0.0.1:8000` in `.env` (or the host:port where the backend is running).
+**React UI cannot reach backend:**
+Edit `window.__PF_API_BASE__` at the top of `ui_react/index.html` to match your backend address and port.
+
+**Streamlit UI cannot reach backend:**
+Set `PATHFINDER_API_URL=http://127.0.0.1:8000` in `.env`.
+
+---
 
 ## Recommended Model Configuration
 
-These are the validated model settings for Phase 1 demo:
-
 ```env
-# Query Understanding — llama-3.3-70b-versatile as primary for intent accuracy
+# Query Understanding
 QU_PRIMARY_MODEL=llama-3.3-70b-versatile
 QU_FALLBACK_MODELS=openai/gpt-oss-120b,openai/gpt-oss-20b
 QU_TIMEOUT_SECONDS=30
 
-# Response Composer — qwen/qwen3-32b for demo narration quality
+# Response Composer
 COMPOSER_USE_LLM=true
 COMPOSER_PRIMARY_MODEL=qwen/qwen3-32b
 COMPOSER_FALLBACK_MODELS=llama-3.1-8b-instant,openai/gpt-oss-20b
 COMPOSER_TIMEOUT_SECONDS=30
 ```
 
-Composer intentionally does not use `llama-3.3-70b-versatile` to avoid provider rate limits — QU already uses it as primary.
-`qwen/qwen3-32b` produces high-quality demo narration but is a preview model; production roadmap may move Composer primary to `openai/gpt-oss-20b`.
+Composer intentionally avoids `llama-3.3-70b-versatile` to prevent provider rate conflicts with QU. `qwen/qwen3-32b` produces high-quality narration but is a preview model; `openai/gpt-oss-20b` is the recommended production fallback.
 
-## Test Commands
-
-Run targeted component tests (no live LLM required for most):
-
-```bash
-python -m pytest tests/test_main.py -v --tb=short
-python -m pytest tests/test_orchestrator.py -v --tb=short
-python -m pytest tests/test_response_composer.py -v --tb=short
-python -m pytest tests/test_query_understanding.py -v --tb=short
-python -m pytest tests/test_session_manager.py -v --tb=short
-python -m pytest tests/test_student_context_provider.py -v --tb=short
-python -m pytest tests/test_utils.py -v --tb=short
-```
-
-Run full non-live suite:
-
-```bash
-python -m pytest tests/ -v --tb=short -k "not smoke"
-```
-
-Do not run `smoke_test_*.py` or `acceptance_*.py` without live LLM and Neo4j configured — they make real external calls.
-
-## Supervisor Demo Queries
-
-The following are recommended queries for demonstrating PathFinder in a Phase 1 demo session. Full E2E behavioral validation happens in Phase 2; use these as guided demo flows, not automated regression tests.
-
-**Student record and overview:**
-- "What courses did I complete so far?"
-- "What level am I in?"
-- "What is my current CGPA?"
-
-**Course exploration:**
-- "What are the prerequisites of Advanced Programming?"
-- "What skills does Deep Learning teach?"
-- "Which courses teach machine learning?"
-
-**Eligibility and planning:**
-- "Can I take Advanced Programming?"
-- "What courses can I take next semester?"
-- "Can I graduate? If not, give me a roadmap."
-
-**Policy and rules:**
-- "What happens if my CGPA drops below 2?"
-- "How many credits can I register with my current GPA?"
-- "What is the retake policy for failed courses?"
-
-**Career and track guidance:**
-- "I want to become a data scientist. What am I missing?"
-- "Compare AI and Data Science tracks."
-- "What roles can I get with the AI track?"
-
-**Session chaining:**
-- "Tell me about Advanced Programming" → "What are its prerequisites?" → "Can I take it?"
-- "Assume I passed Operating Systems. Now plan my semester." → "Reset assumptions."
+---
 
 ## Development Notes
 
-- FastAPI and Streamlit are run as separate processes.
-- Query understanding and response composition both use the shared `gateway/llm_client.py` with separate model chains controlled by `QU_*` and `COMPOSER_*` env vars.
-- The `/chat` endpoint returns `QueryResponse` (fields: `session_id`, `session_name`, `answer_text`, `citations`, `status`). The intermediate `TurnWrapper` is internal and not exposed.
-- Neo4j connectivity is verified when the KG adapter starts up.
-
-## Suggested Next Improvements
-
-- Add deployment instructions for backend, frontend, Neo4j, and vector index artifacts
-- Migrate LangChain Chroma integration to `langchain_chroma` (deprecation warning; deferred to Phase 5)
-- Set `HF_TOKEN` to avoid unauthenticated HuggingFace download limits on first startup
-- Per-component health checks in `/health` (currently returns basic `{"status": "ok"}` only)
-- Composer reset-assumptions wording: needs `assumptions_cleared=True` signal from Orchestrator
-- Horizontal scaling / shared session store (currently SQLite, single-process only)
+- The main backend (`main.py`) and the SAE service (`engines/sae/api.py`) are separate processes. They share no database, no in-process state, and no imports at runtime — communication is HTTP only.
+- The `/chat` endpoint returns `QueryResponse` (`session_id`, `session_name`, `answer_text`, `citations`, `status`). The intermediate `TurnWrapper` is internal.
+- QU and Composer use the shared `gateway/llm_client.py` with independent model chains controlled by `QU_*` and `COMPOSER_*` env vars.
+- FastAPI and Streamlit (if used) are run as separate processes.
+- The React UI can be opened as a local file (`file://`) or served by any static server — no Node.js or npm required.

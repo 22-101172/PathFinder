@@ -49,6 +49,20 @@ function creditsBarColor(earned, expected){
   return "var(--danger)";
 }
 
+/* category_performance arrives as { categories: {...}, strongest_category, weakest_category }
+   from both /sae/student/{id} and /sae/student/{id}/analysis (verified live).
+   Accept a flat {name: stats} dict too, in case the shape ever changes. */
+function getCategoryMap(cp){
+  if (!cp || typeof cp !== "object") return {};
+  if (cp.categories && typeof cp.categories === "object") return cp.categories;
+  const out = {};
+  Object.keys(cp).forEach(k => {
+    const v = cp[k];
+    if (v && typeof v === "object" && ("pass_rate" in v || "avg_grade_points" in v)) out[k] = v;
+  });
+  return out;
+}
+
 /* ---------------- GPA-over-time line chart (theme-aware SVG) ---------------- */
 function GpaChart({ history, min, minLabel }){
   const uid = useAR("gpaFill_" + (++_gpaUid)).current;
@@ -63,7 +77,26 @@ function GpaChart({ history, min, minLabel }){
   const yTicks = [0,1,2,3,4];
 
   const [draw, setDraw] = useAS(false);
+  const [hovered, setHovered] = useAS(null);   // index of the hovered data point
   useAE(()=>{ const t=setTimeout(()=>setDraw(true),80); return ()=>clearTimeout(t); },[]);
+
+  function renderTooltip(){
+    if (hovered === null || !history[hovered]) return null;
+    const p = pts[hovered], d = history[hovered];
+    const label = `${d.term}: ${Number(d.gpa).toFixed(2)}`;
+    const tw = Math.max(96, label.length * 6.8 + 18), th = 27;
+    let tx = p[0] - tw / 2;                              // centred on the dot…
+    tx = Math.max(padL, Math.min(tx, W - padR - tw));    // …shifted back inside the plot near the edges
+    const above = p[1] - th - 12 >= 2;
+    const ty = above ? p[1] - th - 12 : p[1] + 14;
+    return (
+      <g pointerEvents="none">
+        <rect x={tx} y={ty} width={tw} height={th} rx="7" fill="var(--text)" opacity="0.93" />
+        <text x={tx + tw/2} y={ty + 17.5} textAnchor="middle"
+              fill="var(--bg)" fontFamily="var(--font-mono)" fontSize="11.5" fontWeight="700">{label}</text>
+      </g>
+    );
+  }
 
   return (
     <svg className="gpa-chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="CGPA over time">
@@ -90,13 +123,22 @@ function GpaChart({ history, min, minLabel }){
 
       {pts.map((p,i)=>(
         <circle key={i} className={"dot"+(i===pts.length-1?" dot-last":"")} cx={p[0]} cy={p[1]}
-          r={i===pts.length-1?5:4} style={{opacity:draw?1:0,transition:`opacity .4s ease ${0.5+i*0.06}s`}} />
+          r={hovered===i ? (i===pts.length-1?6.5:5.5) : (i===pts.length-1?5:4)}
+          style={{opacity:draw?1:0,transition:`opacity .4s ease ${0.5+i*0.06}s`}} />
+      ))}
+
+      {/* invisible enlarged hit areas so hovering is easy */}
+      {pts.map((p,i)=>(
+        <circle key={"hit"+i} cx={p[0]} cy={p[1]} r="13" fill="transparent" style={{cursor:"pointer"}}
+          onMouseEnter={()=>setHovered(i)} onMouseLeave={()=>setHovered(null)} />
       ))}
 
       {history.map((d,i)=>(
         <text key={i} className="x-t" x={x(i)} y={padT+plotH+18}
           textAnchor="end" transform={`rotate(-32 ${x(i)} ${padT+plotH+18})`}>{d.term}</text>
       ))}
+
+      {renderTooltip()}
     </svg>
   );
 }
@@ -135,20 +177,6 @@ function mapStudentToDashboard(data){
   };
 }
 
-/* ---------------- small stub button (kept for not-yet-wired actions) ---------------- */
-function StubBtn({ icon, label, primary, sm }){
-  const [toast, setToast] = useAS(false);
-  function ping(){ setToast(true); clearTimeout(ping._t); ping._t = setTimeout(()=>setToast(false), 1700); }
-  return (
-    <span className="act-stub">
-      <button className={"act-btn"+(primary?" primary":"")+(sm?" sm":"")} onClick={ping}>
-        {icon && <Icon name={icon} />}{label}
-      </button>
-      {toast && <span className="stub-toast">Coming soon</span>}
-    </span>
-  );
-}
-
 /* ---------------- risk flag banners (critical=red, high=orange) ---------------- */
 function RiskFlagBanners({ flags }){
   if (!flags || !flags.length) return null;
@@ -165,7 +193,7 @@ function RiskFlagBanners({ flags }){
 }
 
 /* ---------------- banner + 3 metric cards + CGPA chart (shared) ---------------- */
-function StudentDashboard({ s, L, actions }){
+function StudentDashboard({ s, L }){
   const [cw, setCw] = useAS(0);
   useAE(()=>{ const t=setTimeout(()=>setCw(Math.min(100, Math.round(s.creditsEarned/s.creditsTotal*100))),120); return ()=>clearTimeout(t); },[s]);
   const h = s.gpaHistory;
@@ -186,14 +214,6 @@ function StudentDashboard({ s, L, actions }){
         </div>
         <span className={"pill lg "+s.statusCls}><span className="pdot" />{s.status}</span>
       </div>
-
-      {actions && (
-        <div className="act-bar">
-          <StubBtn icon="send" label={L.actExport} primary />
-          <StubBtn icon="target" label={L.actFlag} />
-          <StubBtn icon="book" label={L.actTranscript} />
-        </div>
-      )}
 
       <RiskFlagBanners flags={(s.raw || {}).risk_flags} />
 
@@ -229,8 +249,7 @@ function StudentDashboard({ s, L, actions }){
 
 /* ---------------- Performance by Subject Area (horizontal SVG-free bars) ---------------- */
 function CategoryBars({ categoryPerformance }){
-  // Real shape: { categories: {name: {...}}, strongest_category, weakest_category }
-  const cats = (categoryPerformance || {}).categories || {};
+  const cats = getCategoryMap(categoryPerformance);
   const names = Object.keys(cats);
   if (!names.length) return null;
   return (
@@ -253,6 +272,13 @@ function CategoryBars({ categoryPerformance }){
           </div>
         );
       })}
+      {(categoryPerformance && (categoryPerformance.strongest_category || categoryPerformance.weakest_category)) &&
+        <div style={{display:"flex",gap:16,flexWrap:"wrap",marginTop:12,fontSize:12.5,fontWeight:700}}>
+          {categoryPerformance.strongest_category &&
+            <span style={{color:"var(--success)"}}>Strongest: {categoryPerformance.strongest_category}</span>}
+          {categoryPerformance.weakest_category &&
+            <span style={{color:"var(--danger)"}}>Weakest: {categoryPerformance.weakest_category}</span>}
+        </div>}
     </div>
   );
 }
@@ -268,7 +294,8 @@ function BottleneckCard({ bottleneck }){
         <div key={i} className={"pf-flag "+(b.severity === "high" ? "high" : "medium")}>
           <span className="pf-flag-ic"><Icon name="route" /></span>
           <span>
-            <b className="mono">{b.course_code}</b> is blocking {b.unlock_count} course{b.unlock_count===1?"":"s"} — recommended retake
+            <b className="mono">{b.course_code}</b>
+            {" is blocking " + b.unlock_count + (b.unlock_count === 1 ? " course" : " courses") + " — recommended retake"}
             {b.blocks_graduation_requirement ? " (graduation requirement)" : ""}
           </span>
         </div>
@@ -310,30 +337,40 @@ function AnomalyCard({ anomalies }){
 }
 
 /* ---------------- Semester difficulty ---------------- */
+const SDI_RISK_ROW = {
+  high:              { bg: "var(--danger-soft)",  fg: "var(--danger)",   label: "High" },
+  medium:            { bg: "var(--warning-soft)", fg: "var(--warning)",  label: "Medium" },
+  low:               { bg: "var(--success-soft)", fg: "var(--success)",  label: "Low" },
+  insufficient_data: { bg: "var(--surface-3)",    fg: "var(--text-faint)", label: "No data" },
+};
 function SemesterLoadCard({ sdi }){
   if (!sdi || !sdi.flag_message) return null;
+  const courses = sdi.course_list || [];
   return (
     <div className="an-card">
       <h3 className="an-title"><span className="ti-ic"><Icon name="gear" /></span>Current Semester Load{sdi.semester_label ? ` · ${sdi.semester_label}` : ""}</h3>
       <div className="pf-kv-row"><span className="k">Difficulty Index (SDI)</span><span className="v">{(sdi.sdi_score||0).toFixed(2)} / 3.00</span></div>
       <div className="pf-kv-row"><span className="k">Courses this semester</span><span className="v">{sdi.course_count}</span></div>
-      <div style={{fontSize:12.5,color:"var(--text-dim)",marginTop:6}}>{fixText(sdi.flag_message)}</div>
-    </div>
-  );
-}
-
-/* ---------------- Graduation outlook (real field names) ---------------- */
-function GraduationCard({ trajectory }){
-  const grad = (trajectory || {}).graduation_projection;
-  if (!grad) return null;
-  return (
-    <div className="an-card">
-      <h3 className="an-title"><span className="ti-ic"><Icon name="calendar" /></span>Graduation Outlook</h3>
-      <div className="pf-kv-row"><span className="k">At current pace</span><span className="v">{grad.estimated_graduation_semester || "—"}</span></div>
-      {grad.optimistic_semester && <div className="pf-kv-row"><span className="k">Optimistic</span><span className="v">{grad.optimistic_semester}</span></div>}
-      {grad.pessimistic_semester && <div className="pf-kv-row"><span className="k">Pessimistic</span><span className="v">{grad.pessimistic_semester}</span></div>}
-      {grad.avg_credits_per_semester !== null && grad.avg_credits_per_semester !== undefined &&
-        <div className="pf-kv-row"><span className="k">Avg credits / semester</span><span className="v">{grad.avg_credits_per_semester}</span></div>}
+      <div style={{fontSize:12.5,color:"var(--text-dim)",margin:"6px 0 4px"}}>{fixText(sdi.flag_message)}</div>
+      {courses.length > 0 && (
+        <div className="pf-tbl-wrap" style={{marginTop:10}}>
+          <table className="plan">
+            <thead><tr><th>Course Code</th><th>Historical Pass Rate</th><th>Difficulty</th></tr></thead>
+            <tbody>
+              {courses.map(c=>{
+                const meta = SDI_RISK_ROW[c.risk_category] || SDI_RISK_ROW.insufficient_data;
+                return (
+                  <tr key={c.course_code} style={{background:meta.bg}}>
+                    <td className="pcode">{c.course_code}</td>
+                    <td className="pcr">{c.pass_rate_pct !== null && c.pass_rate_pct !== undefined ? c.pass_rate_pct.toFixed(1) + "%" : "—"}</td>
+                    <td style={{color:meta.fg,fontWeight:700,fontSize:12}}>{meta.label}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -358,8 +395,9 @@ function FocusStatement({ data }){
   const text = data.llm_focus_statement || data.focus_statement || data.plain_english_reason;
   if (!text) return null;
   return (
-    <div className="pf-focus">
-      <b>Focus for this semester</b>
+    <div className="pf-focus" style={{background:"#141a26", color:"#dfe6f2",
+        border:"1px solid #2a3550", borderInlineStart:"4px solid var(--info)"}}>
+      <b>Your Situation</b>
       {fixText(text)}
     </div>
   );
@@ -395,13 +433,12 @@ function StudentAnalysisPage({ L, rtl, studentId }){
           <>
             <StudentDashboard s={mapStudentToDashboard(data)} L={L} />
             <FocusStatement data={data} />
+            <SuggestionsCard suggestions={data.suggestions} />
             <div className="pf-card-grid">
               <CategoryBars categoryPerformance={data.category_performance} />
               <BottleneckCard bottleneck={data.prerequisite_bottleneck} />
               <AnomalyCard anomalies={data.anomalies} />
               <SemesterLoadCard sdi={data.semester_difficulty} />
-              <GraduationCard trajectory={data.trajectory} />
-              <SuggestionsCard suggestions={data.suggestions} />
             </div>
           </>
         )}
@@ -440,18 +477,20 @@ function KeyPointsCard({ keyPoints }){
 function SessionGuideCard({ guide }){
   if (!guide || !guide.opening) return null;
   return (
-    <div className="an-card">
+    <div className="an-card" style={{gridColumn:"1 / -1"}}>
       <h3 className="an-title"><span className="ti-ic"><Icon name="quote" /></span>Advising Session Guide</h3>
-      <div className="pf-guide-card pf-guide-open"><b>How to open</b>{fixText(guide.opening)}</div>
-      <div className="pf-guide-card pf-guide-question"><b>Key question to ask</b>{fixText(guide.key_question)}</div>
-      <div className="pf-guide-card pf-guide-goal"><b>Aim to agree on</b>{fixText(guide.session_goal)}</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10}}>
+        <div className="pf-guide-card pf-guide-open" style={{marginBottom:0}}><b>How to Open</b>{fixText(guide.opening)}</div>
+        <div className="pf-guide-card pf-guide-question" style={{marginBottom:0}}><b>Key Question to Ask</b>{fixText(guide.key_question)}</div>
+        <div className="pf-guide-card pf-guide-goal" style={{marginBottom:0}}><b>Aim to Agree On</b>{fixText(guide.session_goal)}</div>
+      </div>
     </div>
   );
 }
 
 /* ---------------- Advisor: subject-area table ---------------- */
 function CategoryTable({ categoryPerformance }){
-  const cats = (categoryPerformance || {}).categories || {};
+  const cats = getCategoryMap(categoryPerformance);
   const names = Object.keys(cats);
   if (!names.length) return null;
   return (
@@ -519,13 +558,18 @@ const SORTS = [
   { key: "warnings", label: "Warnings",   fn: (a,b)=>(b.consecutive_warning||0)-(a.consecutive_warning||0) },
   { key: "name",     label: "Name",       fn: (a,b)=>String(a.name).localeCompare(String(b.name)) },
 ];
-const PAGE_SIZE = 25;
+/* CGPA color tiers: red below 2.0, orange below 2.5, green otherwise */
+function cgpaCellColor(g){
+  if (g === null || g === undefined) return "var(--text-faint)";
+  if (g < 2.0) return "var(--danger)";
+  if (g < 2.5) return "var(--warning)";
+  return "var(--success)";
+}
 
 function AllStudentsList({ students, onView }){
   const [filter, setFilter] = useAS("all");
   const [sortKey, setSortKey] = useAS("risk");
   const [q, setQ] = useAS("");
-  const [limit, setLimit] = useAS(PAGE_SIZE);
 
   const shown = useAM(()=>{
     const needle = q.trim().toLowerCase();
@@ -537,11 +581,9 @@ function AllStudentsList({ students, onView }){
     return list.slice().sort(sort.fn);
   }, [students, filter, sortKey, q]);
 
-  useAE(()=>{ setLimit(PAGE_SIZE); }, [filter, sortKey, q]);
-
   return (
     <div className="an-card" style={{marginTop:6}}>
-      <h3 className="an-title"><span className="ti-ic"><Icon name="user" /></span>All Students <span className="pf-count-chip">{shown.length}</span></h3>
+      <h3 className="an-title"><span className="ti-ic"><Icon name="user" /></span>My Caseload <span className="pf-count-chip">{shown.length}</span></h3>
 
       <div className="pf-filter-row">
         {[["all","All"],["high","At Risk"],["moderate","Needs Attention"],["low","On Track"]].map(([k,lbl])=>(
@@ -556,28 +598,103 @@ function AllStudentsList({ students, onView }){
 
       <div className="pf-tbl-wrap" style={{marginTop:12}}>
         <table className="plan">
-          <thead><tr><th>Student</th><th>Level</th><th>CGPA</th><th>Warnings</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Student ID</th><th>Level</th><th>CGPA</th><th>Consecutive Warnings</th><th>Risk Level</th><th></th></tr></thead>
           <tbody>
-            {shown.slice(0, limit).map(s=>{
+            {shown.map(s=>{
               const meta = RISK_META[s.risk_level] || RISK_META.low;
-              const lowGpa = (s.official_cgpa||0) < 2.0;
+              const warn = s.consecutive_warning || 0;
               return (
                 <tr key={s.id}>
-                  <td><div className="ptitle">{s.name}</div><div className="pcode">{s.id}</div></td>
+                  <td className="ptitle">{s.name}</td>
+                  <td className="pcode">{s.id}</td>
                   <td>{s.level}</td>
-                  <td className={"pcr"+(lowGpa?" pf-grade-red":"")}>{s.official_cgpa !== null && s.official_cgpa !== undefined ? s.official_cgpa.toFixed(2) : "—"}</td>
-                  <td className="pcr">{s.consecutive_warning || 0}</td>
+                  <td className="pcr" style={{color:cgpaCellColor(s.official_cgpa),fontWeight:700}}>{s.official_cgpa !== null && s.official_cgpa !== undefined ? s.official_cgpa.toFixed(2) : "—"}</td>
+                  <td className="pcr" style={warn > 0 ? {color:"var(--danger)",fontWeight:700} : null}>{warn}</td>
                   <td><span className={"pill "+meta.cls}><span className="pdot" />{meta.label}</span></td>
-                  <td style={{textAlign:"end"}}><button className="act-btn sm" onClick={()=>onView(s.id)}>View Profile</button></td>
+                  <td style={{textAlign:"end"}}><button className="act-btn sm" onClick={()=>onView(s.id)}>Review</button></td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
-      {shown.length > limit && (
-        <div style={{textAlign:"center",marginTop:12}}>
-          <button className="act-btn sm" onClick={()=>setLimit(l=>l+PAGE_SIZE)}>Show {Math.min(PAGE_SIZE, shown.length-limit)} more</button>
+    </div>
+  );
+}
+
+/* ---------------- Advisor: course risk index (GET /sae/courses/risk) ---------------- */
+const RISK_LEVELS = ["All", "Freshman", "Sophomore", "Junior", "Senior"];
+
+function passRateColor(p){
+  if (p === null || p === undefined) return "var(--text-faint)";
+  if (p < 50) return "var(--danger)";
+  if (p < 75) return "var(--warning)";
+  return "var(--success)";
+}
+
+function CourseRiskIndex(){
+  const [level, setLevel] = useAS("All");
+  const [rows, setRows] = useAS(null);
+  const [loading, setLoading] = useAS(true);
+  const [error, setError] = useAS(null);
+
+  useAE(()=>{
+    let alive = true;
+    (async ()=>{
+      setLoading(true); setError(null);
+      const res = await PF_API.getCourseRisk(level === "All" ? null : level);
+      if (!alive) return;
+      if (res.__error) { setError(res.detail || "Could not load the course risk index."); setLoading(false); return; }
+      setRows(Array.isArray(res) ? res : (res.courses || []));
+      setLoading(false);
+    })();
+    return ()=>{ alive = false; };
+  }, [level]);
+
+  // Riskiest first: pass rate ascending, insufficient_data at the bottom
+  const sorted = (rows || []).slice().sort((a,b)=>{
+    const an = a.pass_rate_pct === null || a.pass_rate_pct === undefined;
+    const bn = b.pass_rate_pct === null || b.pass_rate_pct === undefined;
+    if (an !== bn) return an ? 1 : -1;
+    return (a.pass_rate_pct||0) - (b.pass_rate_pct||0);
+  });
+
+  return (
+    <div className="an-card" style={{marginTop:16}}>
+      <h3 className="an-title"><span className="ti-ic"><Icon name="chart" /></span>Course Risk Index
+        {!loading && !error && <span className="pf-count-chip">{sorted.length}</span>}</h3>
+
+      <div className="pf-filter-row">
+        {RISK_LEVELS.map(lv=>(
+          <button key={lv} className={"pf-fchip"+(level===lv?" on":"")} onClick={()=>setLevel(lv)}>{lv}</button>
+        ))}
+      </div>
+
+      {loading && <Spinner label="Loading course risk index…" />}
+      {!loading && error && <div className="pf-login-err">{error}</div>}
+      {!loading && !error && sorted.length === 0 &&
+        <div className="pf-empty-note">No course data for this level.</div>}
+      {!loading && !error && sorted.length > 0 && (
+        <div className="pf-scroll pf-tbl-wrap" style={{marginTop:12}}>
+          <table className="plan">
+            <thead><tr><th>Course Code</th><th>Pass Rate</th><th>Avg Grade</th><th>Risk Category</th></tr></thead>
+            <tbody>
+              {sorted.map(c=>{
+                const meta = SDI_RISK_ROW[c.risk_category] || SDI_RISK_ROW.insufficient_data;
+                const p = c.pass_rate_pct;
+                return (
+                  <tr key={c.course_code}>
+                    <td className="pcode">{c.course_code}</td>
+                    <td className="pcr" style={{color:passRateColor(p),fontWeight:700}}>
+                      {p !== null && p !== undefined ? p.toFixed(1) + "%" : "—"}</td>
+                    <td className="pcr">{c.avg_letter_grade || "—"}</td>
+                    <td><span style={{background:meta.bg,color:meta.fg,fontWeight:700,fontSize:12,
+                        padding:"3px 10px",borderRadius:999}}>{meta.label}</span></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -585,6 +702,19 @@ function AllStudentsList({ students, onView }){
 }
 
 /* ---------------- ADVISOR CONSOLE ---------------- */
+/* SAE returns the same 710 students for every advisor_id (verified: ADV001 and
+   ADV002 get identical payloads — assignment isn't implemented server-side).
+   Simulate a stable per-advisor caseload of ~71 by hashing advisorId + student id. */
+function djb2(str){
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = (((h << 5) + h) + str.charCodeAt(i)) >>> 0;
+  return h;
+}
+const CASELOAD_MOD = 10;   // ≈ 710 / 10 ≈ 71 students per advisor
+function assignedToAdvisor(advisorId, students){
+  return students.filter(s => djb2(advisorId + s.id) % CASELOAD_MOD === 0);
+}
+
 function AdvisorConsole({ L, rtl, advisorId }){
   const [overview, setOverview] = useAS(null);
   const [loadingOv, setLoadingOv] = useAS(true);
@@ -643,14 +773,16 @@ function AdvisorConsole({ L, rtl, advisorId }){
     { cls:"low",   k:L.lowRisk,       v:overview.low_risk },
   ] : [];
 
+  // Simulated caseload — the summary tiles above keep full-population counts,
+  // but the attention list and the table only show this advisor's students.
+  const caseload = overview ? assignedToAdvisor(advisorId, overview.students || []) : [];
+
   // immediate_action + immediate_reason are the real field names.
   // No severity field exists on overview rows — approximate severity by
   // consecutive warnings (desc), then CGPA (asc).
-  const attention = overview
-    ? (overview.students || [])
-        .filter(s => s.immediate_action)
-        .sort((a,b)=>(b.consecutive_warning||0)-(a.consecutive_warning||0) || (a.official_cgpa||0)-(b.official_cgpa||0))
-    : [];
+  const attention = caseload
+    .filter(s => s.immediate_action)
+    .sort((a,b)=>(b.consecutive_warning||0)-(a.consecutive_warning||0) || (a.official_cgpa||0)-(b.official_cgpa||0));
   const shownAttention = attention.slice(0, 6);
   const moreCount = Math.max(0, attention.length - shownAttention.length);
 
@@ -682,7 +814,7 @@ function AdvisorConsole({ L, rtl, advisorId }){
             <div className="act-bar" style={{justifyContent:"flex-end"}}>
               <button className="act-btn sm" onClick={clearLookup}><Icon name="plus" style={{transform:"rotate(45deg)"}} />{L.clearLookup}</button>
             </div>
-            <StudentDashboard s={mapStudentToDashboard(looked)} L={L} actions />
+            <StudentDashboard s={mapStudentToDashboard(looked)} L={L} />
 
             <div className="pf-card-grid">
               <KeyPointsCard keyPoints={(lookedAnalysis||{}).key_points} />
@@ -690,7 +822,6 @@ function AdvisorConsole({ L, rtl, advisorId }){
               <CategoryTable categoryPerformance={(lookedAnalysis||looked).category_performance} />
               <BottleneckCard bottleneck={looked.prerequisite_bottleneck} />
               <SemesterLoadCard sdi={looked.semester_difficulty} />
-              <GraduationCard trajectory={looked.trajectory} />
               <RegistrationsCard registrations={(lookedAnalysis||looked).registrations} />
             </div>
           </>
@@ -738,7 +869,9 @@ function AdvisorConsole({ L, rtl, advisorId }){
                   </div>
                 </div>
 
-                <AllStudentsList students={overview.students || []} onView={(id)=>lookUp(id)} />
+                <AllStudentsList students={caseload} onView={(id)=>lookUp(id)} />
+
+                <CourseRiskIndex />
               </>
             )}
           </>

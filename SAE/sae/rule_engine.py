@@ -1295,6 +1295,17 @@ def f_prerequisite_bottleneck(
         best = graded.groupby("Course Code")["_gp"].max()
         failed_courses = set(best[best == 0.0].index.tolist())
 
+    # A course the student is currently retaking (registered with no grade yet)
+    # is already being addressed — it cannot be a bottleneck.
+    raw_grade = student_regs["Letter Grade"]
+    in_progress = set(
+        student_regs.loc[
+            raw_grade.isna() | (raw_grade.astype(str).str.strip() == ""),
+            "Course Code",
+        ].tolist()
+    )
+    failed_courses -= in_progress
+
     # Traverse reverse map to find all downstream courses blocked by each failure
     def _downstream(code: str, visited: "set[str] | None" = None) -> set[str]:
         if visited is None:

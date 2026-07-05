@@ -143,8 +143,9 @@ function App(){
     if (!text.trim() || typing) return;
     setMessages(m=>[...m,{id:++idc.current,who:"user",text}]);
     setTyping(true);
-    // Advisor chat runs without student context — general policy/KG/handbook questions.
-    const res = await PF_API.chat(text, userType === "advisor" ? "" : userId, sessionId);
+    // /chat requires a valid student_id string (422 on omitted/null/empty).
+    // Advisor chat targets general policy/KG/handbook questions — use STU000001 as default context.
+    const res = await PF_API.chat(text, userType === "advisor" ? "STU000001" : userId, sessionId);
     setTyping(false);
     if (res.__error) {
       setMessages(m=>[...m,{id:++idc.current,who:"bot",text:`I couldn't reach the server (${res.detail}). Please try again.`,citations:[]}]);

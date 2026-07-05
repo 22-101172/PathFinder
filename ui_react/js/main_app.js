@@ -1,6 +1,6 @@
 /* ============================================================
    PathFinder — EUI Academic Advisor · main app
-   Wired to the real backend (chat, sessions) via PF_API.
+   Wired to the real backend (chat, sessions, SAE) via PF_API.
    ============================================================ */
 const { useState: useS, useEffect: useE, useRef: useR } = React;
 
@@ -10,12 +10,23 @@ function LoginScreen({ lang, setLang, onLogin }){
   const rtl = lang === "ar";
   const [id, setId] = useS("");
   const [err, setErr] = useS("");
+  const [busy, setBusy] = useS(false);
 
-  function submit(){
+  async function submit(){
     const v = id.trim();
     if (!v) return;
     const type = PF_API.detectUserType(v);
     if (type === "unknown") { setErr(L.loginErrUnknown); return; }
+    setBusy(true); setErr("");
+
+    if (type === "student") {
+      const res = await PF_API.getStudentAnalysis(v);
+      if (res.__error) { setErr(L.loginErrNotFound); setBusy(false); return; }
+    }
+    // Advisors aren't individually validated server-side (simulated assignment) —
+    // any ADV-prefixed ID is accepted and routed to the Advisor Console.
+
+    setBusy(false);
     onLogin(v, type);
   }
   function onKey(e){ if (e.key === "Enter") submit(); }
@@ -29,8 +40,8 @@ function LoginScreen({ lang, setLang, onLogin }){
         <div className="id-row">
           <input className="id-field" value={id} onChange={e=>setId(e.target.value)} onKeyDown={onKey}
                  placeholder={L.loginPlaceholder} autoFocus />
-          <button className="id-go" onClick={submit}>
-            <Icon name="check" />{L.loginBtn}
+          <button className="id-go" onClick={submit} disabled={busy}>
+            <Icon name="check" />{busy ? "…" : L.loginBtn}
           </button>
         </div>
         {err && <div className="pf-login-err">{err}</div>}
@@ -115,7 +126,7 @@ function App(){
   /* ---------- login / logout ---------- */
   function handleLogin(id, type){
     setUserId(id); setUserType(type);
-    setPage("chat");
+    setPage(type === "advisor" ? "advisor" : "chat");
     if (type === "student") {
       PF_API.getSessions(id).then(setAllSessions);
     }
@@ -207,7 +218,13 @@ function App(){
         <div className="side-nav">
           <div className="side-label" style={{paddingTop:6}}>{L.pagesLabel}</div>
           {userType === "student" && (
-            <div className={"nav-item"+(page==="chat"?" on":"")} onClick={()=>goPage("chat")}><Icon name="compass" />{L.navChat}</div>
+            <>
+              <div className={"nav-item"+(page==="chat"?" on":"")} onClick={()=>goPage("chat")}><Icon name="compass" />{L.navChat}</div>
+              <div className={"nav-item"+(page==="student"?" on":"")} onClick={()=>goPage("student")}><Icon name="chart" />{L.navStudent}</div>
+            </>
+          )}
+          {userType === "advisor" && (
+            <div className={"nav-item"+(page==="advisor"?" on":"")} onClick={()=>goPage("advisor")}><Icon name="user" />{L.navAdvisor}</div>
           )}
         </div>
 
@@ -227,7 +244,7 @@ function App(){
 
         <div className="side-foot">
           <div className="avatar">{userId.slice(0,2).toUpperCase()}</div>
-          <div className="who"><b>{userId}</b><span>Student</span></div>
+          <div className="who"><b>{userId}</b><span>{userType === "advisor" ? "Advisor" : "Student"}</span></div>
           <button className="gear" onClick={logout} title={L.logout}><Icon name="gear" style={{width:17,height:17}} /></button>
         </div>
       </aside>
@@ -237,8 +254,8 @@ function App(){
         <div className="topbar">
           <button className="icon-btn" onClick={()=>setCollapsed(c=>!c)}><Icon name="menu" style={{width:19,height:19}} /></button>
           <div className="title">
-            {L.advisorTitle}
-            <small>{userId}</small>
+            {page==="student"?L.studentTitle:page==="advisor"?L.advisorConsoleTitle:L.advisorTitle}
+            <small>{page==="student"?L.studentSub:page==="advisor"?L.advisorConsoleSub:userId}</small>
           </div>
           <div className="spring" />
           <div className="lang-toggle">
@@ -247,7 +264,9 @@ function App(){
           </div>
         </div>
 
-        {isHome ? (
+        {page==="student" ? <StudentAnalysisPage L={L} rtl={rtl} studentId={userId} />
+        : page==="advisor" ? <AdvisorConsole L={L} rtl={rtl} advisorId={userId} />
+        : isHome ? (
           /* ---------------- LANDING ---------------- */
           <div className="home" ref={scrollRef}>
             <div className="hero">

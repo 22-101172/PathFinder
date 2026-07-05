@@ -60,6 +60,7 @@ const PF_API = {
   detectUserType(id) {
     const v = (id || "").trim().toUpperCase();
     if (v.startsWith("STU")) return "student";
+    if (v.startsWith("ADV")) return "advisor";
     return "unknown";
   },
 
@@ -87,6 +88,26 @@ const PF_API = {
     return _deleteJSON(`/students/${encodeURIComponent(studentId)}/sessions/${encodeURIComponent(sessionId)}`);
   },
 
+  // ── SAE — student ────────────────────────────────────────────────────────
+  async getStudentAnalysis(studentId) {
+    return _getJSON(`/sae/student/${encodeURIComponent(studentId)}`);
+  },
+  async simulateGpa(studentId, grades) {
+    return _postJSON(`/sae/student/${encodeURIComponent(studentId)}/simulate`, { grades });
+  },
+
+  // ── SAE — advisor ────────────────────────────────────────────────────────
+  async getAdvisorOverview(advisorId) {
+    return _getJSON("/sae/advisor/overview", { advisor_id: advisorId });
+  },
+  async getAdvisorAnalysis(studentId) {
+    return _getJSON(`/sae/student/${encodeURIComponent(studentId)}/analysis`);
+  },
+
+  // ── SAE — shared ─────────────────────────────────────────────────────────
+  async getCourseRisk(level) {
+    return _getJSON("/sae/courses/risk", level ? { level } : null);
+  },
 };
 
 window.PF_API = PF_API;

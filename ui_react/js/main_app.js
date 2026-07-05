@@ -96,10 +96,10 @@ function App(){
   const [collapsed, setCollapsed] = useS(false);
   const [activeConv, setActiveConv] = useS(null);
   const [page, setPage] = useS("chat");
-  const [citationsOn, setCitationsOn] = useS(true);
   const [sessionId, setSessionId] = useS(null);
   const [sessionName, setSessionName] = useS(null);
   const [allSessions, setAllSessions] = useS([]);
+  const [analysisCache, setAnalysisCache] = useS({});
 
   const scrollRef = useR(null);
   const taRef = useR(null);
@@ -134,6 +134,7 @@ function App(){
   function logout(){
     setUserId(null); setUserType(null);
     setMessages([]); setSessionId(null); setSessionName(null); setAllSessions([]);
+    setAnalysisCache({});
     setPage("chat");
   }
 
@@ -142,7 +143,8 @@ function App(){
     if (!text.trim() || typing) return;
     setMessages(m=>[...m,{id:++idc.current,who:"user",text}]);
     setTyping(true);
-    const res = await PF_API.chat(text, userId, sessionId);
+    // Advisor chat runs without student context — general policy/KG/handbook questions.
+    const res = await PF_API.chat(text, userType === "advisor" ? "" : userId, sessionId);
     setTyping(false);
     if (res.__error) {
       setMessages(m=>[...m,{id:++idc.current,who:"bot",text:`I couldn't reach the server (${res.detail}). Please try again.`,citations:[]}]);
@@ -152,7 +154,7 @@ function App(){
     if (res.session_id) setSessionId(res.session_id);
     if (res.session_name) {
       setSessionName(res.session_name);
-      PF_API.getSessions(userId).then(setAllSessions);
+      if (userType === "student") PF_API.getSessions(userId).then(setAllSessions);
     }
   }
   function submit(){
@@ -190,10 +192,6 @@ function App(){
     <div className="inputbar">
       <textarea ref={taRef} rows="1" value={input} placeholder={L.placeholder} onChange={autosize} onKeyDown={onKey} />
       <div className="input-row">
-        <button className="ibtn"><Icon name="paperclip" />{L.attach}</button>
-        <button className="ibtn toggle" onClick={()=>setCitationsOn(c=>!c)}>
-          <span className={"iswitch"+(citationsOn?" on":"")} />{L.citations}
-        </button>
         <button className="send" onClick={submit} disabled={!input.trim()||typing}><Icon name="send" /></button>
       </div>
     </div>
@@ -224,7 +222,10 @@ function App(){
             </>
           )}
           {userType === "advisor" && (
-            <div className={"nav-item"+(page==="advisor"?" on":"")} onClick={()=>goPage("advisor")}><Icon name="user" />{L.navAdvisor}</div>
+            <>
+              <div className={"nav-item"+(page==="advisor"?" on":"")} onClick={()=>goPage("advisor")}><Icon name="user" />{L.navAdvisor}</div>
+              <div className={"nav-item"+(page==="chat"?" on":"")} onClick={()=>goPage("chat")}><Icon name="compass" />{L.navChat}</div>
+            </>
           )}
         </div>
 
@@ -264,7 +265,7 @@ function App(){
           </div>
         </div>
 
-        {page==="student" ? <StudentAnalysisPage L={L} rtl={rtl} studentId={userId} />
+        {page==="student" ? <StudentAnalysisPage L={L} rtl={rtl} studentId={userId} analysisCache={analysisCache} setAnalysisCache={setAnalysisCache} />
         : page==="advisor" ? <AdvisorConsole L={L} rtl={rtl} advisorId={userId} />
         : isHome ? (
           /* ---------------- LANDING ---------------- */
@@ -296,7 +297,7 @@ function App(){
                       {m.who==="bot" && <div className="msg-name">{PF_DATA.bot.name}</div>}
                       {m.who==="user"
                         ? <div className="bubble">{m.text}</div>
-                        : <ChatAnswer text={m.text} citations={citationsOn ? m.citations : []} L={L} />}
+                        : <ChatAnswer text={m.text} citations={m.citations} L={L} />}
                     </div>
                   </div>
                 ))}

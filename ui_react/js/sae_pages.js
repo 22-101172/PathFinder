@@ -193,7 +193,7 @@ function RiskFlagBanners({ flags }){
 }
 
 /* ---------------- banner + 3 metric cards + CGPA chart (shared) ---------------- */
-function StudentDashboard({ s, L }){
+function StudentDashboard({ s, L, advisorView }){
   const [cw, setCw] = useAS(0);
   useAE(()=>{ const t=setTimeout(()=>setCw(Math.min(100, Math.round(s.creditsEarned/s.creditsTotal*100))),120); return ()=>clearTimeout(t); },[s]);
   const h = s.gpaHistory;
@@ -221,14 +221,14 @@ function StudentDashboard({ s, L }){
         <div className="metric accentv">
           <div className="mk">{L.cumGpa}</div>
           <div className="mv">{s.gpa}{arrow}</div>
-          {s.cohortAvg !== null && s.cohortAvg !== undefined &&
+          {advisorView && s.cohortAvg !== null && s.cohortAvg !== undefined &&
             <div className="pf-metric-note">cohort avg {s.cohortAvg.toFixed(2)}</div>}
         </div>
         <div className="metric">
           <div className="mk">{L.creditsProgress}</div>
           <div className="credits-v">{s.creditsEarned} / {s.creditsTotal} credits</div>
           <div className="credits-bar"><i style={{width:cw+"%", background:creditsBarColor(s.creditsEarned, s.creditsExpected)}} /></div>
-          {s.creditsExpected !== null && s.creditsExpected !== undefined &&
+          {advisorView && s.creditsExpected !== null && s.creditsExpected !== undefined &&
             <div className="pf-metric-note">expected by now: {Math.round(s.creditsExpected)}</div>}
         </div>
         <div className="metric">
@@ -286,18 +286,26 @@ function CategoryBars({ categoryPerformance }){
 /* ---------------- Prerequisite bottlenecks ---------------- */
 function BottleneckCard({ bottleneck }){
   const blockers = (bottleneck || {}).blockers || [];
-  if (!blockers.length) return null;
+  if (!blockers.length) {
+    return (
+      <div className="an-card">
+        <h3 className="an-title"><span className="ti-ic"><Icon name="route" /></span>Prerequisite Bottlenecks</h3>
+        <div style={{background:"var(--success-soft)",color:"var(--success)",fontWeight:700,
+                     fontSize:13,padding:"12px 14px",borderRadius:10}}>
+          No prerequisite blockers — all paths are open.
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="an-card">
       <h3 className="an-title"><span className="ti-ic"><Icon name="route" /></span>Prerequisite Bottlenecks</h3>
       {blockers.map((b,i)=>(
-        <div key={i} className={"pf-flag "+(b.severity === "high" ? "high" : "medium")}>
-          <span className="pf-flag-ic"><Icon name="route" /></span>
-          <span>
-            <b className="mono">{b.course_code}</b>
-            {" is blocking " + b.unlock_count + (b.unlock_count === 1 ? " course" : " courses") + " — recommended retake"}
-            {b.blocks_graduation_requirement ? " (graduation requirement)" : ""}
-          </span>
+        <div key={i} style={{borderInlineStart:"4px solid var(--warning)",background:"var(--warning-soft)",
+                             padding:"10px 14px",borderRadius:8,marginBottom:8,fontSize:13}}>
+          <b className="mono">{b.course_code}</b>
+          {" is blocking " + b.unlock_count + (b.unlock_count === 1 ? " course" : " courses") + " — recommended retake"}
+          {b.blocks_graduation_requirement ? " (graduation requirement)" : ""}
         </div>
       ))}
       {bottleneck.total_courses_currently_blocked > 0 &&
@@ -343,7 +351,7 @@ const SDI_RISK_ROW = {
   low:               { bg: "var(--success-soft)", fg: "var(--success)",  label: "Low" },
   insufficient_data: { bg: "var(--surface-3)",    fg: "var(--text-faint)", label: "No data" },
 };
-function SemesterLoadCard({ sdi }){
+function SemesterLoadCard({ sdi, advisorView }){
   if (!sdi || !sdi.flag_message) return null;
   const courses = sdi.course_list || [];
   return (
@@ -355,14 +363,14 @@ function SemesterLoadCard({ sdi }){
       {courses.length > 0 && (
         <div className="pf-tbl-wrap" style={{marginTop:10}}>
           <table className="plan">
-            <thead><tr><th>Course Code</th><th>Historical Pass Rate</th><th>Difficulty</th></tr></thead>
+            <thead><tr><th>Course Code</th>{advisorView && <th>Historical Pass Rate</th>}<th>Difficulty</th></tr></thead>
             <tbody>
               {courses.map(c=>{
                 const meta = SDI_RISK_ROW[c.risk_category] || SDI_RISK_ROW.insufficient_data;
                 return (
                   <tr key={c.course_code} style={{background:meta.bg}}>
                     <td className="pcode">{c.course_code}</td>
-                    <td className="pcr">{c.pass_rate_pct !== null && c.pass_rate_pct !== undefined ? c.pass_rate_pct.toFixed(1) + "%" : "—"}</td>
+                    {advisorView && <td className="pcr">{c.pass_rate_pct !== null && c.pass_rate_pct !== undefined ? c.pass_rate_pct.toFixed(1) + "%" : "—"}</td>}
                     <td style={{color:meta.fg,fontWeight:700,fontSize:12}}>{meta.label}</td>
                   </tr>
                 );
@@ -403,10 +411,141 @@ function FocusStatement({ data }){
   );
 }
 
+/* ---------------- Student: registration history (from base payload's `registrations`) ---------------- */
+/* Grade colors: A range green, C/D range orange, F red, W/I/Con/Abs grey */
+function regGradeColor(g){
+  if (!g) return "var(--text-faint)";
+  const u = String(g).toUpperCase();
+  if (u === "F") return "var(--danger)";
+  if (["W","I","CON","ABS"].includes(u)) return "var(--text-faint)";
+  if (u[0] === "A") return "var(--success)";
+  if (u[0] === "C" || u[0] === "D") return "var(--warning)";
+  return "var(--text)";
+}
+const SEASON_ORDER = { spring: 0, summer: 1, fall: 2 };
+function semesterSortKey(sem){
+  const m = String(sem || "").trim().match(/^(\w+)\s+(\d{4})$/);
+  if (!m) return 0;
+  return (+m[2]) * 10 + (SEASON_ORDER[m[1].toLowerCase()] !== undefined ? SEASON_ORDER[m[1].toLowerCase()] : 0);
+}
+function StudentRegistrationHistory({ registrations }){
+  const regs = (registrations || []).slice()
+    .sort((a,b)=>semesterSortKey(a.semester)-semesterSortKey(b.semester));
+  if (!regs.length) return null;
+  return (
+    <div className="an-card" style={{marginTop:16}}>
+      <h3 className="an-title"><span className="ti-ic"><Icon name="book" /></span>Registration History
+        <span className="pf-count-chip">{regs.length}</span></h3>
+      <div className="pf-scroll pf-tbl-wrap">
+        <table className="plan">
+          <thead><tr><th>Semester</th><th>Course Code</th><th>Grade</th><th>Status</th></tr></thead>
+          <tbody>
+            {regs.map((r,i)=>(
+              <tr key={i}>
+                <td>{r.semester}</td>
+                <td className="pcode">{r.course_code}</td>
+                <td className="pcr" style={{color:regGradeColor(r.letter_grade),fontWeight:700}}>{r.letter_grade || "—"}</td>
+                <td className="why">{/Repeat/i.test(r.registration_status || "") ? "Retake" : "First Attempt"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Student: GPA simulator (POST /sae/student/{id}/simulate) ---------------- */
+function GpaSimulator({ studentId, currentCourses }){
+  const inProgress = (currentCourses || []).filter(c => c.is_graded === false);
+  const [grades, setGrades] = useAS({});
+  const [result, setResult] = useAS(null);
+  const [busy, setBusy] = useAS(false);
+  const [err, setErr] = useAS(null);
+  useAE(()=>{ setGrades({}); setResult(null); setErr(null); }, [studentId]);
+
+  async function simulate(){
+    const entered = {};
+    inProgress.forEach(c => {
+      const g = (grades[c.course_code] || "").trim();
+      if (g) entered[c.course_code] = g;
+    });
+    if (!Object.keys(entered).length) { setErr("Enter at least one grade to simulate."); return; }
+    setBusy(true); setErr(null); setResult(null);
+    const res = await PF_API.simulateGpa(studentId, entered);
+    setBusy(false);
+    if (res.__error) { setErr(res.detail || "Simulation failed."); return; }
+    setResult({ ...res, entered });
+  }
+
+  const delta = result
+    ? (result.cgpa_change !== undefined && result.cgpa_change !== null
+        ? result.cgpa_change
+        : (result.projected_cgpa - result.current_official_cgpa))
+    : 0;
+  // per_course_breakdown covers the whole transcript — show only the simulated courses
+  const breakdown = result
+    ? (result.per_course_breakdown || []).filter(b => result.entered[b.course_code])
+    : [];
+
+  return (
+    <div className="an-card" style={{marginTop:16}}>
+      <h3 className="an-title"><span className="ti-ic"><Icon name="sparkle" /></span>GPA Simulator</h3>
+      {inProgress.length === 0
+        ? <div className="pf-empty-note">No in-progress courses to simulate</div>
+        : <>
+          <div style={{fontSize:12.5,color:"var(--text-dim)",marginBottom:10}}>
+            Enter hypothetical grades for your in-progress courses to see the CGPA impact.
+          </div>
+          {inProgress.map(c=>(
+            <div className="pf-kv-row" key={c.course_code}>
+              <span className="k"><b className="mono">{c.course_code}</b> · {c.credit_hours} cr</span>
+              <input className="pf-mini-search" style={{maxWidth:90,textAlign:"center"}}
+                     value={grades[c.course_code] || ""} placeholder="e.g. B+"
+                     onChange={e=>{ const v = e.target.value; setGrades(g=>({ ...g, [c.course_code]: v })); }} />
+            </div>
+          ))}
+          <div style={{marginTop:10}}>
+            <button className="act-btn" onClick={simulate} disabled={busy}>{busy ? "Simulating…" : "Simulate"}</button>
+          </div>
+          {err && <div className="pf-login-err" style={{marginTop:8}}>{err}</div>}
+          {result && (
+            <div style={{marginTop:12}}>
+              <div style={{fontSize:15,fontWeight:800}}>
+                {Number(result.current_official_cgpa).toFixed(2)} → {Number(result.projected_cgpa).toFixed(2)}{" "}
+                <span style={{color: delta >= 0 ? "var(--success)" : "var(--danger)"}}>
+                  ({delta >= 0 ? "+" : ""}{Number(delta).toFixed(2)})
+                </span>
+              </div>
+              {breakdown.length > 0 && (
+                <div className="pf-tbl-wrap" style={{marginTop:10}}>
+                  <table className="plan">
+                    <thead><tr><th>Course</th><th>Grade</th><th>Contribution</th></tr></thead>
+                    <tbody>
+                      {breakdown.map(b=>(
+                        <tr key={b.course_code}>
+                          <td className="pcode">{b.course_code}</td>
+                          <td className="pcr">{b.grade}</td>
+                          <td className="pcr">{b.contribution !== null && b.contribution !== undefined
+                            ? (+b.contribution).toFixed(1) + " pts" : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </>}
+    </div>
+  );
+}
+
 /* ---------------- STUDENT PAGE ---------------- */
-function StudentAnalysisPage({ L, rtl, studentId }){
-  const [data, setData] = useAS(null);
-  const [loading, setLoading] = useAS(true);
+function StudentAnalysisPage({ L, rtl, studentId, analysisCache, setAnalysisCache }){
+  const cached = analysisCache ? analysisCache[studentId] : null;
+  const [data, setData] = useAS(cached || null);
+  const [loading, setLoading] = useAS(!cached);
   const [error, setError] = useAS(null);
 
   async function load(){
@@ -414,9 +553,14 @@ function StudentAnalysisPage({ L, rtl, studentId }){
     const res = await PF_API.getStudentAnalysis(studentId);
     if (res.__error) { setError(res.detail || "Could not load your analysis."); setLoading(false); return; }
     setData(res);
+    if (setAnalysisCache) setAnalysisCache(c => ({ ...c, [studentId]: res }));
     setLoading(false);
   }
-  useAE(()=>{ load(); }, [studentId]);
+  useAE(()=>{
+    const hit = analysisCache ? analysisCache[studentId] : null;
+    if (hit) { setData(hit); setLoading(false); setError(null); return; }
+    load();
+  }, [studentId]);
 
   return (
     <div className="page">
@@ -432,6 +576,7 @@ function StudentAnalysisPage({ L, rtl, studentId }){
         {!loading && !error && data && (
           <>
             <StudentDashboard s={mapStudentToDashboard(data)} L={L} />
+            <GpaSimulator studentId={studentId} currentCourses={data.current_courses} />
             <FocusStatement data={data} />
             <SuggestionsCard suggestions={data.suggestions} />
             <div className="pf-card-grid">
@@ -440,6 +585,7 @@ function StudentAnalysisPage({ L, rtl, studentId }){
               <AnomalyCard anomalies={data.anomalies} />
               <SemesterLoadCard sdi={data.semester_difficulty} />
             </div>
+            <StudentRegistrationHistory registrations={data.registrations} />
           </>
         )}
       </div>
@@ -489,6 +635,15 @@ function SessionGuideCard({ guide }){
 }
 
 /* ---------------- Advisor: subject-area table ---------------- */
+/* Status → color: strong green, adequate teal, struggling orange, critical red */
+const CAT_STATUS_STYLE = {
+  strong:     { background: "var(--success-soft)", color: "var(--success)" },
+  adequate:   { background: "var(--teal-soft)",    color: "var(--teal)" },
+  struggling: { background: "var(--warning-soft)", color: "var(--warning)" },
+  critical:   { background: "var(--danger-soft)",  color: "var(--danger)" },
+};
+const CAT_STATUS_FALLBACK = { background: "var(--surface-3)", color: "var(--text-faint)" };
+
 function CategoryTable({ categoryPerformance }){
   const cats = getCategoryMap(categoryPerformance);
   const names = Object.keys(cats);
@@ -502,14 +657,14 @@ function CategoryTable({ categoryPerformance }){
           <tbody>
             {names.map(n=>{
               const c = cats[n];
-              const struggling = c.status === "struggling";
+              const st = CAT_STATUS_STYLE[c.status] || CAT_STATUS_FALLBACK;
               return (
                 <tr key={n}>
                   <td className="ptitle">{n}</td>
                   <td className="pcr">{c.avg_letter_grade || "—"}</td>
                   <td className="pcr">{c.courses_attempted}</td>
                   <td className="pcr">{Math.round((c.pass_rate||0)*100)}%</td>
-                  <td><span className={"cc-status "+(struggling?"st-lock":"st-done")} style={struggling?{background:"var(--danger-soft)",color:"var(--danger)"}:null}>{c.status}</span></td>
+                  <td><span className="cc-status" style={st}>{c.status}</span></td>
                 </tr>
               );
             })}
@@ -632,6 +787,41 @@ function passRateColor(p){
   return "var(--success)";
 }
 
+/* Horizontal pass-rate bar chart (pure SVG). Expects courses already sorted
+   ascending by pass_rate_pct with insufficient_data rows filtered out. */
+function CourseRiskChart({ courses }){
+  if (!courses.length) return null;
+  const rowH = 26, padL = 92, padR = 48, padT = 10, padB = 26;
+  const W = 720;
+  const H = padT + padB + courses.length * rowH;
+  const barColor = p => p < 50 ? "var(--danger)" : p < 75 ? "var(--warning)" : "var(--success)";
+  const x = p => padL + (p / 100) * (W - padL - padR);
+  return (
+    <div className="pf-scroll" style={{maxHeight:500, overflowY:"auto", marginTop:12}}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Course pass rates, riskiest first">
+        {[0,25,50,75,100].map(t=>(
+          <g key={t}>
+            <line x1={x(t)} y1={padT} x2={x(t)} y2={H-padB} stroke="var(--border)" strokeWidth="1" />
+            <text x={x(t)} y={H-padB+16} textAnchor="middle" fontSize="10" fill="var(--text-faint)">{t}</text>
+          </g>
+        ))}
+        {courses.map((c,i)=>{
+          const y = padT + i * rowH;
+          const p = c.pass_rate_pct;
+          return (
+            <g key={c.course_code}>
+              <text x={padL-8} y={y+rowH/2+4} textAnchor="end" fontSize="11"
+                    fontFamily="var(--font-mono)" fill="var(--text)">{c.course_code}</text>
+              <rect x={padL} y={y+5} width={Math.max(2, x(p)-padL)} height={rowH-10} rx="4" fill={barColor(p)} />
+              <text x={x(p)+6} y={y+rowH/2+4} fontSize="11" fontWeight="700" fill="var(--text)">{c.avg_letter_grade || ""}</text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 function CourseRiskIndex(){
   const [level, setLevel] = useAS("All");
   const [rows, setRows] = useAS(null);
@@ -675,6 +865,8 @@ function CourseRiskIndex(){
       {!loading && !error && sorted.length === 0 &&
         <div className="pf-empty-note">No course data for this level.</div>}
       {!loading && !error && sorted.length > 0 && (
+        <>
+        <CourseRiskChart courses={sorted.filter(c => c.pass_rate_pct !== null && c.pass_rate_pct !== undefined)} />
         <div className="pf-scroll pf-tbl-wrap" style={{marginTop:12}}>
           <table className="plan">
             <thead><tr><th>Course Code</th><th>Pass Rate</th><th>Avg Grade</th><th>Risk Category</th></tr></thead>
@@ -686,7 +878,7 @@ function CourseRiskIndex(){
                   <tr key={c.course_code}>
                     <td className="pcode">{c.course_code}</td>
                     <td className="pcr" style={{color:passRateColor(p),fontWeight:700}}>
-                      {p !== null && p !== undefined ? p.toFixed(1) + "%" : "—"}</td>
+                      {p !== null && p !== undefined ? p.toFixed(1) + "%" : "?"}</td>
                     <td className="pcr">{c.avg_letter_grade || "—"}</td>
                     <td><span style={{background:meta.bg,color:meta.fg,fontWeight:700,fontSize:12,
                         padding:"3px 10px",borderRadius:999}}>{meta.label}</span></td>
@@ -696,6 +888,7 @@ function CourseRiskIndex(){
             </tbody>
           </table>
         </div>
+        </>
       )}
     </div>
   );
@@ -814,14 +1007,14 @@ function AdvisorConsole({ L, rtl, advisorId }){
             <div className="act-bar" style={{justifyContent:"flex-end"}}>
               <button className="act-btn sm" onClick={clearLookup}><Icon name="plus" style={{transform:"rotate(45deg)"}} />{L.clearLookup}</button>
             </div>
-            <StudentDashboard s={mapStudentToDashboard(looked)} L={L} />
+            <StudentDashboard s={mapStudentToDashboard(looked)} L={L} advisorView />
 
             <div className="pf-card-grid">
               <KeyPointsCard keyPoints={(lookedAnalysis||{}).key_points} />
               <SessionGuideCard guide={(lookedAnalysis||{}).llm_session_guide} />
               <CategoryTable categoryPerformance={(lookedAnalysis||looked).category_performance} />
               <BottleneckCard bottleneck={looked.prerequisite_bottleneck} />
-              <SemesterLoadCard sdi={looked.semester_difficulty} />
+              <SemesterLoadCard sdi={looked.semester_difficulty} advisorView />
               <RegistrationsCard registrations={(lookedAnalysis||looked).registrations} />
             </div>
           </>

@@ -534,11 +534,11 @@ class TestGroupF_PlanVariants:
         assert out.plans[0].plan_id == "plan_1"
 
     def test_lighter_load_mode_generates_reduced_cap_plan(self):
-        """lighter_load_mode=True generates a plan at cap - 2 credits."""
+        """lighter_load_mode=True steps down to the next lower CGPA bracket cap."""
+        # CGPA=2.5 is in the 2.0-3.0 bracket (cap=18). Lighter should step to 1.0-2.0 bracket (cap=15).
         out = generate_semester_plan(_inp(current_cgpa=2.5, lighter_load_mode=True, available_courses=self._big_pool()))
         assert out.status == "plans_generated"
-        # planning_target_credits should be 18 - 2 = 16
-        assert out.planning_target_credits == 16
+        assert out.planning_target_credits == 15  # next lower bracket: cgpa_between_1_and_2_limit=15
 
     def test_lighter_load_mode_false_no_auto_lighter_plan(self):
         """Without lighter_load_mode, no auto lighter plan is generated."""

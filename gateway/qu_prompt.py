@@ -78,7 +78,7 @@ lighter plan / light load plan / maximum courses I can take / give me N plans" \
 params: max_credits_mode=true when "maximum/most courses/credits I can take"; \
 lighter_load_mode=true when "lighter/light load/easier/fewer credits"; \
 requested_plan_count=N when "N different plans/options/alternatives"; \
-requested_courses=[names] when "along with X / include X / with X course"; \
+requested_courses=[names] when "along with X / include X / with X course / put X in the plan / want to retake X / want to take X next semester"; \
 target_credit_load=N when "plan N credits / N-credit plan"; \
 target_semester_text="exact phrase" when relative ("next semester", "next fall")
 generate_graduation_roadmap — "roadmap/plan to graduation / multi-semester plan"

@@ -26,6 +26,7 @@ from gateway.qu_preprocessing import (
     STRICT_COURSE_CODE_RE,
     PreprocessResult,
     detect_d6_record_focus,
+    detect_d6_all_focuses,
     detect_d6_response_style,
     detect_d2_course_info_verb,
     detect_d2_prereq_verb,
@@ -280,6 +281,7 @@ def _classify(
         )
         sq_list = [_parse_raw_sq(r, user_text) for r in raw_list if r]
         sq_list = _normalize_structured_queries_after_llm(sq_list, user_text, pre, last_referenced)
+        sq_list = _expand_d6_multi_focus(sq_list, user_text)
         return sq_list, "llm"
 
     except AllModelsFailedError:
@@ -289,9 +291,9 @@ def _classify(
         logger.warning("QU: LLM not configured — deterministic fallback")
         source = "deterministic_fallback_llm_not_configured"
     except Exception as exc:
-        logger.error("QU: unexpected error during LLM call: %s", type(exc).__name__)
+        logger.exception("QU: unexpected error during LLM call: %s", type(exc).__name__)
 
-    return _deterministic_fallback(user_text, pre), source
+    return _deterministic_fallback(user_text, pre, last_referenced), source
 
 
 # ── LLM Output Parsing ────────────────────────────────────────────────────────
@@ -305,6 +307,8 @@ def _parse_raw_sq(raw: dict[str, Any], fallback_text: str) -> StructuredQuery:
     original_text = raw.get("original_text") or fallback_text
 
     entities_raw = raw.get("entities") or {}
+    if not isinstance(entities_raw, dict):
+        entities_raw = {}
     entities = EntitySet(
         course_code=_nonempty(entities_raw.get("course_code")),
         role_id=_nonempty(entities_raw.get("role") or entities_raw.get("role_id")),
@@ -324,7 +328,8 @@ def _parse_raw_sq(raw: dict[str, Any], fallback_text: str) -> StructuredQuery:
         if any([sec.course_code, sec.role_id, sec.track_id, sec.skill_id]):
             secondary = sec
 
-    params: dict[str, Any] = raw.get("params") or {}
+    _raw_params = raw.get("params")
+    params: dict[str, Any] = _raw_params if isinstance(_raw_params, dict) else {}
     # Accept target_cgpa as alias for target_gpa; normalize both to float in [0.0, 4.0]
     if "target_cgpa" in params and "target_gpa" not in params:
         params["target_gpa"] = params.pop("target_cgpa")
@@ -415,6 +420,8 @@ def _parse_raw_sq(raw: dict[str, Any], fallback_text: str) -> StructuredQuery:
             del params["response_style"]
 
     ov_raw = raw.get("session_overrides") or {}
+    if not isinstance(ov_raw, dict):
+        ov_raw = {}
     session_overrides = SessionOverrides(
         added_courses=_str_list(ov_raw.get("added_courses")),
         assumed_passed_courses=_str_list(ov_raw.get("assumed_passed_courses")),
@@ -449,11 +456,24 @@ _D2_SKILL_INTENTS = frozenset({"search_courses_by_skill"})
 
 # Pronoun/referential expressions that must NOT be used as entity overrides
 _PRONOUN_OR_REF_MENTIONS: frozenset[str] = frozenset({
-    "it", "this", "that", "them", "those", "these",
+    "it", "its", "this", "that", "them", "those", "these",
     "the one", "that one", "this one",
     "this course", "that course", "the course",
     "this subject", "that subject", "the subject",
 })
+
+# Possessive referential prefixes — "its credits", "its prerequisites", etc.
+_REFERENTIAL_POSSESSIVE_PREFIXES: tuple[str, ...] = (
+    "its ", "their ", "this course's ", "that course's ",
+)
+
+
+def _is_referential_course_candidate(candidate: str) -> bool:
+    """Return True if candidate is a pronomial or possessive reference, not a real course name."""
+    s = candidate.strip().lower()
+    if s in _PRONOUN_OR_REF_MENTIONS:
+        return True
+    return any(s.startswith(pfx) for pfx in _REFERENTIAL_POSSESSIVE_PREFIXES)
 
 # Track intents that can be misrouted when the user asks about a course's track membership
 _TRACK_INTENTS_MISROUTED: frozenset[str] = frozenset({
@@ -579,6 +599,17 @@ def _normalize_one_sq(
                             })
 
         # D2: course entity promotion for course-info intents
+        # First: if the LLM set course_code to a referential mention ("its credits", "it", etc.)
+        # clear it and fall through to last_referenced resolution below.
+        if (
+            intent in _D2_COURSE_INTENTS
+            and sq.entities.course_code
+            and _is_referential_course_candidate(sq.entities.course_code)
+        ):
+            sq = sq.model_copy(update={
+                "entities": sq.entities.model_copy(update={"course_code": None})
+            })
+
         if intent in _D2_COURSE_INTENTS and not sq.entities.course_code:
             candidate = None
             # Try entity_candidates first (from LLM — priority order)
@@ -594,10 +625,73 @@ def _normalize_one_sq(
             # Fall back to text extraction
             if not candidate:
                 candidate = extract_d2_course_candidate(text_for_extraction)
+            # If candidate is a referential/possessive expression ("its credits", "it", etc.)
+            # and we have a last_referenced course, substitute it.
+            if candidate and _is_referential_course_candidate(candidate):
+                if last_referenced.course_code:
+                    logger.info(
+                        "QU.normalize: referential candidate %r replaced with "
+                        "last_referenced.course_code=%r",
+                        candidate, last_referenced.course_code,
+                    )
+                    candidate = last_referenced.course_code
+                else:
+                    candidate = None  # no fallback available — let resolver handle failure
             if candidate:
                 new_entities = sq.entities.model_copy(update={"course_code": candidate})
                 new_params = {**sq.params, "attempted_candidate": candidate}
                 sq = sq.model_copy(update={"entities": new_entities, "params": new_params})
+
+        # D2 last-resort referential fallback: if we still have no course_code after all promotion
+        # attempts, but the text has a clear referential word and last_referenced exists, use it.
+        if (
+            intent in _D2_COURSE_INTENTS
+            and not sq.entities.course_code
+            and last_referenced.course_code
+        ):
+            _lt = text_for_extraction.lower()
+            _has_referential = any(_ref in _lt.split() for _ref in ("its", "it", "this", "that")) or \
+                               any(_ref in _lt for _ref in ("its ", "this course", "that course", "can i take it"))
+            if _has_referential:
+                logger.info(
+                    "QU.normalize: D2 last-resort referential → course_code=%r intent=%s",
+                    last_referenced.course_code, intent,
+                )
+                sq = sq.model_copy(update={
+                    "entities": sq.entities.model_copy(update={"course_code": last_referenced.course_code}),
+                    "params": {**sq.params, "attempted_candidate": last_referenced.course_code},
+                })
+
+        # check_course_eligibility: apply same referential substitution as D2 course intents
+        if (
+            intent == "check_course_eligibility"
+            and sq.entities.course_code
+            and _is_referential_course_candidate(sq.entities.course_code)
+            and last_referenced.course_code
+        ):
+            logger.info(
+                "QU.normalize: check_course_eligibility referential %r → %r",
+                sq.entities.course_code, last_referenced.course_code,
+            )
+            sq = sq.model_copy(update={
+                "entities": sq.entities.model_copy(update={"course_code": last_referenced.course_code})
+            })
+        elif (
+            intent == "check_course_eligibility"
+            and not sq.entities.course_code
+            and last_referenced.course_code
+        ):
+            _lt = text_for_extraction.lower()
+            _has_referential = any(_ref in _lt.split() for _ref in ("its", "it", "this", "that")) or \
+                               any(_ref in _lt for _ref in ("its ", "can i take it", "this course", "that course"))
+            if _has_referential:
+                logger.info(
+                    "QU.normalize: check_course_eligibility no-entity referential → course_code=%r",
+                    last_referenced.course_code,
+                )
+                sq = sq.model_copy(update={
+                    "entities": sq.entities.model_copy(update={"course_code": last_referenced.course_code})
+                })
 
         # D2: skill entity promotion for skill-search intent
         elif intent in _D2_SKILL_INTENTS and not sq.entities.skill_id:
@@ -687,6 +781,27 @@ def _normalize_one_sq(
                         sq = sq.model_copy(update={"params": {**sq.params, "target_credit_load": cr}})
                 except ValueError:
                     pass
+            # Detect requested courses not captured by LLM: "put X in the plan", "want to retake X", etc.
+            if not sq.params.get("requested_courses"):
+                _req_pats = [
+                    # "to put X course" or "to put X in the plan" patterns
+                    r'to\s+put\s+(.+?)\s+(?:course|class|subject)\b',
+                    r'(?:put|place|include|add)\s+(.+?)\s+(?:in(?:to)?|as\s+part\s+of)\s+(?:the\s+)?(?:plan|semester|schedule)',
+                    # "want to retake/take X next semester" — stop at natural boundaries
+                    r'want\s+to\s+(?:retake|take|register\s+for|include)\s+(.+?)(?:\s+next\s+semester|\s+in(?:\s+the)?\s+plan|\s+as\b|\s*$)',
+                    r'along\s+with\s+(.+?)(?:\s+in\s+(?:the\s+)?plan|\s+next\s+semester|\s*$)',
+                ]
+                for _pat in _req_pats:
+                    _m3 = _re.search(_pat, lower_text, _re.IGNORECASE)
+                    if _m3:
+                        _mention = _m3.group(1).strip()
+                        # Strip trailing noise words
+                        _mention = _re.sub(r'\s+(?:course|class|subject|as|the|it)\s*$', '', _mention, flags=_re.IGNORECASE).strip()
+                        # Reject if mention is a pronoun/short filler
+                        if _mention and 3 <= len(_mention) <= 80 and _mention.lower() not in ("it", "its", "this", "that"):
+                            sq = sq.model_copy(update={"params": {**sq.params, "requested_courses": [_mention]}})
+                            logger.info("QU.normalize.plan_semester: requested_courses=%r", _mention)
+                            break
 
     except Exception:
         pass  # Never crash normalization; return original sq
@@ -705,6 +820,40 @@ def _normalize_structured_queries_after_llm(
         sq = _normalize_one_sq(sq, user_text, pre, last_referenced)
         result.append(sq)
     return result
+
+
+def _expand_d6_multi_focus(
+    sqs: list[StructuredQuery],
+    user_text: str,
+) -> list[StructuredQuery]:
+    """If text has multiple D6 focuses but LLM only emitted a subset, add missing ones.
+
+    Caps additional SQs at 2 to avoid over-decomposition.
+    Only adds focuses not already present in the SQ list.
+    """
+    d6_sqs = [sq for sq in sqs if sq.intent == "get_student_record"]
+    if not d6_sqs:
+        return sqs
+
+    current_focuses = {sq.params.get("record_focus") for sq in d6_sqs}
+    all_focuses = detect_d6_all_focuses(user_text)
+    missing = [f for f in all_focuses if f and f not in current_focuses]
+    if not missing:
+        return sqs
+
+    template_sq = d6_sqs[0]
+    additional: list[StructuredQuery] = []
+    for focus in missing[:2]:
+        additional.append(template_sq.model_copy(update={
+            "params": {**template_sq.params, "record_focus": focus},
+            "original_text": user_text,
+        }))
+
+    logger.info(
+        "QU.expand_d6: added focuses=%s to existing=%s",
+        [f for f in missing[:2]], sorted(f for f in current_focuses if f),
+    )
+    return sqs + additional
 
 
 # ── Pre-LLM fast path ─────────────────────────────────────────────────────────
@@ -947,7 +1096,11 @@ def _get_prev_courses_from_memory(am) -> list[str]:
 
 # ── Deterministic Fallback ────────────────────────────────────────────────────
 
-def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[StructuredQuery]:
+def _deterministic_fallback(
+    user_text: str,
+    pre: PreprocessResult,
+    last_referenced: LastReferenced | None = None,
+) -> list[StructuredQuery]:
     """Best-effort classification without LLM. Never crashes."""
     lower = user_text.lower()
 
@@ -1022,28 +1175,42 @@ def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[Struc
     if detect_d2_course_info_verb(lower) or detect_d2_prereq_verb(lower) or detect_d2_skills_taught_verb(lower):
         candidate = extract_d2_course_candidate(user_text)
         if candidate and not candidate.lower().startswith("my "):
-            if detect_d2_prereq_verb(lower):
-                depth = "full" if any(kw in lower for kw in ("full", "complete", "entire", "chain", "all prereq", "recursive")) else "direct"
-                return [StructuredQuery(
-                    intent="get_course_prerequisites",
-                    original_text=user_text,
-                    entities=EntitySet(course_code=candidate),
-                    params={"depth": depth, "attempted_candidate": candidate},
-                )]
-            elif detect_d2_skills_taught_verb(lower):
-                return [StructuredQuery(
-                    intent="get_skills_taught",
-                    original_text=user_text,
-                    entities=EntitySet(course_code=candidate),
-                    params={"attempted_candidate": candidate},
-                )]
-            else:
-                return [StructuredQuery(
-                    intent="get_course_info",
-                    original_text=user_text,
-                    entities=EntitySet(course_code=candidate),
-                    params={"attempted_candidate": candidate},
-                )]
+            # If candidate is a referential/possessive phrase ("its credits", "its level", etc.)
+            # and last_referenced has a course, substitute it.
+            if _is_referential_course_candidate(candidate):
+                ref_code = (last_referenced.course_code or "") if last_referenced else ""
+                if ref_code:
+                    logger.info(
+                        "QU.deterministic_fallback: referential candidate %r replaced with "
+                        "last_referenced.course_code=%r",
+                        candidate, ref_code,
+                    )
+                    candidate = ref_code
+                else:
+                    candidate = None  # no fallback — skip D2 course routing
+            if candidate:
+                if detect_d2_prereq_verb(lower):
+                    depth = "full" if any(kw in lower for kw in ("full", "complete", "entire", "chain", "all prereq", "recursive")) else "direct"
+                    return [StructuredQuery(
+                        intent="get_course_prerequisites",
+                        original_text=user_text,
+                        entities=EntitySet(course_code=candidate),
+                        params={"depth": depth, "attempted_candidate": candidate},
+                    )]
+                elif detect_d2_skills_taught_verb(lower):
+                    return [StructuredQuery(
+                        intent="get_skills_taught",
+                        original_text=user_text,
+                        entities=EntitySet(course_code=candidate),
+                        params={"attempted_candidate": candidate},
+                    )]
+                else:
+                    return [StructuredQuery(
+                        intent="get_course_info",
+                        original_text=user_text,
+                        entities=EntitySet(course_code=candidate),
+                        params={"attempted_candidate": candidate},
+                    )]
 
     if detect_d2_skill_search_verb(lower):
         candidate = extract_d2_skill_candidate(user_text)
@@ -1068,11 +1235,30 @@ def _deterministic_fallback(user_text: str, pre: PreprocessResult) -> list[Struc
                 original_text=user_text,
                 student_referential_fallback=True,
             )]
-        # Check for D6 focus
-        focus = detect_d6_record_focus(user_text)
-        if focus or any(kw in lower for kw in ("my record", "my progress", "my snapshot", "show my", "my courses", "my level", "my cgpa", "my gpa", "my standing", "my track", "my semester", "my status")):
-            actual_focus = focus or "progress_summary"
+        # Check for D6 focus — detect all focuses for mixed queries
+        all_focuses = detect_d6_all_focuses(user_text)
+        _generic_d6 = any(kw in lower for kw in (
+            "my record", "my progress", "my snapshot", "show my", "my courses",
+            "my level", "my cgpa", "my gpa", "my standing", "my track",
+            "my semester", "my status",
+        ))
+        if all_focuses or _generic_d6:
             style = detect_d6_response_style(user_text)
+            if len(all_focuses) >= 2:
+                # Mixed query: create one SQ per detected focus
+                sqs_out = []
+                for f in all_focuses[:3]:  # cap at 3 to avoid over-splitting
+                    _params: dict = {"record_focus": f}
+                    if style != "normal":
+                        _params["response_style"] = style
+                    sqs_out.append(StructuredQuery(
+                        intent="get_student_record",
+                        original_text=user_text,
+                        params=_params,
+                        student_referential_fallback=True,
+                    ))
+                return sqs_out
+            actual_focus = all_focuses[0] if all_focuses else "progress_summary"
             params = {"record_focus": actual_focus}
             if style != "normal":
                 params["response_style"] = style

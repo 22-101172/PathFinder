@@ -453,6 +453,8 @@ _D6_COMPLETED_KEYWORDS: frozenset[str] = frozenset({
     "what did i pass", "what did i finish", "what courses have i done",
     "what have i completed", "what have i passed", "courses completed",
     "done so far", "completed so far", "courses so far",
+    "courses that i completed", "courses that i passed", "courses that i finished",
+    "courses that i have completed", "courses that i have passed",
 })
 
 _D6_IN_PROGRESS_KEYWORDS: frozenset[str] = frozenset({
@@ -561,6 +563,38 @@ def detect_d6_record_focus(text: str) -> str | None:
     if any(kw in lower for kw in _D6_COURSE_STATUS_KEYWORDS):
         return "course_status_check"
     return None
+
+
+def detect_d6_all_focuses(text: str) -> list[str]:
+    """Return ALL detected record_focus values for a D6 query, in priority order.
+
+    Use this for mixed queries like "what is my gpa and what courses am i taking?"
+    to generate multiple SQs instead of collapsing to the first match.
+    """
+    lower = text.lower()
+    found: list[str] = []
+    checks = [
+        (_D6_FAILED_HISTORY_KEYWORDS, "failed_course_history"),
+        (_D6_LAST_SEM_GPA_KEYWORDS, "last_semester_gpa"),
+        (_D6_CGPA_KEYWORDS, "cgpa"),
+        (_D6_LEVEL_KEYWORDS, "academic_level"),
+        (_D6_STANDING_KEYWORDS, "academic_standing"),
+        (_D6_PROBATION_KEYWORDS, "probation_status"),
+        (_D6_WARNINGS_KEYWORDS, "academic_warnings"),
+        (_D6_COMPLETED_KEYWORDS, "completed_courses"),
+        (_D6_IN_PROGRESS_KEYWORDS, "in_progress_courses"),
+        (_D6_FAILED_KEYWORDS, "failed_courses"),
+        (_D6_CREDITS_KEYWORDS, "completed_credits"),
+        (_D6_TRACK_KEYWORDS, "track"),
+        (_D6_CURRENT_SEM_KEYWORDS, "current_semester"),
+        (_D6_STUDY_STATUS_KEYWORDS, "study_status"),
+        (_D6_COURSE_STATUS_KEYWORDS, "course_status_check"),
+    ]
+    for kw_set, focus in checks:
+        if any(kw in lower for kw in kw_set):
+            if focus not in found:
+                found.append(focus)
+    return found
 
 
 def detect_d6_response_style(text: str) -> str:

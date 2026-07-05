@@ -165,11 +165,11 @@ class TestGenerateSemesterPlanBasic:
         assert result.planning_target_credits == 21  # cgpa_bracket_max for >= 3.0
 
     def test_planning_target_credits_lighter_mode(self):
-        """Lighter mode should subtract 2 from bracket max."""
+        """Lighter mode steps down to the next lower CGPA bracket cap."""
         inp = _make_plan_input(cgpa=3.0, lighter=True)
         result = generate_semester_plan(inp)
-        # 21 - 2 = 19
-        assert result.planning_target_credits == 19
+        # CGPA=3.0 → in >=3.0 bracket (21 cr). Lighter = next lower bracket = between2_3 = 18
+        assert result.planning_target_credits == 18
 
     def test_planning_target_credits_max_mode(self):
         inp = _make_plan_input(cgpa=2.5, max_mode=True)
@@ -205,7 +205,7 @@ class TestGenerateSemesterPlanBasic:
 class TestLighterLoadMode:
 
     def test_lighter_mode_caps_below_bracket(self):
-        """Lighter mode uses bracket_max - 2."""
+        """Lighter mode steps down to the next lower CGPA bracket cap."""
         courses = [
             _course(f"C-CS{i:03d}", f"Course {i}", 3, level=3)
             for i in range(1, 10)
@@ -213,16 +213,16 @@ class TestLighterLoadMode:
         inp = _make_plan_input(cgpa=3.0, lighter=True, courses=courses)
         result = generate_semester_plan(inp)
         assert result.status == "plans_generated"
-        # planning_target_credits should be 21 - 2 = 19
-        assert result.planning_target_credits == 19
+        # CGPA=3.0 → bracket max = 21. Lighter = next lower bracket (between_2_and_3) = 18
+        assert result.planning_target_credits == 18
 
     def test_lighter_mode_not_below_minimum(self):
         """Lighter mode floor is minimum_per_semester."""
-        inp = _make_plan_input(cgpa=0.5)  # bracket max = 12, 12-2=10, min=9
+        inp = _make_plan_input(cgpa=0.5)  # bracket max = 12; lighter = minimum_per_semester = 9
         inp = inp.model_copy(update={"lighter_load_mode": True})
         result = generate_semester_plan(inp)
-        # 12 - 2 = 10 >= 9 minimum, so 10
-        assert result.planning_target_credits == 10
+        # CGPA=0.5 → below both mid thresholds → returns minimum_per_semester = 9
+        assert result.planning_target_credits == 9
 
 
 class TestMaxCreditsMode:

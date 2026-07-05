@@ -95,10 +95,12 @@ def _fmt_skill_label(skill_id: str, name: str = "") -> str:
 
 
 def _fmt_track_label(track_id: str, name: str = "") -> str:
-    """Format track with friendly name; use map if no name available."""
+    """Format track with friendly canonical name; canonical map overrides KG-provided name."""
+    if track_id in _TRACK_DISPLAY_MAP:
+        return _TRACK_DISPLAY_MAP[track_id]
     if name:
         return f"{name} ({track_id})" if track_id and track_id not in name else name
-    return _TRACK_DISPLAY_MAP.get(track_id, track_id or "")
+    return track_id or ""
 
 
 def _render_course_detail(detail: dict) -> str:
@@ -209,6 +211,7 @@ For example: "Advanced Programming (C-CS219)", not "C-CS219 — Advanced Program
 Convert them: RL_Data_Scientist → "Data Scientist", SK_Machine_Learning → "Machine Learning". \
 Display tracks as "Artificial Intelligence (AI)", "Cyber Security (CYS)", \
 "Data Science and Engineering (DSE)", "Software Engineering (SWE)", or "General Program (GEN)". \
+For alignment scores: use the word "role" not "track". Say "Software Engineer role" not "Software Engineer track". \
 Phrase alignment scores as curriculum-skill alignment, not employability guarantees. \
 Phrase roles by track as related/connected roles, not guaranteed jobs. \
 Do not narrate focus/gap courses as registration plans.
@@ -363,6 +366,9 @@ def _extract_packet(result: PerSQResult) -> dict:
             pct = _resolve_alignment_pct(packet)
             if pct:
                 packet["alignment_pct_display"] = pct
+                # Remove raw decimal score so LLM shows only the percentage form
+                packet.pop("alignment_score", None)
+                packet.pop("alignment_percentage", None)
     elif intent in (
         "get_track_overview", "compare_tracks",
         "recommend_track_for_role", "recommend_track_for_skill",
@@ -637,6 +643,30 @@ def _extract_career(packet: dict, data: dict, intent: str) -> None:
             packet[k] = val
 
 
+def _sanitize_skill_entry(entry) -> dict:
+    """Convert a raw skill entry to display-safe form with only a readable name."""
+    if isinstance(entry, dict):
+        sid = entry.get("skill_id", "")
+        name = entry.get("name", "") or entry.get("skill_name", "")
+        return {"name": _fmt_skill_label(sid, name)}
+    return {"name": _fmt_skill_label(str(entry))}
+
+
+def _sanitize_skills_field(val) -> object:
+    """Replace raw skill_id entries with display names so LLM cannot expose SK_* IDs."""
+    if isinstance(val, list):
+        return [_sanitize_skill_entry(s) for s in val]
+    if isinstance(val, dict):
+        out = {}
+        for k, v in val.items():
+            if isinstance(v, list) and k not in ("total_track_1_only", "total_track_2_only", "total_shared"):
+                out[k] = [_sanitize_skill_entry(s) for s in v]
+            else:
+                out[k] = v
+        return out
+    return val
+
+
 def _extract_track(packet: dict, data: dict, intent: str) -> None:
     for k in (
         "track_id", "track_id_1", "track_id_2",
@@ -652,6 +682,9 @@ def _extract_track(packet: dict, data: dict, intent: str) -> None:
             val = data[k]
             if isinstance(val, list):
                 val = _cap_list(val, 20)
+            # Sanitize skills to prevent raw SK_* IDs reaching the LLM
+            if k == "skills":
+                val = _sanitize_skills_field(val)
             packet[k] = val
 
 
@@ -1197,7 +1230,7 @@ def _narrate_intent(p: dict, intent: str, lines: list[str]) -> None:  # noqa: C9
         role_id = p.get("role_id", "")
         role_display = _fmt_role_label(role_id, role_name) or "the target role"
         pct_str = p.get("alignment_pct_display") or _resolve_alignment_pct(p) or "N/A"
-        lines.append(f"Your curriculum alignment with {role_display}: {pct_str}")
+        lines.append(f"Your curriculum alignment with the {role_display} role: {pct_str}")
 
     elif intent == "recommend_courses_to_close_gap":
         role_name = p.get("role_name", "")

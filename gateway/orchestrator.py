@@ -652,9 +652,66 @@ class Orchestrator:
         if "error" in kg_data:
             return _info(sq_index, intent, kg_data)
 
+        # Build unified available_courses: target track + GEN common curriculum + student's own courses
+        _course_union: dict[str, dict] = {}
+        for c in kg_data.get("courses", []):
+            if isinstance(c, dict) and c.get("course_code"):
+                _course_union[c["course_code"]] = c
+
+        # Add GEN common-curriculum courses (freshmen general education, shared prerequisites)
+        if track_id != "GEN":
+            _gen_data, _gen_err = self._get_courses_by_track("GEN", caches)
+            if not _gen_err and "error" not in _gen_data:
+                _gen_added = 0
+                for c in _gen_data.get("courses", []):
+                    if isinstance(c, dict) and c.get("course_code"):
+                        _code = c["course_code"]
+                        if _code not in _course_union:
+                            _course_union[_code] = c
+                            _gen_added += 1
+                logger.info(
+                    "Orchestrator.roadmap_union track=%s target=%d gen_added=%d union=%d",
+                    track_id, len(kg_data.get("courses", [])), _gen_added, len(_course_union),
+                )
+
+        # Ensure student's own in-progress and completed courses are represented,
+        # even if absent from both track catalogues (e.g. electives, exchange credits).
+        _student_codes = set(ctx.in_progress_courses or []) | set(ctx.completed_courses or [])
+        _missing_codes = _student_codes - set(_course_union.keys())
+        for _code in _missing_codes:
+            if _code not in caches.course_profile_cache:
+                _prof_result = self._kg.call("get_course_profile", {"course_code": _code})
+                caches.course_profile_cache[_code] = _prof_result
+            _prof = caches.course_profile_cache.get(_code, {})
+            if isinstance(_prof, dict) and not _is_kg_adapter_error(_prof) and "error" not in _prof:
+                _course_union[_code] = {
+                    "course_code": _code,
+                    "name": _prof.get("name", _code),
+                    "credits": _prof.get("credits", 0),
+                    "prerequisites": _prof.get("prerequisites") or [],
+                    "semester_offering": _prof.get("semester_offering") or [],
+                    "level": _prof.get("level"),
+                    "credit_threshold": _prof.get("credit_threshold"),
+                }
+                logger.info("Orchestrator.roadmap_profile_fallback code=%s name=%r", _code, _prof.get("name"))
+            else:
+                # Stub: mark the course as having zero credits so ALE won't count toward caps
+                _course_union[_code] = {
+                    "course_code": _code,
+                    "name": _code,
+                    "credits": 0,
+                    "prerequisites": [],
+                    "semester_offering": [],
+                    "level": None,
+                    "credit_threshold": None,
+                }
+                logger.warning("Orchestrator.roadmap_course_stub code=%s no KG profile", _code)
+
+        _unified_courses = list(_course_union.values())
+
         required_zero_credit_courses = [
             c["course_code"]
-            for c in kg_data.get("courses", [])
+            for c in _unified_courses
             if c.get("credits") == 0 and c["course_code"] not in _NON_UNIVERSAL_ZERO_CREDIT_COURSES
         ]
 
@@ -707,7 +764,7 @@ class Orchestrator:
 
         ale_result = self._ale.call("generate_graduation_roadmap", ctx, bundles,
                                     {
-                                        "available_courses": kg_data.get("courses", []),
+                                        "available_courses": _unified_courses,
                                         "required_zero_credit_courses": required_zero_credit_courses,
                                     }, params)
         if ale_result.get("status") == "error":

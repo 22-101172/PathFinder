@@ -608,6 +608,30 @@ class RAGAdapter:
             )
         bundles["student_level_rules"] = _warn_if_empty("student_level_rules", res_sl.get("data", {}))
 
+        # HANDBOOK-BACKED STARTUP FALLBACK for retake_rules (CIS Handbook):
+        #   failed_first_retake_grade_cap = "B"  (max grade on first retake after failure)
+        #   improve_retake_first_attempt_cap = None  (no cap on first improve attempt)
+        #   improve_retake_subsequent_cap = "B"  (cap on 2nd+ improve retake)
+        #   improve_retake_max_courses_cgpa_above_2 = 3  (max improve-retake courses if CGPA >= 2.0)
+        #   improve_retake_unlimited_below_cgpa = 2.0  (below this CGPA, unlimited improve retakes)
+        # These constants come from the ALE schema field descriptions and are the institutional values.
+        # We fill only fields that are still None after extraction — never overwrite a real value.
+        rr_data = bundles.get("retake_rules", {})
+        _RETAKE_FALLBACKS = {
+            "failed_first_retake_grade_cap": "B",
+            "improve_retake_first_attempt_cap": None,
+            "improve_retake_subsequent_cap": "B",
+            "improve_retake_max_courses_cgpa_above_2": 3,
+            "improve_retake_unlimited_below_cgpa": 2.0,
+        }
+        for _k, _v in _RETAKE_FALLBACKS.items():
+            if rr_data.get(_k) is None:
+                rr_data[_k] = _v
+                logger.info(
+                    "get_rule_bundles: retake_rules.%s filled from handbook fallback (%r)", _k, _v
+                )
+        bundles["retake_rules"] = rr_data
+
         # Normalize grading scale: Abs is a failing grade with 0.0 points.
         # RAG may misclassify it as null because it is non-numeric text, so normalize deterministically.
         gs_data = bundles.get("grading_scale_rules", {})

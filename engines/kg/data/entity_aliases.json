@@ -61,7 +61,6 @@
         "mathematical cryptography"
       ],
       "C-PH111": [
-        "physics",
         "elementary physics",
         "basic physics",
         "physics 1",
@@ -79,7 +78,7 @@
       "C-PH113": [
         "digital logic",
         "logic design",
-        "digital logic design",
+        "digital logic  design",
         "dld",
         "logic circuits",
         "boolean algebra"
@@ -92,8 +91,7 @@
         "intro to computing",
         "programming 1",
         "prog 1",
-        "ip",
-        "icp"
+        "intro to prog"
       ],
       "C-CS112": [
         "programming fundamentals",
@@ -114,7 +112,6 @@
       ],
       "C-CS214": [
         "computer architecture",
-        "ca",
         "computer organization",
         "comp arch",
         "computer architecture and organization",
@@ -138,7 +135,6 @@
         "algorithm design",
         "algorithms design",
         "algorithms design and analysis",
-        "dsa",
         "algorithm analysis",
         "algorithm course"
       ],
@@ -149,7 +145,8 @@
         "ocaml",
         "scala programming",
         "adv prog",
-        "fp"
+        "fp",
+        "scala"
       ],
       "C-CS316": [
         "os",
@@ -166,7 +163,6 @@
         "intro to networks",
         "intro networks",
         "network fundamentals",
-        "tcp ip",
         "computer networking"
       ],
       "C-CS351": [
@@ -188,11 +184,12 @@
         "web course",
         "html",
         "java web",
-        "web app"
+        "web app",
+        "web prog"
       ],
       "C-CS435": [
         "computer vision",
-        "cv course",
+        "cv",
         "image processing",
         "vision",
         "comp vision"
@@ -236,18 +233,12 @@
         "intro db",
         "database course",
         "databases",
-        "db course",
-        "sql course",
-        "rdbms",
         "relational databases"
       ],
       "C-DE324": [
         "big data",
         "big data engineering",
-        "spark",
-        "hadoop",
-        "distributed data",
-        "big data course"
+        "distributed data"
       ],
       "C-DE413": [
         "distributed databases",
@@ -268,7 +259,7 @@
         "data science 1",
         "data science i",
         "data science fundamentals",
-        "ds1",
+        "ds 1",
         "ds i",
         "intro data science"
       ],
@@ -276,7 +267,7 @@
         "data science 2",
         "data science ii",
         "big data analytics",
-        "ds2",
+        "ds 2",
         "ds ii",
         "advanced data science"
       ],
@@ -313,11 +304,15 @@
         "bayesian ai"
       ],
       "C-AI415": [
+        "introduction to intelligent robotics systems",
+        "introduction to intelligent robotics",
+        "intro to intelligent robotics systems",
+        "intro to intelligent robotics",
         "robotics",
         "intelligent robotics",
         "robotic systems",
         "intelligent robotic systems",
-        "intro robotics",
+        "intro to robotics",
         "robot course"
       ],
       "C-AI422": [
@@ -331,10 +326,8 @@
       "C-AI424": [
         "nlp",
         "natural language processing",
-        "nlp course",
         "language processing",
-        "text processing",
-        "computational linguistics"
+        "text processing"
       ],
       "C-SW311": [
         "software design and development",
@@ -346,32 +339,29 @@
       "C-SW312": [
         "intro to software engineering",
         "software engineering intro",
-        "intro se",
-        "se basics",
+        "intro to swe",
+        "swe basics",
         "software engineering fundamentals",
-        "se course",
-        "intro software eng"
+        "intro to software eng",
+        "introduction to software engineering",
+        "introduction to swe"
       ],
       "C-SW421": [
         "software engineering 1",
-        "se 1",
-        "se i",
+        "swe 1",
+        "swe i",
         "software testing",
-        "verification and validation",
         "sw eng 1",
-        "software quality assurance",
-        "sqa"
+        "software quality assurance"
       ],
       "C-SW422": [
         "software engineering 2",
-        "se 2",
-        "se ii",
+        "swe 2",
+        "swe ii",
         "software quality",
         "software reliability",
-        "sw eng 2",
-        "advanced se",
-        "cicd",
-        "continuous integration"
+        "swe eng 2",
+        "advanced swe"
       ],
       "C-SW423": [
         "secure software development",
@@ -386,23 +376,21 @@
         "secure software systems"
       ],
       "C-SW425": [
+        "strategic information technology management",
         "strategic it",
         "it strategy",
         "strategic it management",
-        "it management course",
         "it governance"
       ],
       "HUM110": [
         "english fundamentals",
         "english basics",
         "english foundation",
-        "basic english",
-        "esl"
+        "basic english"
       ],
       "HUM111": [
         "english",
         "english language",
-        "english course",
         "academic english",
         "english writing",
         "english 1"
@@ -432,7 +420,6 @@
       "HUM221": [
         "entrepreneurship",
         "startup",
-        "entrepreneurship course",
         "business venturing",
         "venture"
       ],
@@ -441,7 +428,8 @@
         "intro to management",
         "management course",
         "organizational management",
-        "intro management"
+        "intro management",
+        "introduction to management"
       ],
       "HUM228": [
         "economics",
@@ -449,15 +437,15 @@
         "econ",
         "intro econ",
         "microeconomics",
-        "macroeconomics"
+        "macroeconomics",
+        "introduction to economics"
       ],
       "C-TR304": [
         "field training",
         "internship",
         "training",
         "industrial training",
-        "summer training",
-        "coop"
+        "summer training"
       ],
       "C-GP411A": [
         "graduation project a",
@@ -466,6 +454,9 @@
         "graduation project 1",
         "gp first part",
         "senior project a",
+        "capstone a",
+        "grad project a",
+        "grad proj a",
         "capstone a"
       ],
       "C-GP411B": [
@@ -475,7 +466,9 @@
         "graduation project 2",
         "gp second part",
         "senior project b",
-        "capstone b"
+        "capstone b",
+        "grad project b",
+        "grad proj b"
       ]
     },
     "ambiguous_terms": {
@@ -1098,6 +1091,7 @@
       ],
       "SK_AI_Algorithms": [
         "ai algorithms",
+        "ai algorithm",
         "search algorithms",
         "knowledge representation",
         "inference",

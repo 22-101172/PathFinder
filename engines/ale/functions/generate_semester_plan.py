@@ -27,7 +27,7 @@ _CGPA_LOW  = 1.0
 
 # System-design algorithm constants
 _HIGH_UNLOCK_THRESHOLD     = 3
-_LIGHTER_LOAD_OFFSET       = 2   # Credits below official cap for lighter mode
+_LIGHTER_LOAD_OFFSET       = 2   # Fallback offset (unused when bracket stepping works)
 _MIN_LEVEL_FOCUSED_COURSES = 2   # Level-focused plan needs at least this many same-level courses
 _DEFAULT_MAX_PLANS         = 3   # Default when requested_plan_count is None
 
@@ -144,7 +144,7 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
         elif input.lighter_load_mode:
             lighter_target = max(
                 credit_limit_rules.minimum_per_semester,
-                cgpa_bracket_max - _LIGHTER_LOAD_OFFSET,
+                _compute_lighter_bracket_cap(input.current_cgpa, credit_limit_rules),
             )
             active_credit_cap = lighter_target
             planning_target_credits = lighter_target
@@ -207,6 +207,11 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
         code for code in failed_set if code in in_progress_set
     ]
 
+    # Effective completed set for prerequisite checking:
+    # in-progress courses from the current term count as "will be completed"
+    # when planning for the NEXT semester. This unlocks courses that require them.
+    effective_completed_for_prereqs = completed_set | in_progress_set
+
     eligible_pool: list[_EligibleCourse] = []
     excluded_requested: list[dict] = []
     cnt_in_progress       = 0
@@ -267,7 +272,9 @@ def generate_semester_plan(input: GenerateSemesterPlanInput) -> GenerateSemester
             cnt_zero_credit_filtered += 1
             continue
 
-        missing_prereqs = [p for p in course.prerequisites if p not in completed_set]
+        # Use effective_completed_for_prereqs (includes in-progress) so that courses
+        # unlocked by current-semester in-progress work are available for next-semester planning.
+        missing_prereqs = [p for p in course.prerequisites if p not in effective_completed_for_prereqs]
         is_retake = code in failed_set
 
         if missing_prereqs and not is_retake:
@@ -514,6 +521,24 @@ def _compute_cgpa_bracket_max(
     if current_cgpa >= _CGPA_LOW:
         return credit_limit_rules.cgpa_between_1_and_2_limit
     return credit_limit_rules.cgpa_below_1_limit
+
+
+def _compute_lighter_bracket_cap(
+    current_cgpa: float,
+    credit_limit_rules: CreditLimitRules,
+) -> int:
+    """Return the next lower CGPA bracket's credit cap for lighter-load mode.
+
+    If a student is in the 21-credit bracket (CGPA >= 3.0), lighter gives 18 (the 2.0-3.0 tier).
+    If already at the 2.0-3.0 tier, lighter gives the 1.0-2.0 tier.
+    If at the lowest bracket, return minimum_per_semester as the floor.
+    """
+    if current_cgpa >= _CGPA_HIGH:
+        return credit_limit_rules.cgpa_between_2_and_3_limit
+    if current_cgpa >= _CGPA_MID:
+        return credit_limit_rules.cgpa_between_1_and_2_limit
+    # Already at low bracket — minimum is the lightest valid load
+    return credit_limit_rules.minimum_per_semester
 
 
 def _assign_priority_level(

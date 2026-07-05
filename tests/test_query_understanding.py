@@ -44,6 +44,8 @@ from gateway.qu_llm_chain import (
 from gateway.query_understanding import (
     _clarification,
     _deterministic_fallback,
+    _normalize_one_sq,
+    _expand_d6_multi_focus,
     _parse_raw_sq,
     understand_query,
 )

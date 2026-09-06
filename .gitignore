@@ -1,0 +1,25 @@
+.env
+*.pdf
+*.PDF
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.sqlite3
+*.db
+logs_*.txt
+gateway/session_store/pathfinder_sessions.db
+engines/rag/chroma_db/
+engines/rag/chunks.pkl
+
+# SAE runtime artifacts
+engines/sae/cache/
+
+**/__pycache__/
+main.py.backup

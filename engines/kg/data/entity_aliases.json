@@ -1,0 +1,1446 @@
+{
+  "_comment": "Entity alias table for PathFinder KG resolver. All alias strings are post-normalization (lowercase, filler words removed, hyphens/underscores replaced with spaces). Maintained manually for MVP. Do not add LLM-generated aliases without human review.",
+  "course": {
+    "aliases": {
+      "C-MA110": [
+        "math fundamentals",
+        "math basics",
+        "mathematics fundamentals",
+        "foundation math",
+        "precalculus"
+      ],
+      "C-MA111": [
+        "calculus 1",
+        "calc 1",
+        "calculus i",
+        "calc i",
+        "differential calculus",
+        "single variable calculus"
+      ],
+      "C-MA112": [
+        "calculus 2",
+        "calc 2",
+        "calculus ii",
+        "calc ii",
+        "integral calculus",
+        "multivariable calculus"
+      ],
+      "C-MA213": [
+        "discrete",
+        "discrete math",
+        "discrete mathematics",
+        "discrete structures",
+        "combinatorics",
+        "formal logic"
+      ],
+      "C-ST211": [
+        "stats",
+        "statistics",
+        "prob and stats",
+        "probability and statistics",
+        "intro to stats",
+        "intro stats",
+        "prob stats",
+        "probability",
+        "inroduction to probability and statistics",
+        "intro to probability and statistics",
+        "intro to probability",
+        "intro to statistics"
+      ],
+      "C-MA321": [
+        "graph theory",
+        "graphs",
+        "graph theory and combinatorics"
+      ],
+      "C-MA425": [
+        "cryptology",
+        "number theory",
+        "cryptology and number theory",
+        "crypt",
+        "crypto math",
+        "mathematical cryptography"
+      ],
+      "C-PH111": [
+        "elementary physics",
+        "basic physics",
+        "physics 1",
+        "physics i",
+        "ph1"
+      ],
+      "C-PH112": [
+        "advanced physics",
+        "electromagnetism",
+        "physics 2",
+        "physics ii",
+        "em",
+        "ph2"
+      ],
+      "C-PH113": [
+        "digital logic",
+        "logic design",
+        "digital logic  design",
+        "dld",
+        "logic circuits",
+        "boolean algebra"
+      ],
+      "C-CS111": [
+        "intro to programming",
+        "intro programming",
+        "computing and programming",
+        "introduction to programming",
+        "intro to computing",
+        "programming 1",
+        "prog 1",
+        "intro to prog"
+      ],
+      "C-CS112": [
+        "programming fundamentals",
+        "prog fundamentals",
+        "fundamentals of programming",
+        "programming 2",
+        "prog 2",
+        "cpp programming",
+        "object oriented",
+        "oop basics"
+      ],
+      "C-CS213": [
+        "data structures",
+        "data structures course",
+        "linked lists",
+        "trees",
+        "advanced data structures"
+      ],
+      "C-CS214": [
+        "computer architecture",
+        "computer organization",
+        "comp arch",
+        "computer architecture and organization",
+        "coa",
+        "hardware",
+        "cpu architecture"
+      ],
+      "C-CS215": [
+        "linear algebra",
+        "linalg",
+        "la",
+        "computational linear algebra",
+        "matrices",
+        "matrix math",
+        "linear algebra course"
+      ],
+      "C-CS218": [
+        "algorithms",
+        "algo",
+        "algos",
+        "algorithm design",
+        "algorithms design",
+        "algorithms design and analysis",
+        "algorithm analysis",
+        "algorithm course"
+      ],
+      "C-CS219": [
+        "advanced programming",
+        "functional programming",
+        "functional prog",
+        "ocaml",
+        "scala programming",
+        "adv prog",
+        "fp",
+        "scala"
+      ],
+      "C-CS316": [
+        "os",
+        "operating systems",
+        "intro os",
+        "intro to operating systems",
+        "os course",
+        "linux course"
+      ],
+      "C-CS341": [
+        "networks",
+        "computer networks",
+        "networking",
+        "intro to networks",
+        "intro networks",
+        "network fundamentals",
+        "computer networking"
+      ],
+      "C-CS351": [
+        "selected topics 1",
+        "selected topics basic cs",
+        "selected topics basic computer science",
+        "cs topics 1"
+      ],
+      "C-CS352": [
+        "selected topics 2",
+        "selected topics basic cs 2",
+        "selected topics basic computer science 2",
+        "cs topics 2"
+      ],
+      "C-CS417": [
+        "web programming",
+        "web dev",
+        "web development",
+        "web course",
+        "html",
+        "java web",
+        "web app",
+        "web prog"
+      ],
+      "C-CS435": [
+        "computer vision",
+        "cv",
+        "image processing",
+        "vision",
+        "comp vision"
+      ],
+      "C-CS442": [
+        "computer security",
+        "intro to computer security",
+        "intro security",
+        "security fundamentals",
+        "info security"
+      ],
+      "C-CS443": [
+        "data security",
+        "intro to data security",
+        "data level security"
+      ],
+      "C-CS495": [
+        "selected topics cs 1",
+        "selected topics computer science 1",
+        "advanced cs topics 1",
+        "cs elective 1"
+      ],
+      "C-CS496": [
+        "selected topics cs 2",
+        "selected topics computer science 2",
+        "advanced cs topics 2",
+        "cs elective 2"
+      ],
+      "C-DE211": [
+        "data analysis",
+        "statistical analysis",
+        "data analysis course",
+        "stats for data",
+        "regression",
+        "data analysis and statistics"
+      ],
+      "C-DE312": [
+        "intro to database systems",
+        "intro to databases",
+        "database systems intro",
+        "intro db",
+        "database course",
+        "databases",
+        "relational databases"
+      ],
+      "C-DE324": [
+        "big data",
+        "big data engineering",
+        "distributed data"
+      ],
+      "C-DE413": [
+        "distributed databases",
+        "distributed db",
+        "distributed database systems",
+        "dist db",
+        "distributed data systems"
+      ],
+      "C-DE414": [
+        "dbms",
+        "database management systems",
+        "db management",
+        "database internals",
+        "database architecture course",
+        "database implementation"
+      ],
+      "C-DE421": [
+        "data science 1",
+        "data science i",
+        "data science fundamentals",
+        "ds 1",
+        "ds i",
+        "intro data science"
+      ],
+      "C-DE422": [
+        "data science 2",
+        "data science ii",
+        "big data analytics",
+        "ds 2",
+        "ds ii",
+        "advanced data science"
+      ],
+      "C-AI311": [
+        "intro ai",
+        "intro to ai",
+        "introduction to ai",
+        "foundations of ai",
+        "ai course",
+        "ai basics"
+      ],
+      "C-AI321": [
+        "intro to machine learning",
+        "intro ml",
+        "introduction to ml",
+        "iml",
+        "intro to ml"
+      ],
+      "C-AI412": [
+        "ai 1",
+        "ai i",
+        "artificial intelligence 1",
+        "ai one",
+        "ai first",
+        "advanced ai 1"
+      ],
+      "C-AI413": [
+        "ai 2",
+        "ai ii",
+        "artificial intelligence 2",
+        "probabilistic ai",
+        "ai two",
+        "uncertainty ai",
+        "bayesian ai"
+      ],
+      "C-AI415": [
+        "introduction to intelligent robotics systems",
+        "introduction to intelligent robotics",
+        "intro to intelligent robotics systems",
+        "intro to intelligent robotics",
+        "robotics",
+        "intelligent robotics",
+        "robotic systems",
+        "intelligent robotic systems",
+        "intro to robotics",
+        "robot course"
+      ],
+      "C-AI422": [
+        "ml fundamentals",
+        "machine learning fundamentals",
+        "advanced ml",
+        "ml course 2",
+        "applied ml",
+        "machine learning 2"
+      ],
+      "C-AI424": [
+        "nlp",
+        "natural language processing",
+        "language processing",
+        "text processing"
+      ],
+      "C-SW311": [
+        "software design and development",
+        "software design course",
+        "sw design",
+        "code design",
+        "design and development"
+      ],
+      "C-SW312": [
+        "intro to software engineering",
+        "software engineering intro",
+        "intro to swe",
+        "swe basics",
+        "software engineering fundamentals",
+        "intro to software eng",
+        "introduction to software engineering",
+        "introduction to swe"
+      ],
+      "C-SW421": [
+        "software engineering 1",
+        "swe 1",
+        "swe i",
+        "software testing",
+        "sw eng 1",
+        "software quality assurance"
+      ],
+      "C-SW422": [
+        "software engineering 2",
+        "swe 2",
+        "swe ii",
+        "software quality",
+        "software reliability",
+        "swe eng 2",
+        "advanced swe"
+      ],
+      "C-SW423": [
+        "secure software development",
+        "secure software",
+        "secure systems",
+        "secure coding",
+        "security in software",
+        "devsecops course",
+        "secure dev",
+        "development of secure software systems",
+        "development of secure software",
+        "secure software systems"
+      ],
+      "C-SW425": [
+        "strategic information technology management",
+        "strategic it",
+        "it strategy",
+        "strategic it management",
+        "it governance"
+      ],
+      "HUM110": [
+        "english fundamentals",
+        "english basics",
+        "english foundation",
+        "basic english"
+      ],
+      "HUM111": [
+        "english",
+        "english language",
+        "academic english",
+        "english writing",
+        "english 1"
+      ],
+      "HUM412": [
+        "technical writing",
+        "tech writing",
+        "professional writing",
+        "technical communication"
+      ],
+      "HUM125": [
+        "humanities 1",
+        "selected topics humanities 1",
+        "hum 1"
+      ],
+      "HUM126": [
+        "humanities 2",
+        "selected topics humanities 2",
+        "hum 2"
+      ],
+      "HUM129": [
+        "humanities 3",
+        "selected topics humanities 3",
+        "hum 3",
+        "summer humanities"
+      ],
+      "HUM221": [
+        "entrepreneurship",
+        "startup",
+        "business venturing",
+        "venture"
+      ],
+      "HUM224": [
+        "management",
+        "intro to management",
+        "management course",
+        "organizational management",
+        "intro management",
+        "introduction to management"
+      ],
+      "HUM228": [
+        "economics",
+        "intro to economics",
+        "econ",
+        "intro econ",
+        "microeconomics",
+        "macroeconomics",
+        "introduction to economics"
+      ],
+      "C-TR304": [
+        "field training",
+        "internship",
+        "training",
+        "industrial training",
+        "summer training"
+      ],
+      "C-GP411A": [
+        "graduation project a",
+        "gp a",
+        "gp 1",
+        "graduation project 1",
+        "gp first part",
+        "senior project a",
+        "capstone a",
+        "grad project a",
+        "grad proj a",
+        "capstone a"
+      ],
+      "C-GP411B": [
+        "graduation project b",
+        "gp b",
+        "gp 2",
+        "graduation project 2",
+        "gp second part",
+        "senior project b",
+        "capstone b",
+        "grad project b",
+        "grad proj b"
+      ]
+    },
+    "ambiguous_terms": {
+      "machine learning": [
+        "C-AI321",
+        "C-AI422"
+      ],
+      "ml": [
+        "C-AI321",
+        "C-AI422"
+      ],
+      "database": [
+        "C-DE312",
+        "C-DE413",
+        "C-DE414"
+      ],
+      "data science": [
+        "C-DE421",
+        "C-DE422"
+      ],
+      "artificial intelligence": [
+        "C-AI311",
+        "C-AI412",
+        "C-AI413"
+      ],
+      "security": [
+        "C-CS442",
+        "C-CS443",
+        "C-SW423",
+        "C-MA425"
+      ],
+      "software engineering": [
+        "C-SW312",
+        "C-SW421",
+        "C-SW422"
+      ],
+      "software design": [
+        "C-SW311",
+        "C-SW312"
+      ],
+      "programming": [
+        "C-CS111",
+        "C-CS112",
+        "C-CS219"
+      ],
+      "dsa": [
+        "C-CS213",
+        "C-CS218"
+      ],
+      "selected topics": [
+        "C-CS351",
+        "C-CS352",
+        "C-CS495",
+        "C-CS496"
+      ],
+      "crypto": [
+        "C-MA425",
+        "C-CS442",
+        "C-CS443"
+      ],
+      "graduation project": [
+        "C-GP411A",
+        "C-GP411B"
+      ],
+      "gp": [
+        "C-GP411A",
+        "C-GP411B"
+      ],
+      "ai": [
+        "C-AI311",
+        "C-AI412",
+        "C-AI413",
+        "C-AI415",
+        "C-AI321",
+        "C-AI422",
+        "C-AI424"
+      ],
+      "data": [
+        "C-DE211",
+        "C-DE312",
+        "C-DE413",
+        "C-DE414",
+        "C-DE421",
+        "C-DE422",
+        "C-DE324"
+      ],
+      "calculus": [
+        "C-MA111",
+        "C-MA112"
+      ],
+      "physics": [
+        "C-PH111",
+        "C-PH112"
+      ],
+      "cs": [
+        "C-CS351",
+        "C-CS352",
+        "C-CS495",
+        "C-CS496"
+      ],
+      "elective": [
+        "C-CS351",
+        "C-CS352",
+        "C-CS495",
+        "C-CS496",
+        "HUM125",
+        "HUM126",
+        "HUM129"
+      ],
+      "humanities": [
+        "HUM125",
+        "HUM126",
+        "HUM129"
+      ],
+      "capstone": [
+        "C-GP411A",
+        "C-GP411B"
+      ],
+      "combinatorics": [
+        "C-MA213",
+        "C-MA321"
+      ]
+    }
+  },
+  "role": {
+    "aliases": {
+      "RL_ML_Engineer": [
+        "ml engineer",
+        "machine learning engineer",
+        "mle",
+        "ml eng",
+        "machine learning eng",
+        "ml scientist",
+        "applied ml engineer"
+      ],
+      "RL_AI_Engineer": [
+        "ai engineer",
+        "artificial intelligence engineer",
+        "ai eng",
+        "ai software engineer",
+        "ai developer",
+        "applied ai engineer"
+      ],
+      "RL_NLP_Engineer": [
+        "nlp engineer",
+        "natural language processing engineer",
+        "nlp developer",
+        "nlp scientist",
+        "text engineer",
+        "language engineer",
+        "computational linguist"
+      ],
+      "RL_Computer_Vision_Engineer": [
+        "computer vision engineer",
+        "cv engineer",
+        "vision engineer",
+        "cv developer",
+        "image processing engineer",
+        "computer vision developer"
+      ],
+      "RL_Robotics_Engineer": [
+        "robotics engineer",
+        "robot engineer",
+        "robotics developer",
+        "autonomous systems engineer",
+        "embedded ai engineer",
+        "robotics software engineer"
+      ],
+      "RL_MLOps_Engineer": [
+        "mlops engineer",
+        "ml ops engineer",
+        "mlops",
+        "ml operations engineer",
+        "model deployment engineer",
+        "ai infrastructure engineer",
+        "ml platform engineer"
+      ],
+      "RL_Data_Scientist": [
+        "data scientist",
+        "applied data scientist",
+        "research scientist",
+        "data science engineer"
+      ],
+      "RL_Data_Analyst": [
+        "data analyst",
+        "da",
+        "business analyst",
+        "analytics analyst",
+        "reporting analyst",
+        "insights analyst",
+        "junior data analyst"
+      ],
+      "RL_Data_Engineer": [
+        "data engineer",
+        "de",
+        "data eng",
+        "pipeline engineer",
+        "etl engineer",
+        "data infrastructure engineer",
+        "data platform engineer"
+      ],
+      "RL_BI_Developer": [
+        "bi developer",
+        "bi dev",
+        "business intelligence developer",
+        "business intelligence",
+        "bi analyst",
+        "bi engineer",
+        "reporting developer",
+        "power bi developer",
+        "tableau developer"
+      ],
+      "RL_DB_Administrator": [
+        "dba",
+        "database administrator",
+        "db admin",
+        "database admin",
+        "db administrator",
+        "database manager",
+        "sql dba",
+        "database engineer"
+      ],
+      "RL_Software_Engineer": [
+        "software engineer",
+        "software developer",
+        "software dev",
+        "programmer",
+        "application engineer",
+        "application developer"
+      ],
+      "RL_Backend_Developer": [
+        "backend developer",
+        "backend dev",
+        "backend engineer",
+        "back end developer",
+        "back end engineer",
+        "server side developer",
+        "api developer",
+        "api engineer"
+      ],
+      "RL_Full_Stack_Developer": [
+        "full stack developer",
+        "full stack",
+        "fullstack",
+        "fullstack developer",
+        "full stack engineer",
+        "fullstack engineer",
+        "full stack dev",
+        "end to end developer"
+      ],
+      "RL_DevOps_Engineer": [
+        "devops",
+        "devops engineer",
+        "dev ops",
+        "devops dev",
+        "site reliability engineer",
+        "sre",
+        "infrastructure engineer",
+        "platform engineer",
+        "release engineer"
+      ],
+      "RL_Cloud_Engineer": [
+        "cloud engineer",
+        "cloud dev",
+        "cloud developer",
+        "aws engineer",
+        "azure engineer",
+        "gcp engineer",
+        "cloud infrastructure engineer",
+        "cloud architect",
+        "cloud specialist"
+      ],
+      "RL_QA_Engineer": [
+        "qa engineer",
+        "qa",
+        "quality assurance engineer",
+        "software tester",
+        "test engineer",
+        "qa analyst",
+        "quality engineer",
+        "automation tester",
+        "qa developer"
+      ],
+      "RL_Cybersecurity_Analyst": [
+        "cybersecurity analyst",
+        "cyber analyst",
+        "security analyst",
+        "soc analyst",
+        "information security analyst",
+        "cyber security analyst",
+        "threat analyst",
+        "infosec analyst"
+      ],
+      "RL_Penetration_Tester": [
+        "penetration tester",
+        "pentester",
+        "pen tester",
+        "ethical hacker",
+        "pen test",
+        "red team",
+        "red teamer",
+        "offensive security",
+        "bug bounty hunter",
+        "vulnerability tester"
+      ],
+      "RL_Security_Engineer": [
+        "security engineer",
+        "cybersecurity engineer",
+        "information security engineer",
+        "appsec engineer",
+        "application security engineer",
+        "devsecops engineer",
+        "cloud security engineer"
+      ]
+    },
+    "ambiguous_terms": {
+      "engineer": [
+        "RL_ML_Engineer",
+        "RL_AI_Engineer",
+        "RL_NLP_Engineer",
+        "RL_Computer_Vision_Engineer",
+        "RL_Robotics_Engineer",
+        "RL_MLOps_Engineer",
+        "RL_Software_Engineer",
+        "RL_DevOps_Engineer",
+        "RL_Cloud_Engineer",
+        "RL_QA_Engineer",
+        "RL_Security_Engineer"
+      ],
+      "developer": [
+        "RL_BI_Developer",
+        "RL_Backend_Developer",
+        "RL_Full_Stack_Developer"
+      ],
+      "data science": [
+        "RL_Data_Scientist",
+        "RL_Data_Analyst",
+        "RL_Data_Engineer"
+      ],
+      "data": [
+        "RL_Data_Scientist",
+        "RL_Data_Analyst",
+        "RL_Data_Engineer",
+        "RL_BI_Developer",
+        "RL_DB_Administrator"
+      ],
+      "analyst": [
+        "RL_Data_Analyst",
+        "RL_Cybersecurity_Analyst",
+        "RL_BI_Developer"
+      ],
+      "security": [
+        "RL_Cybersecurity_Analyst",
+        "RL_Penetration_Tester",
+        "RL_Security_Engineer"
+      ],
+      "ai": [
+        "RL_ML_Engineer",
+        "RL_AI_Engineer",
+        "RL_NLP_Engineer",
+        "RL_Computer_Vision_Engineer",
+        "RL_Robotics_Engineer",
+        "RL_MLOps_Engineer"
+      ],
+      "cloud": [
+        "RL_Cloud_Engineer",
+        "RL_DevOps_Engineer",
+        "RL_MLOps_Engineer"
+      ],
+      "ml": [
+        "RL_ML_Engineer",
+        "RL_MLOps_Engineer",
+        "RL_AI_Engineer"
+      ],
+      "backend": [
+        "RL_Backend_Developer",
+        "RL_Full_Stack_Developer"
+      ],
+      "sre": [
+        "RL_DevOps_Engineer",
+        "RL_Cloud_Engineer"
+      ],
+      "devops": [
+        "RL_DevOps_Engineer",
+        "RL_MLOps_Engineer",
+        "RL_Cloud_Engineer"
+      ],
+      "hacker": [
+        "RL_Penetration_Tester",
+        "RL_Cybersecurity_Analyst"
+      ]
+    }
+  },
+  "track": {
+    "aliases": {
+      "AI": [
+        "ai",
+        "artificial intelligence",
+        "ai track",
+        "machine learning track",
+        "deep learning track"
+      ],
+      "DSE": [
+        "dse",
+        "data science",
+        "data science and engineering",
+        "data engineering",
+        "data track",
+        "big data track"
+      ],
+      "SWE": [
+        "swe",
+        "sw",
+        "software engineering",
+        "software eng",
+        "software development",
+        "software track",
+        "dev track"
+      ],
+      "CYS": [
+        "cys",
+        "cybersecurity",
+        "cyber security",
+        "cyber",
+        "information security",
+        "security track",
+        "cysec",
+        "infosec"
+      ],
+      "GEN": [
+        "gen",
+        "general",
+        "general track",
+        "foundation",
+        "core"
+      ]
+    },
+    "ambiguous_terms": {
+      "engineering": [
+        "DSE",
+        "SWE"
+      ],
+      "security": [
+        "CYS"
+      ],
+      "data": [
+        "DSE"
+      ],
+      "software": [
+        "SWE"
+      ]
+    }
+  },
+  "skill": {
+    "aliases": {
+      "SK_Python": [
+        "python",
+        "py",
+        "python3",
+        "python programming",
+        "python language",
+        "python dev"
+      ],
+      "SK_Java": [
+        "java",
+        "java programming",
+        "java language",
+        "java dev",
+        "spring boot"
+      ],
+      "SK_CPP": [
+        "cpp",
+        "c plus plus",
+        "c plus plus programming",
+        "c++",
+        "c++ programming",
+        "c++ language"
+      ],
+      "SK_OOP": [
+        "object oriented programming",
+        "object-oriented",
+        "classes and objects",
+        "oo programming",
+        "oop"
+      ],
+      "SK_Data_Structures": [
+        "hash tables",
+        "heaps",
+        "stacks and queues",
+        "linked lists",
+        "trees and graphs",
+        "data structures",
+        "ds"
+      ],
+      "SK_Algorithms": [
+        "sorting algorithms",
+        "graph algorithms",
+        "dynamic programming",
+        "search algorithms",
+        "algorithm design",
+        "algorithm analysis",
+        "algorithms"
+      ],
+      "SK_Problem_Solving": [
+        "problem solving",
+        "algorithmic thinking",
+        "computational thinking",
+        "analytical thinking"
+      ],
+      "SK_Functional_Programming": [
+        "haskell",
+        "lambda",
+        "pure functions",
+        "functional programming",
+        "fp"
+      ],
+      "SK_Scala": [
+        "scala",
+        "scala lang"
+      ],
+      "SK_Web_Dev": [
+        "html css",
+        "web apps",
+        "web development",
+        "web dev",
+        "web programming",
+        "web design"
+      ],
+      "SK_API_Development": [
+        "api development",
+        "api design",
+        "rest api",
+        "restful api",
+        "api",
+        "rest",
+        "web api",
+        "api engineering",
+        "graphql"
+      ],
+      "SK_Frontend_Dev": [
+        "frontend",
+        "front end",
+        "frontend development",
+        "react",
+        "javascript",
+        "js",
+        "css",
+        "ui development",
+        "client side"
+      ],
+      "SK_MATLAB": [
+        "matlab",
+        "mat lab",
+        "scientific computing",
+        "matlab programming"
+      ],
+      "SK_Linear_Algebra": [
+        "matrix algebra",
+        "vectors",
+        "eigenvalues",
+        "eigenvectors",
+        "linear transformations",
+        "linear algebra"
+      ],
+      "SK_Statistics": [
+        "prob",
+        "hypothesis testing",
+        "statistical inference",
+        "statistical modeling",
+        "statistical analysis",
+        "statistics"
+      ],
+      "SK_Calculus": [
+        "calculus",
+        "calc",
+        "differentiation",
+        "integration",
+        "derivatives"
+      ],
+      "SK_ML": [
+        "ml",
+        "machine learning",
+        "supervised learning",
+        "unsupervised learning",
+        "classification",
+        "regression ml",
+        "sklearn"
+      ],
+      "SK_DL": [
+        "dl",
+        "deep learning",
+        "neural networks",
+        "deep neural networks",
+        "nn",
+        "pytorch",
+        "tensorflow",
+        "keras"
+      ],
+      "SK_NLP": [
+        "language models",
+        "transformers",
+        "bert",
+        "llm",
+        "gpt",
+        "natural language processing",
+        "nlp"
+      ],
+      "SK_Computer_Vision": [
+        "cv",
+        "image recognition",
+        "object detection",
+        "image segmentation",
+        "computer vision"
+      ],
+      "SK_Robotics": [
+        "autonomous systems",
+        "robot",
+        "ros",
+        "robotics"
+      ],
+      "SK_AI_Algorithms": [
+        "ai algorithms",
+        "ai algorithm",
+        "search algorithms",
+        "knowledge representation",
+        "inference",
+        "planning algorithms",
+        "intelligent search"
+      ],
+      "SK_SQL": [
+        "sql",
+        "structured query language",
+        "mysql",
+        "postgresql",
+        "queries",
+        "relational db",
+        "database querying"
+      ],
+      "SK_NoSQL": [
+        "nosql",
+        "no sql",
+        "nosql databases",
+        "mongodb",
+        "cassandra",
+        "document databases",
+        "non relational",
+        "key value store"
+      ],
+      "SK_Data_Modeling": [
+        "data modeling",
+        "data models",
+        "er diagram",
+        "schema design",
+        "normalization",
+        "data schema"
+      ],
+      "SK_DB_Architecture": [
+        "database architecture",
+        "db architecture",
+        "dbms internals",
+        "database optimization",
+        "query optimization",
+        "db performance"
+      ],
+      "SK_Big_Data": [
+        "apache spark",
+        "hdfs",
+        "hive",
+        "kafka",
+        "big data",
+        "distributed data processing",
+        "big data frameworks"
+      ],
+      "SK_Data_Pipelines": [
+        "data pipelines",
+        "etl",
+        "elt",
+        "airflow",
+        "pipeline engineering",
+        "data workflow",
+        "data ingestion",
+        "batch processing"
+      ],
+      "SK_Data_Analysis": [
+        "data analytics",
+        "eda",
+        "exploratory data analysis",
+        "pandas",
+        "data insights",
+        "data analysis"
+      ],
+      "SK_Data_Visualization": [
+        "data visualization",
+        "data viz",
+        "dataviz",
+        "visualization",
+        "charts",
+        "dashboards",
+        "matplotlib"
+      ],
+      "SK_BI_Tools": [
+        "bi tools",
+        "power bi",
+        "tableau",
+        "business intelligence tools",
+        "reporting tools",
+        "looker",
+        "qlik",
+        "bi software"
+      ],
+      "SK_OS": [
+        "linux",
+        "linux administration",
+        "unix",
+        "kernel",
+        "system administration",
+        "operating systems",
+        "os internals"
+      ],
+      "SK_Computer_Architecture": [
+        "memory hierarchy",
+        "pipelining",
+        "isa",
+        "cpu architecture",
+        "computer architecture",
+        "computer organization"
+      ],
+      "SK_Computer_Networks": [
+        "network protocols",
+        "dns",
+        "http",
+        "tcp ip",
+        "networking",
+        "computer networks",
+        "network architecture"
+      ],
+      "SK_Distributed_Systems": [
+        "distributed systems",
+        "distributed computing",
+        "microservices",
+        "distributed architecture",
+        "consistency",
+        "replication"
+      ],
+      "SK_Cloud_Computing": [
+        "cloud computing",
+        "cloud",
+        "aws",
+        "azure",
+        "gcp",
+        "google cloud",
+        "cloud platforms",
+        "cloud infrastructure",
+        "cloud services"
+      ],
+      "SK_Containerization": [
+        "containerization",
+        "docker",
+        "kubernetes",
+        "k8s",
+        "containers",
+        "container orchestration",
+        "devops tools"
+      ],
+      "SK_Software_Design": [
+        "software design",
+        "design patterns",
+        "software architecture",
+        "system design",
+        "uml",
+        "architectural patterns"
+      ],
+      "SK_Software_Testing": [
+        "testing",
+        "quality assurance",
+        "unit testing",
+        "test automation",
+        "selenium",
+        "test cases",
+        "test driven development",
+        "software testing"
+      ],
+      "SK_Agile": [
+        "agile",
+        "scrum",
+        "agile methodology",
+        "agile development",
+        "sprint",
+        "kanban",
+        "agile practices"
+      ],
+      "SK_Requirements_Engineering": [
+        "requirements engineering",
+        "requirements analysis",
+        "system requirements",
+        "software requirements",
+        "use cases",
+        "user stories"
+      ],
+      "SK_Version_Control": [
+        "version control",
+        "git",
+        "github",
+        "gitlab",
+        "source control",
+        "version management",
+        "git flow",
+        "branching"
+      ],
+      "SK_Network_Security": [
+        "network security",
+        "net security",
+        "firewall",
+        "ids",
+        "ips",
+        "intrusion detection",
+        "network protection"
+      ],
+      "SK_Cryptography": [
+        "cryptography",
+        "crypto",
+        "encryption",
+        "decryption",
+        "rsa",
+        "aes",
+        "public key cryptography",
+        "hashing",
+        "tls"
+      ],
+      "SK_Ethical_Hacking": [
+        "ethical hacking",
+        "pentesting",
+        "pen testing",
+        "hacking",
+        "vulnerability assessment",
+        "exploit"
+      ],
+      "SK_Secure_Software": [
+        "application security",
+        "appsec",
+        "owasp",
+        "secure design"
+      ],
+      "SK_Data_Privacy": [
+        "data privacy",
+        "privacy",
+        "gdpr",
+        "access control",
+        "data governance",
+        "compliance",
+        "information privacy"
+      ],
+      "SK_Threat_Analysis": [
+        "threat analysis",
+        "threat detection",
+        "incident response",
+        "soc",
+        "log analysis",
+        "threat hunting",
+        "security monitoring",
+        "siem"
+      ],
+      "SK_Digital_Logic": [
+        "boolean logic",
+        "logic gates",
+        "flip flops",
+        "digital circuits",
+        "combinational logic",
+        "sequential logic",
+        "digital logic design"
+      ],
+      "SK_IT_Management": [
+        "it management",
+        "it leadership"
+      ],
+      "SK_Project_Management": [
+        "project management",
+        "pm",
+        "project planning",
+        "project coordination",
+        "project delivery"
+      ],
+      "SK_Technical_Writing": [
+        "technical documentation",
+        "documentation"
+      ]
+    },
+    "ambiguous_terms": {
+      "learning": [
+        "SK_ML",
+        "SK_DL"
+      ],
+      "data": [
+        "SK_Data_Analysis",
+        "SK_Data_Visualization",
+        "SK_Data_Modeling",
+        "SK_Big_Data",
+        "SK_Data_Pipelines"
+      ],
+      "security": [
+        "SK_Network_Security",
+        "SK_Cryptography",
+        "SK_Ethical_Hacking",
+        "SK_Secure_Software",
+        "SK_Threat_Analysis"
+      ],
+      "programming": [
+        "SK_Python",
+        "SK_Java",
+        "SK_CPP",
+        "SK_Web_Dev",
+        "SK_OOP"
+      ],
+      "ai": [
+        "SK_ML",
+        "SK_DL",
+        "SK_NLP",
+        "SK_Computer_Vision",
+        "SK_Robotics",
+        "SK_AI_Algorithms"
+      ],
+      "database": [
+        "SK_SQL",
+        "SK_NoSQL",
+        "SK_DB_Architecture",
+        "SK_Data_Modeling"
+      ],
+      "cloud": [
+        "SK_Cloud_Computing",
+        "SK_Containerization",
+        "SK_Distributed_Systems"
+      ],
+      "devops": [
+        "SK_Containerization",
+        "SK_Version_Control",
+        "SK_Cloud_Computing"
+      ],
+      "testing": [
+        "SK_Software_Testing",
+        "SK_Requirements_Engineering"
+      ],
+      "math": [
+        "SK_Linear_Algebra",
+        "SK_Statistics",
+        "SK_Calculus"
+      ],
+      "networks": [
+        "SK_Computer_Networks",
+        "SK_Network_Security"
+      ],
+      "containers": [
+        "SK_Containerization",
+        "SK_Cloud_Computing"
+      ],
+      "nlp": [
+        "SK_NLP",
+        "SK_AI_Algorithms"
+      ],
+      "backend": [
+        "SK_API_Development",
+        "SK_SQL",
+        "SK_Software_Design"
+      ],
+      "design": [
+        "SK_Software_Design",
+        "SK_Requirements_Engineering"
+      ],
+      "systems": [
+        "SK_OS",
+        "SK_Distributed_Systems",
+        "SK_Computer_Architecture"
+      ]
+    }
+  }
+}

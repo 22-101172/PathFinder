@@ -1,0 +1,64 @@
+how are you?
+Can you help me choose my courses?
+What is the credit hour system?
+What is a prerequisite?
+What is the difference between GPA and CGPA?
+How is GPA calculated?
+What is the grading scale, letter grades to GPA points mapping, and percentage ranges?
+If I got 87%, what letter grade and GPA points does that match?
+If I got 49%, did I pass the course?
+What is the minimum percentage needed to pass a course?
+What happens if I get less than 30% in the final exam but my coursework is good?
+What are the attendance requirements for a course?
+What happens if I fail to meet the attendance requirement?
+What happens if I miss the final exam without an approved excuse?
+How many times can a student miss a course exam?
+When can a student receive an incomplete grade?
+What happens after a student receives an incomplete grade?
+Can a student with a previous Incomplete grade in a course register for that course as an extra course on top of their normal semester credit hour limit?
+What is the difference between dropping a course and withdrawing from a course?
+Does a withdrawn course count in GPA or CGPA?
+What happens if a student withdraws from a course after the allowed time window without an accepted excuse?
+If I drop a compulsory course, do I need to register it again before graduation?
+What are the credit limit rules per semester based on CGPA?
+What are the maximum credits I can register if my CGPA is under 2.0?
+My CGPA is 0.8. What is the maximum number of credit hours I can register?
+My CGPA is 1.5. What is the maximum number of credit hours I can register?
+My CGPA is 2.2. What is the maximum number of credit hours I can register?
+My CGPA is 3.4. What is the maximum number of credit hours I can register?
+Can I register 21 credit hours if I am in my final graduating semester?
+In the summer semester, how many courses can a student register by default?
+In the summer semester, how many courses can a high-CGPA student register, and what CGPA is required?
+In the summer semester, how many courses (not credit hours) can a student register for by default, how many courses can a student register for if their CGPA is high, and what is the CGPA threshold for the higher course limit?
+What CGPA level triggers an academic warning?
+Is the first semester exempt from academic warning?
+How many consecutive academic warnings lead to dismissal?
+How many total separate academic warnings lead to dismissal?
+What CGPA level triggers an academic warning? Is the first semester of study exempt from receiving an academic warning? How many consecutive academic warnings and how many total academic warnings result in program dismissal?
+What are the conditions and extension terms for students appealing program dismissal, including what percentage of total program credit hours must be passed, and how many extra regular semesters and extra summer semesters are granted on a successful appeal?
+What happens if a student does not register in a regular semester without an approved excuse?
+How many approved leave semesters can a student take?
+Do approved study leaves count toward the maximum allowed graduation semesters?
+What are the graduation requirements?
+What are the graduation requirements: total credit hours required, minimum CGPA at graduation, and minimum number of regular Fall/Spring semesters needed to graduate?
+What is the maximum number of regular fall and spring semesters a student is allowed before being dismissed from the program for failing to graduate?
+What are the credit hour thresholds for student levels (Freshman, Sophomore, Junior, Senior)?
+What do I need to qualify for honors?
+What are the requirements for honors?
+Can a student graduate with honors if they failed a course before?
+Can a student graduate with honors if they had disciplinary penalties?
+What are the rules for retaking failed courses?
+What is the maximum grade for the first failed-course retake?
+What happens if a student misses a retake exam without an approved excuse?
+What are the rules for improving a passed course grade?
+How many improve-retake courses are allowed if CGPA is at least 2.0?
+Is there a limit on retaking courses if CGPA is below 2.0?
+What are the rules for retaking failed courses and improving passed course grades, including grade caps, maximum number of improve-retake courses for students with CGPA at or above 2.0, and the rule for students below 2.0 CGPA?
+When can a student appeal a grade?
+What condition must be satisfied before issuing a grade appeal?
+Does the handbook explain which course I should drop to improve my GPA?
+Does the handbook describe requirements for an AI minor?
+Does the handbook provide a formula to predict my future GPA?
+Does the handbook say I can register for courses in another faculty if there is a schedule conflict?
+Can the handbook tell me what job I should choose after graduation?
+Can the handbook decide whether I should take Advanced Programming next semester?
